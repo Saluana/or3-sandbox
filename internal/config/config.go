@@ -7,7 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +46,12 @@ type Config struct {
 	OperatorHost           string
 	Tenants                []TenantConfig
 	OptionalSnapshotExport string
+	QEMUBinary             string
+	QEMUAccel              string
+	QEMUBaseImagePath      string
+	QEMUSSHUser            string
+	QEMUSSHPrivateKeyPath  string
+	QEMUBootTimeout        time.Duration
 }
 
 func Load(args []string) (Config, error) {
@@ -55,6 +63,11 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.SnapshotRoot, "snapshot-root", env("SANDBOX_SNAPSHOT_ROOT", "./data/snapshots"), "snapshot root")
 	fs.StringVar(&cfg.BaseImageRef, "base-image", env("SANDBOX_BASE_IMAGE", "mcr.microsoft.com/playwright:v1.51.1-noble"), "default base image")
 	fs.StringVar(&cfg.RuntimeBackend, "runtime", env("SANDBOX_RUNTIME", "docker"), "runtime backend")
+	fs.StringVar(&cfg.QEMUBinary, "qemu-binary", env("SANDBOX_QEMU_BINARY", defaultQEMUBinary()), "qemu system binary")
+	fs.StringVar(&cfg.QEMUAccel, "qemu-accel", env("SANDBOX_QEMU_ACCEL", "auto"), "qemu accelerator selection")
+	fs.StringVar(&cfg.QEMUBaseImagePath, "qemu-base-image-path", env("SANDBOX_QEMU_BASE_IMAGE_PATH", ""), "qemu base guest image path")
+	fs.StringVar(&cfg.QEMUSSHUser, "qemu-ssh-user", env("SANDBOX_QEMU_SSH_USER", ""), "qemu guest ssh user")
+	fs.StringVar(&cfg.QEMUSSHPrivateKeyPath, "qemu-ssh-private-key", env("SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH", ""), "qemu guest ssh private key path")
 	trustedDockerRuntime := env("SANDBOX_TRUSTED_DOCKER_RUNTIME", "false")
 	fs.IntVar(&cfg.DefaultCPULimit, "default-cpu", envInt("SANDBOX_DEFAULT_CPU", 2), "default cpu limit")
 	fs.IntVar(&cfg.DefaultMemoryLimitMB, "default-memory-mb", envInt("SANDBOX_DEFAULT_MEMORY_MB", 2048), "default memory limit")
@@ -65,6 +78,7 @@ func Load(args []string) (Config, error) {
 	fs.DurationVar(&cfg.GracefulShutdown, "shutdown-timeout", envDuration("SANDBOX_SHUTDOWN_TIMEOUT", 15*time.Second), "graceful shutdown timeout")
 	fs.DurationVar(&cfg.ReconcileInterval, "reconcile-interval", envDuration("SANDBOX_RECONCILE_INTERVAL", 30*time.Second), "reconcile interval")
 	fs.DurationVar(&cfg.CleanupInterval, "cleanup-interval", envDuration("SANDBOX_CLEANUP_INTERVAL", 5*time.Minute), "cleanup interval")
+	fs.DurationVar(&cfg.QEMUBootTimeout, "qemu-boot-timeout", envDuration("SANDBOX_QEMU_BOOT_TIMEOUT", 2*time.Minute), "qemu guest boot timeout")
 	fs.StringVar(&cfg.OperatorHost, "operator-host", env("SANDBOX_OPERATOR_HOST", "http://127.0.0.1:8080"), "public control plane host")
 	networkMode := env("SANDBOX_DEFAULT_NETWORK_MODE", string(model.NetworkModeInternetEnabled))
 	allowTunnels := env("SANDBOX_DEFAULT_ALLOW_TUNNELS", "true")
@@ -108,11 +122,8 @@ func (c Config) Validate() error {
 	if c.BaseImageRef == "" {
 		problems = append(problems, "base image reference is required")
 	}
-	if c.RuntimeBackend != "docker" {
-		problems = append(problems, fmt.Sprintf("unsupported runtime backend %q", c.RuntimeBackend))
-	}
-	if c.RuntimeBackend == "docker" && !c.TrustedDockerRuntime {
-		problems = append(problems, "docker runtime requires SANDBOX_TRUSTED_DOCKER_RUNTIME=true because it is shared-kernel and not a production multi-tenant boundary")
+	if err := validateRuntimeConfig(c, defaultRuntimeValidationProbe()); err != nil {
+		problems = append(problems, err.Error())
 	}
 	if c.DefaultNetworkMode != model.NetworkModeInternetEnabled && c.DefaultNetworkMode != model.NetworkModeInternetDisabled {
 		problems = append(problems, fmt.Sprintf("unsupported default network mode %q", c.DefaultNetworkMode))
@@ -130,6 +141,153 @@ func (c Config) Validate() error {
 	}
 	if len(problems) > 0 {
 		return errors.New(strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+type runtimeValidationProbe struct {
+	goos         string
+	commandExists func(string) error
+	fileReadable func(string) error
+	kvmAvailable func() error
+	hvfAvailable func() error
+}
+
+func defaultRuntimeValidationProbe() runtimeValidationProbe {
+	return runtimeValidationProbe{
+		goos: goruntime.GOOS,
+		commandExists: requireCommand,
+		fileReadable: requireReadableFile,
+		kvmAvailable: requireKVM,
+		hvfAvailable: requireHVF,
+	}
+}
+
+func validateRuntimeConfig(c Config, probe runtimeValidationProbe) error {
+	switch c.RuntimeBackend {
+	case "docker":
+		if !c.TrustedDockerRuntime {
+			return errors.New("docker runtime requires SANDBOX_TRUSTED_DOCKER_RUNTIME=true because it is shared-kernel and not a production multi-tenant boundary")
+		}
+		return nil
+	case "qemu":
+		return validateQEMUConfig(c, probe)
+	default:
+		return fmt.Errorf("unsupported runtime backend %q", c.RuntimeBackend)
+	}
+}
+
+func validateQEMUConfig(c Config, probe runtimeValidationProbe) error {
+	accel, err := resolveQEMUAccel(c.QEMUAccel, probe.goos)
+	if err != nil {
+		return err
+	}
+	if c.QEMUBootTimeout <= 0 {
+		return errors.New("qemu runtime requires SANDBOX_QEMU_BOOT_TIMEOUT to be a positive duration")
+	}
+	if strings.TrimSpace(c.QEMUBaseImagePath) == "" {
+		return errors.New("qemu runtime requires SANDBOX_QEMU_BASE_IMAGE_PATH")
+	}
+	if strings.TrimSpace(c.QEMUSSHUser) == "" {
+		return errors.New("qemu runtime requires SANDBOX_QEMU_SSH_USER")
+	}
+	if strings.TrimSpace(c.QEMUSSHPrivateKeyPath) == "" {
+		return errors.New("qemu runtime requires SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH")
+	}
+	if err := probe.commandExists(c.QEMUBinary); err != nil {
+		return fmt.Errorf("qemu runtime requires a working QEMU binary: %w", err)
+	}
+	if err := probe.fileReadable(c.QEMUBaseImagePath); err != nil {
+		return fmt.Errorf("qemu runtime base image path is not readable: %w", err)
+	}
+	if err := probe.fileReadable(c.QEMUSSHPrivateKeyPath); err != nil {
+		return fmt.Errorf("qemu runtime ssh private key is not readable: %w", err)
+	}
+	switch accel {
+	case "kvm":
+		if err := probe.kvmAvailable(); err != nil {
+			return fmt.Errorf("qemu runtime requires KVM support on Linux hosts: %w", err)
+		}
+	case "hvf":
+		if err := probe.hvfAvailable(); err != nil {
+			return fmt.Errorf("qemu runtime requires HVF support on macOS hosts: %w", err)
+		}
+	}
+	return nil
+}
+
+func resolveQEMUAccel(value, goos string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "auto":
+		switch goos {
+		case "linux":
+			return "kvm", nil
+		case "darwin":
+			return "hvf", nil
+		default:
+			return "", fmt.Errorf("qemu runtime is unsupported on host OS %q", goos)
+		}
+	case "kvm":
+		if goos != "linux" {
+			return "", fmt.Errorf("qemu accel %q is unsupported on host OS %q", value, goos)
+		}
+		return "kvm", nil
+	case "hvf":
+		if goos != "darwin" {
+			return "", fmt.Errorf("qemu accel %q is unsupported on host OS %q", value, goos)
+		}
+		return "hvf", nil
+	default:
+		return "", fmt.Errorf("unsupported qemu accelerator %q", value)
+	}
+}
+
+func defaultQEMUBinary() string {
+	switch goruntime.GOARCH {
+	case "arm64":
+		return "qemu-system-aarch64"
+	default:
+		return "qemu-system-x86_64"
+	}
+}
+
+func requireCommand(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return errors.New("command path is empty")
+	}
+	if filepath.IsAbs(name) || strings.ContainsRune(name, os.PathSeparator) {
+		return requireReadableFile(name)
+	}
+	_, err := exec.LookPath(name)
+	return err
+}
+
+func requireReadableFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s is a directory", path)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	return file.Close()
+}
+
+func requireKVM() error {
+	return requireReadableFile("/dev/kvm")
+}
+
+func requireHVF() error {
+	output, err := exec.Command("sysctl", "-n", "kern.hv_support").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	}
+	if strings.TrimSpace(string(output)) != "1" {
+		return fmt.Errorf("kern.hv_support=%s", strings.TrimSpace(string(output)))
 	}
 	return nil
 }

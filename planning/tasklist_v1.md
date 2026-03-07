@@ -18,6 +18,9 @@ Priority labels:
 - [x] Document required Linux host capabilities and operational assumptions for that runtime.
 - [x] Mark host-native sandbox execution as trusted-development-only or explicitly deferred from v1.
 
+Status note:
+The design decision was made, but the guest-backed production backend is not implemented in the current repository. The shipped runtime is still Docker-backed trusted mode.
+
 ### P0-2. Finalize the sandbox contract
 
 - [x] Freeze lifecycle states: `creating`, `stopped`, `starting`, `running`, `suspending`, `suspended`, `stopping`, `deleting`, `deleted`, and `error`.
@@ -78,7 +81,7 @@ Priority labels:
 - [x] Allocate persistent storage and network resources.
 - [x] Materialize the guest from the base image.
 - [x] Apply limits and network policy.
-- [x] Boot the guest and run bootstrap.
+- [ ] Boot the guest and run bootstrap.
 - [x] Persist status transitions and last-known runtime state.
 
 ## 5. Phase 3: storage, files, and snapshots
@@ -174,9 +177,12 @@ Priority labels:
 
 ### P0-21. Support a guest-local container engine
 
-- [x] Install and configure Docker-in-Docker or an equivalent guest-local engine.
+- [ ] Install and configure Docker-in-Docker or an equivalent guest-local engine.
 - [x] Ensure the host container runtime socket is never exposed.
 - [ ] Ensure inner-engine storage counts toward sandbox quota.
+
+Status note:
+The current base image installs `docker.io`, but the guest-backed runtime path, inner-engine bootstrap, and end-to-end guest-local engine verification are still open.
 
 ### P0-22. Verify browser automation support
 
@@ -286,3 +292,10 @@ Priority labels:
 - [ ] Tunnels are explicit, auditable, and revocable.
 - [ ] The host and other tenants remain isolated.
 - [ ] The system is usable through both the HTTP API and CLI.
+
+See also:
+
+- `planning/whats_left.md`
+- `planning/tasks2.md`
+- `planning/onwards/status_matrix.md`
+- `planning/onwards/tasks.md`

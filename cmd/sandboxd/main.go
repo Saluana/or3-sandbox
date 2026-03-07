@@ -15,7 +15,9 @@ import (
 	"or3-sandbox/internal/config"
 	"or3-sandbox/internal/db"
 	"or3-sandbox/internal/logging"
+	"or3-sandbox/internal/model"
 	runtimedocker "or3-sandbox/internal/runtime/docker"
+	runtimeqemu "or3-sandbox/internal/runtime/qemu"
 	"or3-sandbox/internal/service"
 	"or3-sandbox/internal/repository"
 )
@@ -42,7 +44,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	runtime := runtimedocker.New()
+	runtime, err := buildRuntime(cfg)
+	if err != nil {
+		log.Error("configure runtime", "error", err, "runtime", cfg.RuntimeBackend)
+		os.Exit(1)
+	}
 	svc := service.New(cfg, store, runtime)
 	if err := svc.Reconcile(ctx); err != nil {
 		log.Error("initial reconcile failed", "error", err)
@@ -69,6 +75,24 @@ func main() {
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Error("shutdown failed", "error", err)
+	}
+}
+
+func buildRuntime(cfg config.Config) (model.RuntimeManager, error) {
+	switch cfg.RuntimeBackend {
+	case "docker":
+		return runtimedocker.New(), nil
+	case "qemu":
+		return runtimeqemu.New(runtimeqemu.Options{
+			Binary:        cfg.QEMUBinary,
+			Accel:         cfg.QEMUAccel,
+			BaseImagePath: cfg.QEMUBaseImagePath,
+			SSHUser:       cfg.QEMUSSHUser,
+			SSHKeyPath:    cfg.QEMUSSHPrivateKeyPath,
+			BootTimeout:   cfg.QEMUBootTimeout,
+		})
+	default:
+		return nil, errors.New("unsupported runtime backend")
 	}
 }
 

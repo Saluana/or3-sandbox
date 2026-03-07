@@ -2,16 +2,32 @@
 
 Single-node sandbox control plane for durable tenant environments.
 
+Current status:
+
+- shipped today: trusted Docker-backed control plane for development or single-operator use
+- planned next: guest-backed `qemu` runtime for production-aligned multi-tenant isolation
+
+The current Docker backend is not the hostile multi-tenant production boundary described by the architecture docs. That production path is still being implemented behind the existing runtime abstraction.
+
 The repository ships:
 
 - `sandboxd`: Go HTTP daemon with SQLite metadata, bearer-token tenancy, quotas, lifecycle orchestration, file APIs, exec streaming, PTY attach, tunnels, snapshots, and restart reconciliation
 - `sandboxctl`: CLI for lifecycle, exec, TTY, file transfer, and tunnel management
-- Docker-backed runtime implementation for durable per-sandbox environments with isolated networks and persistent workspace mounts
+- Docker-backed runtime implementation for durable per-sandbox environments with isolated networks and persistent workspace mounts in trusted or development mode
 - integration tests that exercise lifecycle, ownership, snapshots, tunnels, detached workloads, and quota enforcement
+
+See also:
+
+- `planning/whats_left.md`
+- `planning/tasks2.md`
+- `planning/onwards/requirements.md`
+- `planning/onwards/design.md`
+- `planning/onwards/tasks.md`
+- `planning/onwards/status_matrix.md`
 
 ## Quick Start
 
-Requirements:
+Requirements for the shipped trusted Docker path:
 
 - Go 1.26+
 - Docker
@@ -60,6 +76,17 @@ SANDBOX_TOKENS=token-a=tenant-a,token-b=tenant-b
 - `internet-disabled` sandboxes run with Docker `--network none`.
 - Tunnels are explicit daemon-managed proxy endpoints; containers do not publish host ports directly.
 - Snapshots combine a committed container image with a workspace tarball.
+- The daemon requires `SANDBOX_TRUSTED_DOCKER_RUNTIME=true` when `SANDBOX_RUNTIME=docker` because Docker is treated as a shared-kernel trusted mode, not a production hostile multi-tenant boundary.
+
+## Production Roadmap Notes
+
+The active next-step design work is focused on:
+
+- a guest-backed `qemu` runtime selected through the existing runtime abstraction
+- guest bootstrap and readiness checks before a sandbox is marked `running`
+- real storage boundaries instead of requested-size bookkeeping alone
+- workload verification for Git, package persistence, browser automation, and guest-local containers
+- recovery drills for boot failure, disk-full behavior, snapshot failure, and restart during exec
 
 ## Tests
 
