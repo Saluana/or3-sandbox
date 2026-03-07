@@ -70,6 +70,13 @@ type SnapshotInfo struct {
 	WorkspaceTar string
 }
 
+type StorageUsage struct {
+	RootfsBytes    int64
+	WorkspaceBytes int64
+	CacheBytes     int64
+	SnapshotBytes  int64
+}
+
 type RuntimeManager interface {
 	Create(ctx context.Context, spec SandboxSpec) (RuntimeState, error)
 	Start(ctx context.Context, sandbox Sandbox) (RuntimeState, error)

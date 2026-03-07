@@ -19,19 +19,29 @@ func newID(prefix string) string {
 }
 
 func resolveWorkspacePath(root, requested string) (string, error) {
-	if requested == "" || requested == "/" {
-		return root, nil
-	}
-	cleaned := filepath.Clean("/" + requested)
-	target := filepath.Join(root, cleaned)
-	rel, err := filepath.Rel(root, target)
+	relativePath, err := cleanWorkspaceRelativePath(requested)
 	if err != nil {
 		return "", err
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if relativePath == "" {
+		return root, nil
+	}
+	return filepath.Join(root, relativePath), nil
+}
+
+func cleanWorkspaceRelativePath(requested string) (string, error) {
+	trimmed := strings.TrimLeft(requested, string(filepath.Separator))
+	if trimmed == "" {
+		return "", nil
+	}
+	cleaned := filepath.Clean(trimmed)
+	if cleaned == "." {
+		return "", nil
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("path escapes workspace")
 	}
-	return target, nil
+	return cleaned, nil
 }
 
 type boundedBuffer struct {

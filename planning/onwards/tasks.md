@@ -20,34 +20,34 @@
 - [x] (R2, R3, R4) Create `internal/runtime/qemu/runtime.go` implementing `model.RuntimeManager`.
 - [x] (R2, R3) Add host-acceleration selection inside the QEMU runtime so one backend works on Linux and macOS without OS-specific forks.
 - [x] (R3) Add helper code in `internal/runtime/qemu/` for sandbox filesystem layout, writable system-disk creation, workspace-disk creation, and runtime-artifact paths.
-- [ ] (R3, R4) Add bounded boot and readiness logic that waits for SSH connectivity and a guest bootstrap-ready marker before reporting `running`.
-- [ ] (R3) Implement `Create`, `Start`, `Stop`, `Destroy`, and `Inspect` first, reusing the same lifecycle semantics already used by `internal/service/service.go`.
-- [ ] (R3) Decide and document first-pass `Suspend` and `Resume` behavior; either implement safely or return an explicit unsupported error with tests.
-- [ ] (R3) Add focused unit tests in `internal/runtime/qemu/` for command assembly, readiness timeout, and runtime-state parsing.
+- [x] (R3, R4) Add bounded boot and readiness logic that waits for SSH connectivity and a guest bootstrap-ready marker before reporting `running`.
+- [x] (R3) Implement `Create`, `Start`, `Stop`, `Destroy`, and `Inspect` first, reusing the same lifecycle semantics already used by `internal/service/service.go`.
+- [x] (R3) Decide and document first-pass `Suspend` and `Resume` behavior; either implement safely or return an explicit unsupported error with tests.
+- [x] (R3) Add focused unit tests in `internal/runtime/qemu/` for command assembly, readiness timeout, and runtime-state parsing.
 
 ## 4. Bootstrap a durable guest image
 
-- [ ] (R3, R7) Add a minimal guest-image build or preparation path under `images/guest/` instead of expanding the existing Docker-only image path.
-- [ ] (R4, R7) Ensure the guest image or first-boot bootstrap provides: SSH server, mounted `/workspace`, Git, Python, Node or npm, browser dependencies, and a guest-local container engine.
-- [ ] (R4, R7) Choose and document a lightweight guest init or supervision mechanism that is sufficient for restart semantics without adding a large system-management stack.
-- [ ] (R4) Keep guest access key material operator-provided and outside SQLite; document where it lives and how the daemon reads it.
-- [ ] (R7) Add a smoke script under `images/guest/` or `internal/runtime/qemu/testdata/` that proves the image can boot and accept SSH before it is used by integration tests.
+- [x] (R3, R7) Add a minimal guest-image build or preparation path under `images/guest/` instead of expanding the existing Docker-only image path.
+- [x] (R4, R7) Ensure the guest image or first-boot bootstrap provides: SSH server, mounted `/workspace`, Git, Python, Node or npm, browser dependencies, and a guest-local container engine.
+- [x] (R4, R7) Choose and document a lightweight guest init or supervision mechanism that is sufficient for restart semantics without adding a large system-management stack.
+- [x] (R4) Keep guest access key material operator-provided and outside SQLite; document where it lives and how the daemon reads it.
+- [x] (R7) Add a smoke script under `images/guest/` or `internal/runtime/qemu/testdata/` that proves the image can boot and accept SSH before it is used by integration tests.
 
 ## 5. Route runtime interactions through the guest boundary
 
-- [ ] (R4) Implement `Exec` in `internal/runtime/qemu/` via SSH with the same timeout and bounded-output expectations already enforced in the service layer.
-- [ ] (R4) Implement `AttachTTY` via SSH PTY allocation and verify resize handling remains compatible with the current WebSocket bridge.
-- [ ] (R4) Refactor file operations in `internal/service/service.go` and any helper code they use so the QEMU backend performs guest-scoped reads and writes over SSH-based transfer instead of direct host filesystem access.
-- [ ] (R4) Keep Docker file behavior unchanged for the trusted backend while avoiding backend-specific leaks into API handlers.
-- [ ] (R4) Add regression tests that prove cross-tenant file isolation and path validation still hold for both backends.
+- [x] (R4) Implement `Exec` in `internal/runtime/qemu/` via SSH with the same timeout and bounded-output expectations already enforced in the service layer.
+- [x] (R4) Implement `AttachTTY` via SSH PTY allocation and verify resize handling remains compatible with the current WebSocket bridge.
+- [x] (R4) Refactor file operations in `internal/service/service.go` and any helper code they use so the QEMU backend performs guest-scoped reads and writes over SSH-based transfer instead of direct host filesystem access.
+- [x] (R4) Keep Docker file behavior unchanged for the trusted backend while avoiding backend-specific leaks into API handlers.
+- [x] (R4) Add regression tests that prove cross-tenant file isolation and path validation still hold for both backends.
 
 ## 6. Make storage limits real
 
-- [ ] (R5) Define a simple disk split policy for the guest backend, for example root disk plus workspace disk derived from `disk_limit_mb`, and document the operator-visible behavior.
-- [ ] (R5) Ensure guest-local container engine storage lives inside quota-bounded guest disks rather than in separate untracked host storage.
-- [ ] (R5) Add storage measurement helpers in `internal/runtime/qemu/` and call `repository.UpdateStorageUsage` with actual measured bytes after create, stop, snapshot, restore, and reconciliation.
-- [ ] (R5) Update quota-related logic in `internal/service/service.go` and `internal/repository/store.go` only as needed so operator views can show measured storage in addition to requested storage.
-- [ ] (R5) Add Linux and macOS host coverage for disk-full behavior and for workspace persistence after stop and start.
+- [x] (R5) Define a simple disk split policy for the guest backend, for example root disk plus workspace disk derived from `disk_limit_mb`, and document the operator-visible behavior.
+- [x] (R5) Ensure guest-local container engine storage lives inside quota-bounded guest disks rather than in separate untracked host storage.
+- [x] (R5) Add storage measurement helpers in `internal/runtime/qemu/` and call `repository.UpdateStorageUsage` with actual measured bytes after create, stop, snapshot, restore, and reconciliation.
+- [x] (R5) Update quota-related logic in `internal/service/service.go` and `internal/repository/store.go` only as needed so operator views can show measured storage in addition to requested storage.
+- [x] (R5) Add Linux and macOS host coverage for disk-full behavior and for workspace persistence after stop and start.
 
 ## 7. Preserve the network and tunnel contract
 

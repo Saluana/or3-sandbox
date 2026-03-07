@@ -26,9 +26,20 @@ type Service struct {
 	runtime model.RuntimeManager
 }
 
+type workspaceFileRuntime interface {
+	ReadWorkspaceFile(ctx context.Context, sandbox model.Sandbox, relativePath string) (model.FileReadResponse, error)
+	WriteWorkspaceFile(ctx context.Context, sandbox model.Sandbox, relativePath string, content string) error
+	DeleteWorkspacePath(ctx context.Context, sandbox model.Sandbox, relativePath string) error
+	MkdirWorkspace(ctx context.Context, sandbox model.Sandbox, relativePath string) error
+}
+
+type storageMeasurer interface {
+	MeasureStorage(ctx context.Context, sandbox model.Sandbox) (model.StorageUsage, error)
+}
+
 type TenantQuotaView struct {
-	Quota model.TenantQuota       `json:"quota"`
-	Usage repository.TenantUsage  `json:"usage"`
+	Quota model.TenantQuota      `json:"quota"`
+	Usage repository.TenantUsage `json:"usage"`
 }
 
 func New(cfg config.Config, store *repository.Store, runtime model.RuntimeManager) *Service {
@@ -59,25 +70,25 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 	}
 	now := time.Now().UTC()
 	sandbox := model.Sandbox{
-		ID:            id,
-		TenantID:      tenant.ID,
-		Status:        model.SandboxStatusCreating,
+		ID:             id,
+		TenantID:       tenant.ID,
+		Status:         model.SandboxStatusCreating,
 		RuntimeBackend: s.cfg.RuntimeBackend,
-		BaseImageRef:  req.BaseImageRef,
-		CPULimit:      req.CPULimit,
-		MemoryLimitMB: req.MemoryLimitMB,
-		PIDsLimit:     req.PIDsLimit,
-		DiskLimitMB:   req.DiskLimitMB,
-		NetworkMode:   req.NetworkMode,
-		AllowTunnels:  *req.AllowTunnels,
-		StorageRoot:   storageRoot,
-		WorkspaceRoot: workspaceRoot,
-		CacheRoot:     cacheRoot,
-		RuntimeID:     id,
-		RuntimeStatus: string(model.SandboxStatusCreating),
-		CreatedAt:     now,
-		UpdatedAt:     now,
-		LastActiveAt:  now,
+		BaseImageRef:   req.BaseImageRef,
+		CPULimit:       req.CPULimit,
+		MemoryLimitMB:  req.MemoryLimitMB,
+		PIDsLimit:      req.PIDsLimit,
+		DiskLimitMB:    req.DiskLimitMB,
+		NetworkMode:    req.NetworkMode,
+		AllowTunnels:   *req.AllowTunnels,
+		StorageRoot:    storageRoot,
+		WorkspaceRoot:  workspaceRoot,
+		CacheRoot:      cacheRoot,
+		RuntimeID:      id,
+		RuntimeStatus:  string(model.SandboxStatusCreating),
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		LastActiveAt:   now,
 	}
 	if err := s.store.CreateSandbox(ctx, sandbox); err != nil {
 		return model.Sandbox{}, err
@@ -126,6 +137,9 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		return model.Sandbox{}, err
 	}
 	if err := s.store.UpdateRuntimeState(ctx, sandbox.ID, state); err != nil {
+		return model.Sandbox{}, err
+	}
+	if err := s.refreshStorage(ctx, sandbox); err != nil {
 		return model.Sandbox{}, err
 	}
 	s.recordAudit(ctx, tenant.ID, sandbox.ID, "sandbox.create", sandbox.ID, "ok", "sandbox created")
@@ -190,6 +204,9 @@ func (s *Service) StopSandbox(ctx context.Context, tenantID, sandboxID string, f
 		return model.Sandbox{}, err
 	}
 	if err := s.store.UpdateRuntimeState(ctx, sandbox.ID, state); err != nil {
+		return model.Sandbox{}, err
+	}
+	if err := s.refreshStorage(ctx, sandbox); err != nil {
 		return model.Sandbox{}, err
 	}
 	s.recordAudit(ctx, tenantID, sandbox.ID, "sandbox.stop", sandbox.ID, "ok", "sandbox stopped")
@@ -394,7 +411,14 @@ func (s *Service) ReadFile(ctx context.Context, tenantID, sandboxID, path string
 	if err != nil {
 		return model.FileReadResponse{}, err
 	}
-	target, err := resolveWorkspacePath(sandbox.WorkspaceRoot, path)
+	relativePath, err := cleanWorkspaceRelativePath(path)
+	if err != nil {
+		return model.FileReadResponse{}, err
+	}
+	if runtime, ok := s.runtime.(workspaceFileRuntime); ok {
+		return runtime.ReadWorkspaceFile(ctx, sandbox, relativePath)
+	}
+	target, err := resolveWorkspacePath(sandbox.WorkspaceRoot, relativePath)
 	if err != nil {
 		return model.FileReadResponse{}, err
 	}
@@ -402,7 +426,7 @@ func (s *Service) ReadFile(ctx context.Context, tenantID, sandboxID, path string
 	if err != nil {
 		return model.FileReadResponse{}, err
 	}
-	return model.FileReadResponse{Path: path, Content: string(data), Size: int64(len(data)), Encoding: "utf-8"}, nil
+	return model.FileReadResponse{Path: relativePath, Content: string(data), Size: int64(len(data)), Encoding: "utf-8"}, nil
 }
 
 func (s *Service) WriteFile(ctx context.Context, tenantID, sandboxID, path string, content string) error {
@@ -410,17 +434,27 @@ func (s *Service) WriteFile(ctx context.Context, tenantID, sandboxID, path strin
 	if err != nil {
 		return err
 	}
-	target, err := resolveWorkspacePath(sandbox.WorkspaceRoot, path)
+	relativePath, err := cleanWorkspaceRelativePath(path)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return err
+	if runtime, ok := s.runtime.(workspaceFileRuntime); ok {
+		if err := runtime.WriteWorkspaceFile(ctx, sandbox, relativePath, content); err != nil {
+			return err
+		}
+	} else {
+		target, err := resolveWorkspacePath(sandbox.WorkspaceRoot, relativePath)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+			return err
+		}
 	}
-	if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
-		return err
-	}
-	s.recordAudit(ctx, tenantID, sandboxID, "file.write", path, "ok", "file written")
+	s.recordAudit(ctx, tenantID, sandboxID, "file.write", relativePath, "ok", "file written")
 	return s.refreshStorage(ctx, sandbox)
 }
 
@@ -429,14 +463,24 @@ func (s *Service) DeleteFile(ctx context.Context, tenantID, sandboxID, path stri
 	if err != nil {
 		return err
 	}
-	target, err := resolveWorkspacePath(sandbox.WorkspaceRoot, path)
+	relativePath, err := cleanWorkspaceRelativePath(path)
 	if err != nil {
 		return err
 	}
-	if err := os.RemoveAll(target); err != nil {
-		return err
+	if runtime, ok := s.runtime.(workspaceFileRuntime); ok {
+		if err := runtime.DeleteWorkspacePath(ctx, sandbox, relativePath); err != nil {
+			return err
+		}
+	} else {
+		target, err := resolveWorkspacePath(sandbox.WorkspaceRoot, relativePath)
+		if err != nil {
+			return err
+		}
+		if err := os.RemoveAll(target); err != nil {
+			return err
+		}
 	}
-	s.recordAudit(ctx, tenantID, sandboxID, "file.delete", path, "ok", "path deleted")
+	s.recordAudit(ctx, tenantID, sandboxID, "file.delete", relativePath, "ok", "path deleted")
 	return s.refreshStorage(ctx, sandbox)
 }
 
@@ -445,14 +489,24 @@ func (s *Service) Mkdir(ctx context.Context, tenantID, sandboxID, path string) e
 	if err != nil {
 		return err
 	}
-	target, err := resolveWorkspacePath(sandbox.WorkspaceRoot, path)
+	relativePath, err := cleanWorkspaceRelativePath(path)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(target, 0o755); err != nil {
-		return err
+	if runtime, ok := s.runtime.(workspaceFileRuntime); ok {
+		if err := runtime.MkdirWorkspace(ctx, sandbox, relativePath); err != nil {
+			return err
+		}
+	} else {
+		target, err := resolveWorkspacePath(sandbox.WorkspaceRoot, relativePath)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return err
+		}
 	}
-	s.recordAudit(ctx, tenantID, sandboxID, "file.mkdir", path, "ok", "directory created")
+	s.recordAudit(ctx, tenantID, sandboxID, "file.mkdir", relativePath, "ok", "directory created")
 	return s.refreshStorage(ctx, sandbox)
 }
 
@@ -593,17 +647,35 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 		_ = s.store.UpdateSnapshot(ctx, snapshot)
 		return model.Snapshot{}, err
 	}
-	snapshot.ImageRef = info.ImageRef
 	snapshotDir := filepath.Join(s.cfg.SnapshotRoot, sandbox.ID, snapshot.ID)
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		return model.Snapshot{}, err
 	}
+	if info.ImageRef != "" {
+		targetImage := filepath.Join(snapshotDir, "rootfs.img")
+		if info.ImageRef != targetImage {
+			if err := copyFile(targetImage, info.ImageRef); err != nil {
+				return model.Snapshot{}, err
+			}
+		}
+		snapshot.ImageRef = targetImage
+		if info.ImageRef != targetImage {
+			_ = os.Remove(info.ImageRef)
+		}
+	} else {
+		snapshot.ImageRef = info.ImageRef
+	}
 	if info.WorkspaceTar != "" {
-		targetTar := filepath.Join(snapshotDir, "workspace.tar.gz")
-		if err := copyFile(targetTar, info.WorkspaceTar); err != nil {
-			return model.Snapshot{}, err
+		targetTar := filepath.Join(snapshotDir, "workspace.img")
+		if info.WorkspaceTar != targetTar {
+			if err := copyFile(targetTar, info.WorkspaceTar); err != nil {
+				return model.Snapshot{}, err
+			}
 		}
 		snapshot.WorkspaceTar = targetTar
+		if info.WorkspaceTar != targetTar {
+			_ = os.Remove(info.WorkspaceTar)
+		}
 	} else {
 		snapshot.WorkspaceTar = info.WorkspaceTar
 	}
@@ -618,6 +690,9 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 		}
 	}
 	if err := s.store.UpdateSnapshot(ctx, snapshot); err != nil {
+		return model.Snapshot{}, err
+	}
+	if err := s.refreshStorage(ctx, sandbox); err != nil {
 		return model.Snapshot{}, err
 	}
 	s.recordAudit(ctx, tenantID, sandboxID, "snapshot.create", snapshot.ID, "ok", snapshot.Name)
@@ -653,6 +728,9 @@ func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID stri
 	if err := s.store.UpdateRuntimeState(ctx, sandbox.ID, state); err != nil {
 		return model.Sandbox{}, err
 	}
+	if err := s.refreshStorage(ctx, sandbox); err != nil {
+		return model.Sandbox{}, err
+	}
 	s.recordAudit(ctx, tenantID, sandbox.ID, "snapshot.restore", snapshot.ID, "ok", snapshot.Name)
 	return s.store.GetSandbox(ctx, tenantID, sandbox.ID)
 }
@@ -682,16 +760,26 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		default:
 			sandbox.Status = state.Status
 		}
-			sandbox.RuntimeStatus = string(state.Status)
-			sandbox.LastRuntimeError = state.Error
-			sandbox.UpdatedAt = time.Now().UTC()
-			_ = s.store.UpdateSandboxState(ctx, sandbox)
-			_ = s.store.UpdateRuntimeState(ctx, sandbox.ID, state)
-		}
-		return nil
+		sandbox.RuntimeStatus = string(state.Status)
+		sandbox.LastRuntimeError = state.Error
+		sandbox.UpdatedAt = time.Now().UTC()
+		_ = s.store.UpdateSandboxState(ctx, sandbox)
+		_ = s.store.UpdateRuntimeState(ctx, sandbox.ID, state)
+		_ = s.refreshStorage(ctx, sandbox)
+	}
+	return nil
 }
 
 func (s *Service) refreshStorage(ctx context.Context, sandbox model.Sandbox) error {
+	if runtime, ok := s.runtime.(storageMeasurer); ok {
+		usage, err := runtime.MeasureStorage(ctx, sandbox)
+		if err != nil {
+			return err
+		}
+		snapshotExportBytes, _ := dirSize(filepath.Join(s.cfg.SnapshotRoot, sandbox.ID))
+		usage.SnapshotBytes += snapshotExportBytes
+		return s.store.UpdateStorageUsage(ctx, sandbox.ID, usage.RootfsBytes, usage.WorkspaceBytes, usage.CacheBytes, usage.SnapshotBytes)
+	}
 	rootfsBytes, _ := dirSize(sandbox.StorageRoot)
 	workspaceBytes, _ := dirSize(sandbox.WorkspaceRoot)
 	cacheBytes, _ := dirSize(sandbox.CacheRoot)
@@ -769,7 +857,6 @@ func (s *Service) checkRunningQuota(ctx context.Context, tenantID string, quota 
 	return nil
 }
 
-
 func (s *Service) transitionSandbox(ctx context.Context, tenantID, sandboxID string, transitional model.SandboxStatus, action func(model.Sandbox) (model.RuntimeState, model.SandboxStatus, error), finalStatus model.SandboxStatus) (model.Sandbox, error) {
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {
@@ -798,6 +885,9 @@ func (s *Service) transitionSandbox(ctx context.Context, tenantID, sandboxID str
 		return model.Sandbox{}, err
 	}
 	if err := s.store.UpdateRuntimeState(ctx, sandbox.ID, state); err != nil {
+		return model.Sandbox{}, err
+	}
+	if err := s.refreshStorage(ctx, sandbox); err != nil {
 		return model.Sandbox{}, err
 	}
 	s.recordAudit(ctx, tenantID, sandbox.ID, "sandbox.transition", sandbox.ID, "ok", fmt.Sprintf("%s->%s", transitional, finalStatus))

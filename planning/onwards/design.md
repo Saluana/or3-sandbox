@@ -171,6 +171,12 @@ For a sandbox with ID `sbx-...`, the runtime should use a predictable layout und
 - `.runtime/monitor.sock`
 - `.runtime/ssh-known-hosts`
 
+The first-pass disk policy is intentionally simple and operator-visible:
+
+- split `disk_limit_mb` evenly between the writable system disk and the persistent workspace disk
+- keep guest-local engine state on the writable system disk by default, so package layers and `/var/lib/docker` are counted inside the same sandbox budget
+- measure both disks plus snapshots and cache artifacts when refreshing storage usage in SQLite
+
 The key lightweight design choice is that guest-local container engine data must live inside quota-bounded guest disks. That removes the need for special host-side accounting for inner engine images and layers.
 
 ### 4.3 Config changes
@@ -210,6 +216,7 @@ A small runtime package is enough:
 ```go
 type Runtime struct {
     qemuBinary     string
+    qemuImgBinary  string
     sshBinary      string
     scpBinary      string
     accelerator    string
@@ -239,6 +246,12 @@ Recommended first-pass behavior:
 - otherwise return a clear runtime error such as `suspend not yet supported by qemu backend` and document that limitation in operator-facing docs
 
 That is preferable to a fragile partial implementation.
+
+Current first-pass implementation choice:
+
+- the `qemu` backend returns an explicit unsupported error for `Suspend` and `Resume`
+- operator-facing guest-image notes live under `images/guest/README.md`
+- the first durable-guest boot path uses guest `systemd` plus `or3-bootstrap.service` to create `/workspace` and the readiness marker
 
 ### 5.4 Late-phase follow-ons
 

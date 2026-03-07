@@ -281,35 +281,39 @@ func (s *Store) UpdateStorageUsage(ctx context.Context, sandboxID string, rootfs
 }
 
 type TenantUsage struct {
-	Sandboxes        int
-	RunningSandboxes int
-	ConcurrentExecs  int
-	ActiveTunnels    int
-	RequestedCPU     int
-	RequestedMemory  int
-	RequestedStorage int
+	Sandboxes          int
+	RunningSandboxes   int
+	ConcurrentExecs    int
+	ActiveTunnels      int
+	RequestedCPU       int
+	RequestedMemory    int
+	RequestedStorage   int
+	ActualStorageBytes int64
 }
 
 func (s *Store) TenantUsage(ctx context.Context, tenantID string) (TenantUsage, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*) AS sandboxes,
-			SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS running,
-			SUM(cpu_limit) AS cpu_total,
-			SUM(memory_limit_mb) AS memory_total,
-			SUM(disk_limit_mb) AS storage_total
-		FROM sandboxes
-		WHERE tenant_id = ? AND status != ?
+			SUM(CASE WHEN s.status = ? THEN 1 ELSE 0 END) AS running,
+			SUM(s.cpu_limit) AS cpu_total,
+			SUM(s.memory_limit_mb) AS memory_total,
+			SUM(s.disk_limit_mb) AS storage_total,
+			SUM(COALESCE(ss.rootfs_bytes, 0) + COALESCE(ss.workspace_bytes, 0) + COALESCE(ss.cache_bytes, 0) + COALESCE(ss.snapshot_bytes, 0)) AS actual_storage_bytes
+		FROM sandboxes s
+		LEFT JOIN sandbox_storage ss ON ss.sandbox_id = s.sandbox_id
+		WHERE s.tenant_id = ? AND s.status != ?
 	`, string(model.SandboxStatusRunning), tenantID, string(model.SandboxStatusDeleted))
 	var usage TenantUsage
-	var running, cpuTotal, memTotal, storageTotal sql.NullInt64
-	if err := row.Scan(&usage.Sandboxes, &running, &cpuTotal, &memTotal, &storageTotal); err != nil {
+	var running, cpuTotal, memTotal, storageTotal, actualStorageBytes sql.NullInt64
+	if err := row.Scan(&usage.Sandboxes, &running, &cpuTotal, &memTotal, &storageTotal, &actualStorageBytes); err != nil {
 		return usage, err
 	}
 	usage.RunningSandboxes = int(running.Int64)
 	usage.RequestedCPU = int(cpuTotal.Int64)
 	usage.RequestedMemory = int(memTotal.Int64)
 	usage.RequestedStorage = int(storageTotal.Int64)
+	usage.ActualStorageBytes = actualStorageBytes.Int64
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM executions WHERE tenant_id = ? AND status = ?
 	`, tenantID, string(model.ExecutionStatusRunning)).Scan(&usage.ConcurrentExecs); err != nil {
