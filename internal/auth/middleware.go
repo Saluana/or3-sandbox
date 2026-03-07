@@ -46,6 +46,10 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		}
 		token, err := bearerToken(r.Header.Get("Authorization"))
 		if err != nil {
+			if isTunnelProxyPath(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -65,6 +69,10 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func isTunnelProxyPath(path string) bool {
+	return strings.HasPrefix(path, "/v1/tunnels/") && strings.Contains(path, "/proxy")
 }
 
 func FromContext(ctx context.Context) (TenantContext, bool) {

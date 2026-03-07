@@ -80,7 +80,7 @@ type CreateSandboxRequest struct {
 	PIDsLimit     int         `json:"pids_limit"`
 	DiskLimitMB   int         `json:"disk_limit_mb"`
 	NetworkMode   NetworkMode `json:"network_mode"`
-	AllowTunnels  bool        `json:"allow_tunnels"`
+	AllowTunnels  *bool       `json:"allow_tunnels,omitempty"`
 	Start         bool        `json:"start"`
 }
 
@@ -164,6 +164,8 @@ type Tunnel struct {
 	AuthMode   string         `json:"auth_mode"`
 	Visibility string         `json:"visibility"`
 	Endpoint   string         `json:"endpoint"`
+	AccessToken string        `json:"access_token,omitempty"`
+	AuthSecretHash string     `json:"-"`
 	CreatedAt  time.Time      `json:"created_at"`
 	RevokedAt  *time.Time     `json:"revoked_at,omitempty"`
 }

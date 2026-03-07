@@ -90,6 +90,7 @@ func runCreate(client clientConfig, args []string) error {
 		return err
 	}
 	var sandbox model.Sandbox
+	allowTunnelsValue := *allowTunnels
 	return doJSON(client, http.MethodPost, "/v1/sandboxes", model.CreateSandboxRequest{
 		BaseImageRef:  *image,
 		CPULimit:      *cpu,
@@ -97,7 +98,7 @@ func runCreate(client clientConfig, args []string) error {
 		PIDsLimit:     *pids,
 		DiskLimitMB:   *disk,
 		NetworkMode:   model.NetworkMode(*network),
-		AllowTunnels:  *allowTunnels,
+		AllowTunnels:  &allowTunnelsValue,
 		Start:         *start,
 	}, &sandbox)
 }

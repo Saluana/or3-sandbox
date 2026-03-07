@@ -37,7 +37,7 @@ func TestAPILifecycleOwnershipFilesAndSnapshots(t *testing.T) {
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
 		NetworkMode:   model.NetworkModeInternetDisabled,
-		AllowTunnels:  true,
+		AllowTunnels:  boolPtr(true),
 		Start:         true,
 	})
 
@@ -89,7 +89,7 @@ func TestTunnelDetachedExecAndNetworkIsolation(t *testing.T) {
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
 		NetworkMode:   model.NetworkModeInternetEnabled,
-		AllowTunnels:  true,
+		AllowTunnels:  boolPtr(true),
 		Start:         true,
 	})
 	beta := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
@@ -99,7 +99,7 @@ func TestTunnelDetachedExecAndNetworkIsolation(t *testing.T) {
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
 		NetworkMode:   model.NetworkModeInternetEnabled,
-		AllowTunnels:  true,
+		AllowTunnels:  boolPtr(true),
 		Start:         true,
 	})
 
@@ -116,13 +116,13 @@ func TestTunnelDetachedExecAndNetworkIsolation(t *testing.T) {
 	}, "tunnel-ok", 10*time.Second)
 
 	tunnel := h.createTunnel(t, "token-a", alpha.ID, 8090)
-	body := h.tunnelGET(t, "token-a", tunnel.ID)
+	body := h.tunnelGET(t, "token-a", tunnel.ID, tunnel.AccessToken)
 	if !strings.Contains(body, "tunnel-ok") {
 		t.Fatalf("unexpected tunnel body: %q", body)
 	}
 	h.expectStatus(t, "token-b", http.MethodDelete, "/v1/tunnels/"+tunnel.ID, nil, http.StatusNotFound)
 	h.expectStatus(t, "token-a", http.MethodDelete, "/v1/tunnels/"+tunnel.ID, nil, http.StatusNoContent)
-	h.expectStatus(t, "token-a", http.MethodGet, "/v1/tunnels/"+tunnel.ID+"/proxy", nil, http.StatusGone)
+	h.expectStatusWithHeaders(t, "token-a", http.MethodGet, "/v1/tunnels/"+tunnel.ID+"/proxy", nil, http.StatusGone, map[string]string{"X-Tunnel-Token": tunnel.AccessToken})
 
 	tunnel = h.createTunnel(t, "token-a", alpha.ID, 8090)
 
@@ -174,7 +174,7 @@ func TestQuotaEnforcement(t *testing.T) {
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
 		NetworkMode:   model.NetworkModeInternetDisabled,
-		AllowTunnels:  false,
+		AllowTunnels:  boolPtr(false),
 		Start:         false,
 	})
 	h.expectStatus(t, "token-a", http.MethodPost, "/v1/sandboxes", model.CreateSandboxRequest{
@@ -184,9 +184,72 @@ func TestQuotaEnforcement(t *testing.T) {
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
 		NetworkMode:   model.NetworkModeInternetDisabled,
-		AllowTunnels:  false,
+		AllowTunnels:  boolPtr(false),
 		Start:         false,
 	}, http.StatusBadRequest)
+}
+
+func TestAllowTunnelsFalseIsRespected(t *testing.T) {
+	h := newHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "alpine:3.20",
+		CPULimit:      1,
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if sandbox.AllowTunnels {
+		t.Fatal("expected allow_tunnels=false to be preserved")
+	}
+	h.expectStatus(t, "token-a", http.MethodPost, "/v1/sandboxes/"+sandbox.ID+"/tunnels", model.CreateTunnelRequest{
+		TargetPort: 8080,
+		Protocol:   model.TunnelProtocolHTTP,
+		AuthMode:   "none",
+		Visibility: "private",
+	}, http.StatusBadRequest)
+}
+
+func TestDetachedExecDoesNotConsumeExecQuotaForever(t *testing.T) {
+	h := newHarness(t)
+	defer h.close()
+
+	quota := h.cfg.DefaultQuota
+	quota.MaxConcurrentExecs = 1
+	if err := h.store.SeedTenants(context.Background(), h.cfg.Tenants, quota); err != nil {
+		t.Fatal(err)
+	}
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "python:3.12-alpine",
+		CPULimit:      1,
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	})
+	first := h.exec(t, "token-a", sandbox.ID, model.ExecRequest{
+		Command:  []string{"sh", "-lc", "sleep 1 && echo detached > /workspace/detached.txt"},
+		Cwd:      "/workspace",
+		Timeout:  10 * time.Second,
+		Detached: true,
+	})
+	if first.Status != model.ExecutionStatusSucceeded {
+		t.Fatalf("unexpected detached exec status: %+v", first)
+	}
+	second := h.exec(t, "token-a", sandbox.ID, model.ExecRequest{
+		Command: []string{"sh", "-lc", "echo ok"},
+		Cwd:     "/workspace",
+		Timeout: 10 * time.Second,
+	})
+	if second.Status != model.ExecutionStatusSucceeded {
+		t.Fatalf("unexpected second exec status: %+v", second)
+	}
 }
 
 
@@ -213,6 +276,7 @@ func newHarness(t *testing.T) *harness {
 		SnapshotRoot:         filepath.Join(root, "snapshots"),
 		BaseImageRef:         "alpine:3.20",
 		RuntimeBackend:       "docker",
+		TrustedDockerRuntime: true,
 		DefaultCPULimit:      1,
 		DefaultMemoryLimitMB: 256,
 		DefaultPIDsLimit:     128,
@@ -342,13 +406,14 @@ func (h *harness) createTunnel(t *testing.T, token, sandboxID string, port int) 
 	return tunnel
 }
 
-func (h *harness) tunnelGET(t *testing.T, token, tunnelID string) string {
+func (h *harness) tunnelGET(t *testing.T, token, tunnelID, accessToken string) string {
 	t.Helper()
 	request, err := http.NewRequest(http.MethodGet, h.server.URL+"/v1/tunnels/"+tunnelID+"/proxy", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("X-Tunnel-Token", accessToken)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
@@ -362,6 +427,10 @@ func (h *harness) tunnelGET(t *testing.T, token, tunnelID string) string {
 		t.Fatalf("unexpected tunnel status %d: %s", response.StatusCode, string(data))
 	}
 	return string(data)
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func (h *harness) waitForFile(t *testing.T, token, sandboxID, path string, timeout time.Duration) {
@@ -396,8 +465,12 @@ func (h *harness) waitForExecContains(t *testing.T, token, sandboxID string, req
 }
 
 func (h *harness) expectStatus(t *testing.T, token, method, endpoint string, payload any, want int) {
+	h.expectStatusWithHeaders(t, token, method, endpoint, payload, want, nil)
+}
+
+func (h *harness) expectStatusWithHeaders(t *testing.T, token, method, endpoint string, payload any, want int, headers map[string]string) {
 	t.Helper()
-	response, body := h.do(t, token, method, endpoint, payload)
+	response, body := h.do(t, token, method, endpoint, payload, headers)
 	defer response.Body.Close()
 	if response.StatusCode != want {
 		t.Fatalf("%s %s returned %d, want %d: %s", method, endpoint, response.StatusCode, want, body)
@@ -406,7 +479,7 @@ func (h *harness) expectStatus(t *testing.T, token, method, endpoint string, pay
 
 func (h *harness) mustDoJSON(t *testing.T, token, method, endpoint string, payload any, out any, want int) {
 	t.Helper()
-	response, body := h.do(t, token, method, endpoint, payload)
+	response, body := h.do(t, token, method, endpoint, payload, nil)
 	defer response.Body.Close()
 	if response.StatusCode != want {
 		t.Fatalf("%s %s returned %d, want %d: %s", method, endpoint, response.StatusCode, want, body)
@@ -418,7 +491,7 @@ func (h *harness) mustDoJSON(t *testing.T, token, method, endpoint string, paylo
 	}
 }
 
-func (h *harness) do(t *testing.T, token, method, endpoint string, payload any) (*http.Response, string) {
+func (h *harness) do(t *testing.T, token, method, endpoint string, payload any, headers map[string]string) (*http.Response, string) {
 	t.Helper()
 	var body io.Reader
 	if payload != nil {
@@ -433,6 +506,9 @@ func (h *harness) do(t *testing.T, token, method, endpoint string, payload any) 
 		t.Fatal(err)
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
+	for key, value := range headers {
+		request.Header.Set(key, value)
+	}
 	if payload != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}

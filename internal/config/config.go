@@ -28,6 +28,7 @@ type Config struct {
 	SnapshotRoot           string
 	BaseImageRef           string
 	RuntimeBackend         string
+	TrustedDockerRuntime   bool
 	DefaultCPULimit        int
 	DefaultMemoryLimitMB   int
 	DefaultPIDsLimit       int
@@ -54,6 +55,7 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.SnapshotRoot, "snapshot-root", env("SANDBOX_SNAPSHOT_ROOT", "./data/snapshots"), "snapshot root")
 	fs.StringVar(&cfg.BaseImageRef, "base-image", env("SANDBOX_BASE_IMAGE", "mcr.microsoft.com/playwright:v1.51.1-noble"), "default base image")
 	fs.StringVar(&cfg.RuntimeBackend, "runtime", env("SANDBOX_RUNTIME", "docker"), "runtime backend")
+	trustedDockerRuntime := env("SANDBOX_TRUSTED_DOCKER_RUNTIME", "false")
 	fs.IntVar(&cfg.DefaultCPULimit, "default-cpu", envInt("SANDBOX_DEFAULT_CPU", 2), "default cpu limit")
 	fs.IntVar(&cfg.DefaultMemoryLimitMB, "default-memory-mb", envInt("SANDBOX_DEFAULT_MEMORY_MB", 2048), "default memory limit")
 	fs.IntVar(&cfg.DefaultPIDsLimit, "default-pids", envInt("SANDBOX_DEFAULT_PIDS", 512), "default pids limit")
@@ -71,6 +73,7 @@ func Load(args []string) (Config, error) {
 	}
 	cfg.DefaultNetworkMode = model.NetworkMode(networkMode)
 	cfg.DefaultAllowTunnels = strings.EqualFold(allowTunnels, "true")
+	cfg.TrustedDockerRuntime = strings.EqualFold(trustedDockerRuntime, "true")
 	cfg.OptionalSnapshotExport = env("SANDBOX_S3_EXPORT_URI", "")
 	cfg.DefaultQuota = model.TenantQuota{
 		MaxSandboxes:            envInt("SANDBOX_QUOTA_MAX_SANDBOXES", 10),
@@ -107,6 +110,9 @@ func (c Config) Validate() error {
 	}
 	if c.RuntimeBackend != "docker" {
 		problems = append(problems, fmt.Sprintf("unsupported runtime backend %q", c.RuntimeBackend))
+	}
+	if c.RuntimeBackend == "docker" && !c.TrustedDockerRuntime {
+		problems = append(problems, "docker runtime requires SANDBOX_TRUSTED_DOCKER_RUNTIME=true because it is shared-kernel and not a production multi-tenant boundary")
 	}
 	if c.DefaultNetworkMode != model.NetworkModeInternetEnabled && c.DefaultNetworkMode != model.NetworkModeInternetDisabled {
 		problems = append(problems, fmt.Sprintf("unsupported default network mode %q", c.DefaultNetworkMode))

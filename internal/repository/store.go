@@ -376,15 +376,15 @@ func (s *Store) UpdateTTYResize(ctx context.Context, tenantID, sessionID, resize
 
 func (s *Store) CreateTunnel(ctx context.Context, tunnel model.Tunnel) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO tunnels(tunnel_id, sandbox_id, tenant_id, target_port, protocol, auth_mode, visibility, endpoint, created_at, revoked_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-	`, tunnel.ID, tunnel.SandboxID, tunnel.TenantID, tunnel.TargetPort, string(tunnel.Protocol), tunnel.AuthMode, tunnel.Visibility, tunnel.Endpoint, tunnel.CreatedAt.UTC().Format(time.RFC3339Nano))
+		INSERT INTO tunnels(tunnel_id, sandbox_id, tenant_id, target_port, protocol, auth_mode, auth_secret_hash, visibility, endpoint, created_at, revoked_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+	`, tunnel.ID, tunnel.SandboxID, tunnel.TenantID, tunnel.TargetPort, string(tunnel.Protocol), tunnel.AuthMode, tunnel.AuthSecretHash, tunnel.Visibility, tunnel.Endpoint, tunnel.CreatedAt.UTC().Format(time.RFC3339Nano))
 	return err
 }
 
 func (s *Store) ListTunnels(ctx context.Context, tenantID, sandboxID string) ([]model.Tunnel, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT tunnel_id, sandbox_id, tenant_id, target_port, protocol, auth_mode, visibility, endpoint, created_at, revoked_at
+		SELECT tunnel_id, sandbox_id, tenant_id, target_port, protocol, auth_mode, auth_secret_hash, visibility, endpoint, created_at, revoked_at
 		FROM tunnels
 		WHERE tenant_id=? AND sandbox_id=?
 		ORDER BY created_at
@@ -406,9 +406,17 @@ func (s *Store) ListTunnels(ctx context.Context, tenantID, sandboxID string) ([]
 
 func (s *Store) GetTunnel(ctx context.Context, tenantID, tunnelID string) (model.Tunnel, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT tunnel_id, sandbox_id, tenant_id, target_port, protocol, auth_mode, visibility, endpoint, created_at, revoked_at
+		SELECT tunnel_id, sandbox_id, tenant_id, target_port, protocol, auth_mode, auth_secret_hash, visibility, endpoint, created_at, revoked_at
 		FROM tunnels WHERE tenant_id=? AND tunnel_id=?
 	`, tenantID, tunnelID)
+	return scanTunnel(row)
+}
+
+func (s *Store) GetTunnelByID(ctx context.Context, tunnelID string) (model.Tunnel, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT tunnel_id, sandbox_id, tenant_id, target_port, protocol, auth_mode, auth_secret_hash, visibility, endpoint, created_at, revoked_at
+		FROM tunnels WHERE tunnel_id=?
+	`, tunnelID)
 	return scanTunnel(row)
 }
 
@@ -492,7 +500,7 @@ func scanTunnel(scanner interface{ Scan(...any) error }) (model.Tunnel, error) {
 	var tunnel model.Tunnel
 	var created string
 	var revoked sql.NullString
-	if err := scanner.Scan(&tunnel.ID, &tunnel.SandboxID, &tunnel.TenantID, &tunnel.TargetPort, &tunnel.Protocol, &tunnel.AuthMode, &tunnel.Visibility, &tunnel.Endpoint, &created, &revoked); err != nil {
+	if err := scanner.Scan(&tunnel.ID, &tunnel.SandboxID, &tunnel.TenantID, &tunnel.TargetPort, &tunnel.Protocol, &tunnel.AuthMode, &tunnel.AuthSecretHash, &tunnel.Visibility, &tunnel.Endpoint, &created, &revoked); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.Tunnel{}, ErrNotFound
 		}

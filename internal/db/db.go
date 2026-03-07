@@ -95,6 +95,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			target_port INTEGER NOT NULL,
 			protocol TEXT NOT NULL,
 			auth_mode TEXT NOT NULL,
+			auth_secret_hash TEXT NOT NULL DEFAULT '',
 			visibility TEXT NOT NULL,
 			endpoint TEXT NOT NULL,
 			created_at TEXT NOT NULL,
@@ -160,8 +161,36 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
+	if err := ensureColumn(ctx, tx, "tunnels", "auth_secret_hash", `ALTER TABLE tunnels ADD COLUMN auth_secret_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (?, ?)`, schemaVersion, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func ensureColumn(ctx context.Context, tx *sql.Tx, table, column, alterSQL string) error {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, dataType string
+		var notNull, pk int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, alterSQL)
+	return err
 }

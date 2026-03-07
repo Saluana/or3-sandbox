@@ -69,7 +69,7 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		PIDsLimit:     req.PIDsLimit,
 		DiskLimitMB:   req.DiskLimitMB,
 		NetworkMode:   req.NetworkMode,
-		AllowTunnels:  req.AllowTunnels,
+		AllowTunnels:  *req.AllowTunnels,
 		StorageRoot:   storageRoot,
 		WorkspaceRoot: workspaceRoot,
 		CacheRoot:     cacheRoot,
@@ -309,9 +309,28 @@ func (s *Service) ExecSandbox(ctx context.Context, tenant model.Tenant, quota mo
 	}
 	handle, err := s.runtime.Exec(ctx, sandbox, req, streams)
 	if err != nil {
+		now := time.Now().UTC()
+		exitCode := 1
+		durationMS := now.Sub(started).Milliseconds()
+		execution.Status = model.ExecutionStatusFailed
+		execution.ExitCode = &exitCode
+		execution.StderrPreview = err.Error()
+		execution.CompletedAt = &now
+		execution.DurationMS = &durationMS
+		_ = s.store.UpdateExecution(ctx, execution)
 		return model.Execution{}, err
 	}
 	if req.Detached {
+		now := time.Now().UTC()
+		exitCode := 0
+		durationMS := now.Sub(started).Milliseconds()
+		execution.Status = model.ExecutionStatusSucceeded
+		execution.ExitCode = &exitCode
+		execution.CompletedAt = &now
+		execution.DurationMS = &durationMS
+		if err := s.store.UpdateExecution(ctx, execution); err != nil {
+			return model.Execution{}, err
+		}
 		s.recordAudit(ctx, tenant.ID, sandbox.ID, "sandbox.exec.detached", execution.ID, "ok", execution.Command)
 		return execution, nil
 	}
@@ -459,6 +478,34 @@ func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, 
 		return model.Tunnel{}, fmt.Errorf("tunnel quota exceeded")
 	}
 	id := newID("tun-")
+	if req.TargetPort < 1 || req.TargetPort > 65535 {
+		return model.Tunnel{}, fmt.Errorf("target_port must be between 1 and 65535")
+	}
+	if req.Protocol == "" {
+		req.Protocol = model.TunnelProtocolHTTP
+	}
+	if req.Protocol != model.TunnelProtocolHTTP {
+		return model.Tunnel{}, fmt.Errorf("unsupported tunnel protocol %q", req.Protocol)
+	}
+	if req.AuthMode == "" && err == nil {
+		req.AuthMode = quota.DefaultTunnelAuthMode
+	}
+	if req.AuthMode == "" {
+		req.AuthMode = "token"
+	}
+	if req.AuthMode != "token" && req.AuthMode != "none" {
+		return model.Tunnel{}, fmt.Errorf("unsupported auth_mode %q", req.AuthMode)
+	}
+	if req.Visibility == "" && err == nil {
+		req.Visibility = quota.DefaultTunnelVisibility
+	}
+	if req.Visibility == "" {
+		req.Visibility = "private"
+	}
+	if req.Visibility != "private" && req.Visibility != "public" {
+		return model.Tunnel{}, fmt.Errorf("unsupported visibility %q", req.Visibility)
+	}
+	accessToken := ""
 	tunnel := model.Tunnel{
 		ID:         id,
 		SandboxID:  sandbox.ID,
@@ -470,11 +517,10 @@ func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, 
 		Endpoint:   strings.TrimRight(s.cfg.OperatorHost, "/") + "/v1/tunnels/" + id + "/proxy",
 		CreatedAt:  time.Now().UTC(),
 	}
-	if tunnel.AuthMode == "" {
-		tunnel.AuthMode = "token"
-	}
-	if tunnel.Visibility == "" {
-		tunnel.Visibility = "private"
+	if tunnel.AuthMode == "token" {
+		accessToken = newID("ttok-")
+		tunnel.AccessToken = accessToken
+		tunnel.AuthSecretHash = config.HashToken(accessToken)
 	}
 	if err := s.store.CreateTunnel(ctx, tunnel); err != nil {
 		return model.Tunnel{}, err
@@ -504,6 +550,18 @@ func (s *Service) GetTunnel(ctx context.Context, tenantID, tunnelID string) (mod
 		return model.Tunnel{}, model.Sandbox{}, err
 	}
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, tunnel.SandboxID)
+	if err != nil {
+		return model.Tunnel{}, model.Sandbox{}, err
+	}
+	return tunnel, sandbox, nil
+}
+
+func (s *Service) GetTunnelForProxy(ctx context.Context, tunnelID string) (model.Tunnel, model.Sandbox, error) {
+	tunnel, err := s.store.GetTunnelByID(ctx, tunnelID)
+	if err != nil {
+		return model.Tunnel{}, model.Sandbox{}, err
+	}
+	sandbox, err := s.store.GetSandbox(ctx, tunnel.TenantID, tunnel.SandboxID)
 	if err != nil {
 		return model.Tunnel{}, model.Sandbox{}, err
 	}
@@ -624,14 +682,13 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		default:
 			sandbox.Status = state.Status
 		}
-		sandbox.RuntimeStatus = string(state.Status)
-		sandbox.LastRuntimeError = state.Error
-		sandbox.UpdatedAt = time.Now().UTC()
-		_ = s.store.UpdateSandboxState(ctx, sandbox)
-		_ = s.store.UpdateRuntimeState(ctx, sandbox.ID, state)
-		_ = s.refreshStorage(ctx, sandbox)
-	}
-	return nil
+			sandbox.RuntimeStatus = string(state.Status)
+			sandbox.LastRuntimeError = state.Error
+			sandbox.UpdatedAt = time.Now().UTC()
+			_ = s.store.UpdateSandboxState(ctx, sandbox)
+			_ = s.store.UpdateRuntimeState(ctx, sandbox.ID, state)
+		}
+		return nil
 }
 
 func (s *Service) refreshStorage(ctx context.Context, sandbox model.Sandbox) error {
@@ -661,8 +718,9 @@ func (s *Service) applyCreateDefaults(req model.CreateSandboxRequest) model.Crea
 	if req.NetworkMode == "" {
 		req.NetworkMode = s.cfg.DefaultNetworkMode
 	}
-	if !req.AllowTunnels {
-		req.AllowTunnels = s.cfg.DefaultAllowTunnels
+	if req.AllowTunnels == nil {
+		value := s.cfg.DefaultAllowTunnels
+		req.AllowTunnels = &value
 	}
 	return req
 }
@@ -694,7 +752,7 @@ func (s *Service) checkQuota(ctx context.Context, tenantID string, quota model.T
 		return fmt.Errorf("memory quota exceeded")
 	case usage.RequestedStorage+req.DiskLimitMB > quota.MaxStorageMB:
 		return fmt.Errorf("storage quota exceeded")
-	case req.AllowTunnels && !quota.AllowTunnels:
+	case req.AllowTunnels != nil && *req.AllowTunnels && !quota.AllowTunnels:
 		return fmt.Errorf("tenant tunnel policy denied")
 	}
 	return nil

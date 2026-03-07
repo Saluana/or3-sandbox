@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"or3-sandbox/internal/auth"
+	"or3-sandbox/internal/config"
 	"or3-sandbox/internal/model"
 	"or3-sandbox/internal/repository"
 	"or3-sandbox/internal/service"
@@ -428,11 +429,6 @@ func (rt *Router) handleSnapshotRoutes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rt *Router) handleTunnelRoutes(w http.ResponseWriter, r *http.Request) {
-	tenantCtx, ok := auth.FromContext(r.Context())
-	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
 	path := strings.TrimPrefix(r.URL.Path, "/v1/tunnels/")
 	parts := strings.Split(path, "/")
 	if len(parts) == 0 || parts[0] == "" {
@@ -441,6 +437,11 @@ func (rt *Router) handleTunnelRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 	tunnelID := parts[0]
 	if len(parts) == 1 {
+		tenantCtx, ok := auth.FromContext(r.Context())
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		if r.Method != http.MethodDelete {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -453,14 +454,14 @@ func (rt *Router) handleTunnelRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if parts[1] == "proxy" {
-		rt.handleTunnelProxy(w, r, tenantCtx, tunnelID)
+		rt.handleTunnelProxy(w, r, tunnelID)
 		return
 	}
 	http.NotFound(w, r)
 }
 
-func (rt *Router) handleTunnelProxy(w http.ResponseWriter, r *http.Request, tenantCtx auth.TenantContext, tunnelID string) {
-	tunnel, sandbox, err := rt.service.GetTunnel(r.Context(), tenantCtx.Tenant.ID, tunnelID)
+func (rt *Router) handleTunnelProxy(w http.ResponseWriter, r *http.Request, tunnelID string) {
+	tunnel, sandbox, err := rt.service.GetTunnelForProxy(r.Context(), tunnelID)
 	if err != nil {
 		handleError(w, err)
 		return
@@ -468,6 +469,23 @@ func (rt *Router) handleTunnelProxy(w http.ResponseWriter, r *http.Request, tena
 	if tunnel.RevokedAt != nil {
 		http.Error(w, "tunnel revoked", http.StatusGone)
 		return
+	}
+	tenantCtx, hasTenant := auth.FromContext(r.Context())
+	if tunnel.Visibility != "public" {
+		if !hasTenant || tenantCtx.Tenant.ID != tunnel.TenantID {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+	}
+	if tunnel.AuthMode == "token" {
+		presented := r.Header.Get("X-Tunnel-Token")
+		if presented == "" {
+			presented = r.URL.Query().Get("token")
+		}
+		if presented == "" || config.HashToken(presented) != tunnel.AuthSecretHash {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 	}
 	target := fmt.Sprintf("http://127.0.0.1:%d%s", tunnel.TargetPort, strings.TrimPrefix(r.URL.Path, "/v1/tunnels/"+tunnel.ID+"/proxy"))
 	if raw := r.URL.RawQuery; raw != "" {
@@ -511,7 +529,12 @@ exec curl -sS -i -X "$METHOD" --data-binary "$BODY" "$URL"
 	}
 	var stdout strings.Builder
 	var stderr strings.Builder
-	_, err = rt.service.ExecSandbox(r.Context(), tenantCtx.Tenant, tenantCtx.Quota, sandbox.ID, req, &stdout, &stderr)
+	quotaView, err := rt.service.GetTenantQuotaView(r.Context(), tunnel.TenantID)
+	if err != nil {
+		handleError(w, err)
+		return
+	}
+	_, err = rt.service.ExecSandbox(r.Context(), model.Tenant{ID: tunnel.TenantID}, quotaView.Quota, sandbox.ID, req, &stdout, &stderr)
 	if err != nil {
 		handleError(w, err)
 		return
