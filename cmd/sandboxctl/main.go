@@ -81,7 +81,7 @@ type clientConfig struct {
 func runCreate(client clientConfig, args []string) error {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	image := fs.String("image", "", "base image")
-	cpu := fs.Int("cpu", 2, "cpu limit")
+	cpu := fs.String("cpu", "2", "cpu limit (cores, decimal cores, or millicores like 1500m)")
 	memory := fs.Int("memory-mb", 2048, "memory limit")
 	pids := fs.Int("pids", 512, "pids limit")
 	disk := fs.Int("disk-mb", 10240, "disk limit")
@@ -93,9 +93,13 @@ func runCreate(client clientConfig, args []string) error {
 	}
 	var sandbox model.Sandbox
 	allowTunnelsValue := *allowTunnels
+	cpuLimit, err := model.ParseCPUQuantity(*cpu)
+	if err != nil {
+		return err
+	}
 	return doJSON(client, http.MethodPost, "/v1/sandboxes", model.CreateSandboxRequest{
 		BaseImageRef:  *image,
-		CPULimit:      *cpu,
+		CPULimit:      cpuLimit,
 		MemoryLimitMB: *memory,
 		PIDsLimit:     *pids,
 		DiskLimitMB:   *disk,

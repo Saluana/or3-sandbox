@@ -31,7 +31,7 @@ type Config struct {
 	BaseImageRef           string
 	RuntimeBackend         string
 	TrustedDockerRuntime   bool
-	DefaultCPULimit        int
+	DefaultCPULimit        model.CPUQuantity
 	DefaultMemoryLimitMB   int
 	DefaultPIDsLimit       int
 	DefaultDiskLimitMB     int
@@ -69,7 +69,8 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.QEMUSSHUser, "qemu-ssh-user", env("SANDBOX_QEMU_SSH_USER", ""), "qemu guest ssh user")
 	fs.StringVar(&cfg.QEMUSSHPrivateKeyPath, "qemu-ssh-private-key", env("SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH", ""), "qemu guest ssh private key path")
 	trustedDockerRuntime := env("SANDBOX_TRUSTED_DOCKER_RUNTIME", "false")
-	fs.IntVar(&cfg.DefaultCPULimit, "default-cpu", envInt("SANDBOX_DEFAULT_CPU", 2), "default cpu limit")
+	defaultCPU := env("SANDBOX_DEFAULT_CPU", "2")
+	fs.StringVar(&defaultCPU, "default-cpu", defaultCPU, "default cpu limit")
 	fs.IntVar(&cfg.DefaultMemoryLimitMB, "default-memory-mb", envInt("SANDBOX_DEFAULT_MEMORY_MB", 2048), "default memory limit")
 	fs.IntVar(&cfg.DefaultPIDsLimit, "default-pids", envInt("SANDBOX_DEFAULT_PIDS", 512), "default pids limit")
 	fs.IntVar(&cfg.DefaultDiskLimitMB, "default-disk-mb", envInt("SANDBOX_DEFAULT_DISK_MB", 10240), "default disk limit")
@@ -85,6 +86,15 @@ func Load(args []string) (Config, error) {
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
+	defaultCPULimit, err := model.ParseCPUQuantity(defaultCPU)
+	if err != nil {
+		return Config{}, fmt.Errorf("parse default cpu: %w", err)
+	}
+	cfg.DefaultCPULimit = defaultCPULimit
+	maxCPUCores, err := model.ParseCPUQuantity(env("SANDBOX_QUOTA_MAX_CPU", "16"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse max cpu quota: %w", err)
+	}
 	cfg.DefaultNetworkMode = model.NetworkMode(networkMode)
 	cfg.DefaultAllowTunnels = strings.EqualFold(allowTunnels, "true")
 	cfg.TrustedDockerRuntime = strings.EqualFold(trustedDockerRuntime, "true")
@@ -94,7 +104,7 @@ func Load(args []string) (Config, error) {
 		MaxRunningSandboxes:     envInt("SANDBOX_QUOTA_MAX_RUNNING", 5),
 		MaxConcurrentExecs:      envInt("SANDBOX_QUOTA_MAX_EXECS", 8),
 		MaxTunnels:              envInt("SANDBOX_QUOTA_MAX_TUNNELS", 8),
-		MaxCPUCores:             envInt("SANDBOX_QUOTA_MAX_CPU", 16),
+		MaxCPUCores:             maxCPUCores,
 		MaxMemoryMB:             envInt("SANDBOX_QUOTA_MAX_MEMORY_MB", 16384),
 		MaxStorageMB:            envInt("SANDBOX_QUOTA_MAX_STORAGE_MB", 51200),
 		AllowTunnels:            strings.EqualFold(env("SANDBOX_QUOTA_ALLOW_TUNNELS", "true"), "true"),
@@ -124,6 +134,15 @@ func (c Config) Validate() error {
 	}
 	if err := validateRuntimeConfig(c, defaultRuntimeValidationProbe()); err != nil {
 		problems = append(problems, err.Error())
+	}
+	if c.DefaultCPULimit <= 0 {
+		problems = append(problems, "default cpu limit must be positive")
+	}
+	if c.DefaultQuota.MaxCPUCores <= 0 {
+		problems = append(problems, "default quota max cpu must be positive")
+	}
+	if c.RuntimeBackend == "qemu" && c.DefaultCPULimit.MilliValue()%1000 != 0 {
+		problems = append(problems, "qemu runtime requires a whole-core default cpu limit")
 	}
 	if c.DefaultNetworkMode != model.NetworkModeInternetEnabled && c.DefaultNetworkMode != model.NetworkModeInternetDisabled {
 		problems = append(problems, fmt.Sprintf("unsupported default network mode %q", c.DefaultNetworkMode))

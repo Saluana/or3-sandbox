@@ -353,7 +353,7 @@ func (r *Runtime) startArgs(sandbox model.Sandbox, layout sandboxLayout, sshPort
 		"-display", "none",
 		"-accel", r.accelerator,
 		"-m", strconv.Itoa(defaultInt(sandbox.MemoryLimitMB, 512)),
-		"-smp", strconv.Itoa(defaultInt(sandbox.CPULimit, 1)),
+		"-smp", strconv.Itoa(defaultVCPUCount(sandbox.CPULimit, 1)),
 		"-drive", "if=virtio,file=" + layout.rootDiskPath + ",format=qcow2",
 		"-drive", "if=virtio,file=" + layout.workspaceDiskPath + ",format=raw",
 	}
@@ -890,6 +890,13 @@ func isReadableFile(path string) bool {
 func defaultInt(value, fallback int) int {
 	if value > 0 {
 		return value
+	}
+	return fallback
+}
+
+func defaultVCPUCount(value model.CPUQuantity, fallback int) int {
+	if value > 0 {
+		return value.VCPUCount()
 	}
 	return fallback
 }

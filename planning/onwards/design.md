@@ -261,6 +261,12 @@ These are reasonable additions after the cross-platform guest runtime is stable,
 - S3-compatible snapshot export can layer on top of local snapshot artifacts without changing active runtime control flow
 - a custom guest agent should only be introduced if SSH proves measurably insufficient for exec, PTY, file transfer, or health checks
 
+Current outcome after workload coverage:
+
+- fractional CPU and millicore support is implemented by storing CPU in exact millicores while preserving integer-compatible JSON and SQLite fields for older callers
+- Docker accepts fractional CPU values directly, while QEMU currently rejects non-whole cores until it has a real fractional throttle instead of silently changing the requested limit
+- SSH remains sufficient for exec, PTY, file transfer, health checks, and workload smoke coverage, so no guest agent is introduced in this phase
+
 ## 6. Failure modes and safeguards
 
 - Invalid config

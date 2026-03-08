@@ -47,22 +47,23 @@ func (s *Store) SeedTenants(ctx context.Context, tenants []config.TenantConfig, 
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO quotas(
 					tenant_id, max_sandboxes, max_running_sandboxes, max_concurrent_execs, max_tunnels,
-					max_cpu_cores, max_memory_mb, max_storage_mb, allow_tunnels,
+					max_cpu_cores, max_cpu_millis, max_memory_mb, max_storage_mb, allow_tunnels,
 					default_tunnel_auth_mode, default_tunnel_visibility
 				)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT(tenant_id) DO UPDATE SET
 					max_sandboxes=excluded.max_sandboxes,
 					max_running_sandboxes=excluded.max_running_sandboxes,
 					max_concurrent_execs=excluded.max_concurrent_execs,
 					max_tunnels=excluded.max_tunnels,
 					max_cpu_cores=excluded.max_cpu_cores,
+					max_cpu_millis=excluded.max_cpu_millis,
 					max_memory_mb=excluded.max_memory_mb,
 					max_storage_mb=excluded.max_storage_mb,
 					allow_tunnels=excluded.allow_tunnels,
 					default_tunnel_auth_mode=excluded.default_tunnel_auth_mode,
 					default_tunnel_visibility=excluded.default_tunnel_visibility
-			`, tenant.ID, quota.MaxSandboxes, quota.MaxRunningSandboxes, quota.MaxConcurrentExecs, quota.MaxTunnels, quota.MaxCPUCores, quota.MaxMemoryMB, quota.MaxStorageMB, boolToInt(quota.AllowTunnels), quota.DefaultTunnelAuthMode, quota.DefaultTunnelVisibility); err != nil {
+			`, tenant.ID, quota.MaxSandboxes, quota.MaxRunningSandboxes, quota.MaxConcurrentExecs, quota.MaxTunnels, quota.MaxCPUCores.VCPUCount(), quota.MaxCPUCores.MilliValue(), quota.MaxMemoryMB, quota.MaxStorageMB, boolToInt(quota.AllowTunnels), quota.DefaultTunnelAuthMode, quota.DefaultTunnelVisibility); err != nil {
 				return err
 			}
 		}
@@ -74,7 +75,7 @@ func (s *Store) AuthenticateTenant(ctx context.Context, tokenHash string) (model
 	row := s.db.QueryRowContext(ctx, `
 		SELECT t.tenant_id, t.name, t.token_hash, t.created_at,
 		       q.max_sandboxes, q.max_running_sandboxes, q.max_concurrent_execs, q.max_tunnels,
-		       q.max_cpu_cores, q.max_memory_mb, q.max_storage_mb, q.allow_tunnels,
+		       q.max_cpu_millis, q.max_memory_mb, q.max_storage_mb, q.allow_tunnels,
 		       q.default_tunnel_auth_mode, q.default_tunnel_visibility
 		FROM tenants t
 		JOIN quotas q ON q.tenant_id = t.tenant_id
@@ -84,10 +85,11 @@ func (s *Store) AuthenticateTenant(ctx context.Context, tokenHash string) (model
 	var quota model.TenantQuota
 	var created string
 	var allowTunnels int
+	var maxCPUMillis int64
 	if err := row.Scan(
 		&tenant.ID, &tenant.Name, &tenant.TokenHash, &created,
 		&quota.MaxSandboxes, &quota.MaxRunningSandboxes, &quota.MaxConcurrentExecs, &quota.MaxTunnels,
-		&quota.MaxCPUCores, &quota.MaxMemoryMB, &quota.MaxStorageMB, &allowTunnels,
+		&maxCPUMillis, &quota.MaxMemoryMB, &quota.MaxStorageMB, &allowTunnels,
 		&quota.DefaultTunnelAuthMode, &quota.DefaultTunnelVisibility,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -97,6 +99,7 @@ func (s *Store) AuthenticateTenant(ctx context.Context, tokenHash string) (model
 	}
 	tenant.CreatedAt = mustTime(created)
 	quota.TenantID = tenant.ID
+	quota.MaxCPUCores = model.CPUQuantity(maxCPUMillis)
 	quota.AllowTunnels = allowTunnels == 1
 	return tenant, quota, nil
 }
@@ -104,16 +107,17 @@ func (s *Store) AuthenticateTenant(ctx context.Context, tokenHash string) (model
 func (s *Store) GetQuota(ctx context.Context, tenantID string) (model.TenantQuota, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT max_sandboxes, max_running_sandboxes, max_concurrent_execs, max_tunnels,
-		       max_cpu_cores, max_memory_mb, max_storage_mb, allow_tunnels,
+		       max_cpu_millis, max_memory_mb, max_storage_mb, allow_tunnels,
 		       default_tunnel_auth_mode, default_tunnel_visibility
 		FROM quotas
 		WHERE tenant_id = ?
 	`, tenantID)
 	var quota model.TenantQuota
 	var allowTunnels int
+	var maxCPUMillis int64
 	if err := row.Scan(
 		&quota.MaxSandboxes, &quota.MaxRunningSandboxes, &quota.MaxConcurrentExecs, &quota.MaxTunnels,
-		&quota.MaxCPUCores, &quota.MaxMemoryMB, &quota.MaxStorageMB, &allowTunnels,
+		&maxCPUMillis, &quota.MaxMemoryMB, &quota.MaxStorageMB, &allowTunnels,
 		&quota.DefaultTunnelAuthMode, &quota.DefaultTunnelVisibility,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -122,6 +126,7 @@ func (s *Store) GetQuota(ctx context.Context, tenantID string) (model.TenantQuot
 		return model.TenantQuota{}, err
 	}
 	quota.TenantID = tenantID
+	quota.MaxCPUCores = model.CPUQuantity(maxCPUMillis)
 	quota.AllowTunnels = allowTunnels == 1
 	return quota, nil
 }
@@ -132,13 +137,13 @@ func (s *Store) CreateSandbox(ctx context.Context, sandbox model.Sandbox) error 
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO sandboxes(
 				sandbox_id, tenant_id, status, runtime_backend, base_image_ref,
-				cpu_limit, memory_limit_mb, pids_limit, disk_limit_mb,
+				cpu_limit, cpu_limit_millis, memory_limit_mb, pids_limit, disk_limit_mb,
 				network_mode, allow_tunnels, storage_root, workspace_root, cache_root,
 				created_at, updated_at, last_active_at, deleted_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
 		`, sandbox.ID, sandbox.TenantID, string(sandbox.Status), sandbox.RuntimeBackend, sandbox.BaseImageRef,
-			sandbox.CPULimit, sandbox.MemoryLimitMB, sandbox.PIDsLimit, sandbox.DiskLimitMB,
+			sandbox.CPULimit.VCPUCount(), sandbox.CPULimit.MilliValue(), sandbox.MemoryLimitMB, sandbox.PIDsLimit, sandbox.DiskLimitMB,
 			string(sandbox.NetworkMode), boolToInt(sandbox.AllowTunnels), sandbox.StorageRoot, sandbox.WorkspaceRoot, sandbox.CacheRoot,
 			now, sandbox.UpdatedAt.UTC().Format(time.RFC3339Nano), sandbox.LastActiveAt.UTC().Format(time.RFC3339Nano),
 		); err != nil {
@@ -168,10 +173,10 @@ func (s *Store) UpdateSandboxState(ctx context.Context, sandbox model.Sandbox) e
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE sandboxes
-			SET status=?, base_image_ref=?, cpu_limit=?, memory_limit_mb=?, pids_limit=?, disk_limit_mb=?, network_mode=?, allow_tunnels=?,
+			SET status=?, base_image_ref=?, cpu_limit=?, cpu_limit_millis=?, memory_limit_mb=?, pids_limit=?, disk_limit_mb=?, network_mode=?, allow_tunnels=?,
 			    updated_at=?, last_active_at=?, deleted_at=?
 			WHERE sandbox_id=? AND tenant_id=?
-		`, string(sandbox.Status), sandbox.BaseImageRef, sandbox.CPULimit, sandbox.MemoryLimitMB, sandbox.PIDsLimit, sandbox.DiskLimitMB,
+		`, string(sandbox.Status), sandbox.BaseImageRef, sandbox.CPULimit.VCPUCount(), sandbox.CPULimit.MilliValue(), sandbox.MemoryLimitMB, sandbox.PIDsLimit, sandbox.DiskLimitMB,
 			string(sandbox.NetworkMode), boolToInt(sandbox.AllowTunnels), sandbox.UpdatedAt.UTC().Format(time.RFC3339Nano),
 			sandbox.LastActiveAt.UTC().Format(time.RFC3339Nano), deletedAt, sandbox.ID, sandbox.TenantID); err != nil {
 			return err
@@ -202,7 +207,7 @@ func (s *Store) UpdateRuntimeState(ctx context.Context, sandboxID string, state 
 
 func (s *Store) GetSandbox(ctx context.Context, tenantID, sandboxID string) (model.Sandbox, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.cpu_limit,
+		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.cpu_limit_millis,
 		       s.memory_limit_mb, s.pids_limit, s.disk_limit_mb, s.network_mode, s.allow_tunnels,
 		       s.storage_root, s.workspace_root, s.cache_root,
 		       s.created_at, s.updated_at, s.last_active_at, s.deleted_at,
@@ -220,7 +225,7 @@ func (s *Store) GetSandbox(ctx context.Context, tenantID, sandboxID string) (mod
 
 func (s *Store) ListSandboxes(ctx context.Context, tenantID string) ([]model.Sandbox, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.cpu_limit,
+		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.cpu_limit_millis,
 		       s.memory_limit_mb, s.pids_limit, s.disk_limit_mb, s.network_mode, s.allow_tunnels,
 		       s.storage_root, s.workspace_root, s.cache_root,
 		       s.created_at, s.updated_at, s.last_active_at, s.deleted_at,
@@ -247,7 +252,7 @@ func (s *Store) ListSandboxes(ctx context.Context, tenantID string) ([]model.San
 
 func (s *Store) ListNonDeletedSandboxes(ctx context.Context) ([]model.Sandbox, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.cpu_limit,
+		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.cpu_limit_millis,
 		       s.memory_limit_mb, s.pids_limit, s.disk_limit_mb, s.network_mode, s.allow_tunnels,
 		       s.storage_root, s.workspace_root, s.cache_root,
 		       s.created_at, s.updated_at, s.last_active_at, s.deleted_at,
@@ -285,7 +290,7 @@ type TenantUsage struct {
 	RunningSandboxes   int
 	ConcurrentExecs    int
 	ActiveTunnels      int
-	RequestedCPU       int
+	RequestedCPU       model.CPUQuantity
 	RequestedMemory    int
 	RequestedStorage   int
 	ActualStorageBytes int64
@@ -296,7 +301,7 @@ func (s *Store) TenantUsage(ctx context.Context, tenantID string) (TenantUsage, 
 		SELECT
 			COUNT(*) AS sandboxes,
 			SUM(CASE WHEN s.status = ? THEN 1 ELSE 0 END) AS running,
-			SUM(s.cpu_limit) AS cpu_total,
+			SUM(s.cpu_limit_millis) AS cpu_total,
 			SUM(s.memory_limit_mb) AS memory_total,
 			SUM(s.disk_limit_mb) AS storage_total,
 			SUM(COALESCE(ss.rootfs_bytes, 0) + COALESCE(ss.workspace_bytes, 0) + COALESCE(ss.cache_bytes, 0) + COALESCE(ss.snapshot_bytes, 0)) AS actual_storage_bytes
@@ -310,7 +315,7 @@ func (s *Store) TenantUsage(ctx context.Context, tenantID string) (TenantUsage, 
 		return usage, err
 	}
 	usage.RunningSandboxes = int(running.Int64)
-	usage.RequestedCPU = int(cpuTotal.Int64)
+	usage.RequestedCPU = model.CPUQuantity(cpuTotal.Int64)
 	usage.RequestedMemory = int(memTotal.Int64)
 	usage.RequestedStorage = int(storageTotal.Int64)
 	usage.ActualStorageBytes = actualStorageBytes.Int64
@@ -477,9 +482,10 @@ func scanSandbox(scanner interface{ Scan(...any) error }) (model.Sandbox, error)
 	var created, updated, lastActive string
 	var deleted sql.NullString
 	var allowTunnels int
+	var cpuLimitMillis int64
 	if err := scanner.Scan(
 		&sandbox.ID, &sandbox.TenantID, &sandbox.Status, &sandbox.RuntimeBackend, &sandbox.BaseImageRef,
-		&sandbox.CPULimit, &sandbox.MemoryLimitMB, &sandbox.PIDsLimit, &sandbox.DiskLimitMB, &sandbox.NetworkMode,
+		&cpuLimitMillis, &sandbox.MemoryLimitMB, &sandbox.PIDsLimit, &sandbox.DiskLimitMB, &sandbox.NetworkMode,
 		&allowTunnels, &sandbox.StorageRoot, &sandbox.WorkspaceRoot, &sandbox.CacheRoot,
 		&created, &updated, &lastActive, &deleted,
 		&sandbox.RuntimeID, &sandbox.RuntimeStatus, &sandbox.LastRuntimeError,
@@ -489,6 +495,7 @@ func scanSandbox(scanner interface{ Scan(...any) error }) (model.Sandbox, error)
 		}
 		return model.Sandbox{}, err
 	}
+	sandbox.CPULimit = model.CPUQuantity(cpuLimitMillis)
 	sandbox.AllowTunnels = allowTunnels == 1
 	sandbox.CreatedAt = mustTime(created)
 	sandbox.UpdatedAt = mustTime(updated)

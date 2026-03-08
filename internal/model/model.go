@@ -56,7 +56,7 @@ type Sandbox struct {
 	Status           SandboxStatus `json:"status"`
 	RuntimeBackend   string        `json:"runtime_backend"`
 	BaseImageRef     string        `json:"base_image_ref"`
-	CPULimit         int           `json:"cpu_limit"`
+	CPULimit         CPUQuantity   `json:"cpu_limit"`
 	MemoryLimitMB    int           `json:"memory_limit_mb"`
 	PIDsLimit        int           `json:"pids_limit"`
 	DiskLimitMB      int           `json:"disk_limit_mb"`
@@ -76,7 +76,7 @@ type Sandbox struct {
 
 type CreateSandboxRequest struct {
 	BaseImageRef  string      `json:"base_image_ref"`
-	CPULimit      int         `json:"cpu_limit"`
+	CPULimit      CPUQuantity `json:"cpu_limit"`
 	MemoryLimitMB int         `json:"memory_limit_mb"`
 	PIDsLimit     int         `json:"pids_limit"`
 	DiskLimitMB   int         `json:"disk_limit_mb"`
@@ -224,7 +224,7 @@ type TenantQuota struct {
 	MaxRunningSandboxes    int    `json:"max_running_sandboxes"`
 	MaxConcurrentExecs     int    `json:"max_concurrent_execs"`
 	MaxTunnels             int    `json:"max_tunnels"`
-	MaxCPUCores            int    `json:"max_cpu_cores"`
+	MaxCPUCores            CPUQuantity `json:"max_cpu_cores"`
 	MaxMemoryMB            int    `json:"max_memory_mb"`
 	MaxStorageMB           int    `json:"max_storage_mb"`
 	AllowTunnels           bool   `json:"allow_tunnels"`

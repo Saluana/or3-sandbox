@@ -29,7 +29,7 @@ func TestGuestFileOpsUseRuntimeBoundaryAndTenantIsolation(t *testing.T) {
 
 	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
 		BaseImageRef:  "guest-base.qcow2",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 512,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -98,7 +98,7 @@ func TestLocalFileOpsStayScopedToWorkspaceAndMeasuredStorage(t *testing.T) {
 
 	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
 		BaseImageRef:  "alpine:3.20",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 256,
 		PIDsLimit:     64,
 		DiskLimitMB:   256,
@@ -155,7 +155,7 @@ func TestLifecycleRefreshStorageUsesRuntimeMeasurement(t *testing.T) {
 	runtime.storageUsage = model.StorageUsage{RootfsBytes: 100, WorkspaceBytes: 200, CacheBytes: 30, SnapshotBytes: 0}
 	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
 		BaseImageRef:  "guest-base.qcow2",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 512,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -207,7 +207,7 @@ func TestCreateSnapshotPersistsArtifactsOutsideSandboxRoot(t *testing.T) {
 
 	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
 		BaseImageRef:  "guest-base.qcow2",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 512,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -269,7 +269,7 @@ func TestCreateSnapshotMarksErrorOnPartialFailure(t *testing.T) {
 
 	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
 		BaseImageRef:  "guest-base.qcow2",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 512,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -313,7 +313,7 @@ func TestRestoreSnapshotFetchesExportBundleWhenLocalArtifactsAreMissing(t *testi
 
 	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
 		BaseImageRef:  "guest-base.qcow2",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 512,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -370,7 +370,7 @@ func TestRuntimeHealthReportsBootingState(t *testing.T) {
 
 	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
 		BaseImageRef:  "guest-base.qcow2",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 512,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -432,7 +432,7 @@ func TestExecSandboxCancellationRecordsCanceledResult(t *testing.T) {
 
 	sandbox, err := svc.CreateSandbox(context.Background(), tenantA, quota, model.CreateSandboxRequest{
 		BaseImageRef:  "guest-base.qcow2",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 512,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -467,6 +467,84 @@ func TestExecSandboxCancellationRecordsCanceledResult(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxAppliesFractionalCPUDefault(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+	svc.cfg.DefaultCPULimit = model.MustParseCPUQuantity("1500m")
+	quota.MaxCPUCores = model.MustParseCPUQuantity("2500m")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	if sandbox.CPULimit != model.MustParseCPUQuantity("1500m") {
+		t.Fatalf("unexpected sandbox cpu %v", sandbox.CPULimit)
+	}
+	if runtime.createdSpec.CPULimit != model.MustParseCPUQuantity("1500m") {
+		t.Fatalf("unexpected runtime spec cpu %v", runtime.createdSpec.CPULimit)
+	}
+}
+
+func TestCreateSandboxRejectsFractionalCPUQuotaOverflow(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+	quota.MaxCPUCores = model.MustParseCPUQuantity("2")
+
+	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.MustParseCPUQuantity("1500m"),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(false),
+	}); err != nil {
+		t.Fatalf("seed sandbox: %v", err)
+	}
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.MustParseCPUQuantity("600m"),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err == nil || !strings.Contains(err.Error(), "cpu quota exceeded") {
+		t.Fatalf("expected cpu quota error, got %v", err)
+	}
+}
+
+func TestCreateSandboxRejectsFractionalCPUOnQEMU(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	quota.MaxCPUCores = model.MustParseCPUQuantity("2")
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.MustParseCPUQuantity("500m"),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err == nil || !strings.Contains(err.Error(), "whole CPU cores") {
+		t.Fatalf("expected qemu fractional cpu rejection, got %v", err)
+	}
+}
+
 func assertActualStorage(t *testing.T, store *repository.Store, tenantID string, want int64) {
 	t.Helper()
 	usage, err := store.TenantUsage(context.Background(), tenantID)
@@ -487,7 +565,7 @@ func newServiceHarness(t *testing.T, runtime model.RuntimeManager, backend strin
 		SnapshotRoot:         filepath.Join(root, "snapshots"),
 		BaseImageRef:         "base-image",
 		RuntimeBackend:       backend,
-		DefaultCPULimit:      1,
+		DefaultCPULimit:      model.CPUCores(1),
 		DefaultMemoryLimitMB: 256,
 		DefaultPIDsLimit:     64,
 		DefaultDiskLimitMB:   256,
@@ -507,7 +585,7 @@ func newServiceHarness(t *testing.T, runtime model.RuntimeManager, backend strin
 		MaxRunningSandboxes:     8,
 		MaxConcurrentExecs:      8,
 		MaxTunnels:              8,
-		MaxCPUCores:             8,
+		MaxCPUCores:             model.CPUCores(8),
 		MaxMemoryMB:             8192,
 		MaxStorageMB:            8192,
 		AllowTunnels:            false,
@@ -537,6 +615,7 @@ type stubRuntime struct {
 	storageUsage      model.StorageUsage
 	inspectErr        error
 	execHandleFactory func(context.Context, model.ExecRequest) model.ExecHandle
+	createdSpec       model.SandboxSpec
 
 	reads   map[string]string
 	writes  []stubWrite
@@ -580,7 +659,8 @@ func newRuntimeOnlyStub() *runtimeOnlyStub {
 	return &runtimeOnlyStub{}
 }
 
-func (r *stubRuntime) Create(context.Context, model.SandboxSpec) (model.RuntimeState, error) {
+func (r *stubRuntime) Create(_ context.Context, spec model.SandboxSpec) (model.RuntimeState, error) {
+	r.createdSpec = spec
 	return withDefaultRuntimeState(r.createState, model.SandboxStatusStopped, false), nil
 }
 

@@ -69,7 +69,7 @@ func TestDockerRuntimeLifecycle(t *testing.T) {
 		SandboxID:     "rt-smoke-" + strings.ReplaceAll(time.Now().UTC().Format("150405.000"), ".", ""),
 		TenantID:      "tenant-test",
 		BaseImageRef:  "alpine:3.20",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 256,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,

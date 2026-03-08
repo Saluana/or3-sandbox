@@ -33,7 +33,7 @@ func TestAPILifecycleOwnershipFilesAndSnapshots(t *testing.T) {
 
 	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
 		BaseImageRef:  "alpine:3.20",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 256,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -85,7 +85,7 @@ func TestTunnelDetachedExecAndNetworkIsolation(t *testing.T) {
 
 	alpha := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
 		BaseImageRef:  "python:3.12-alpine",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 256,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -95,7 +95,7 @@ func TestTunnelDetachedExecAndNetworkIsolation(t *testing.T) {
 	})
 	beta := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
 		BaseImageRef:  "python:3.12-alpine",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 256,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -170,7 +170,7 @@ func TestQuotaEnforcement(t *testing.T) {
 	}
 	_ = h.createSandbox(t, "token-a", model.CreateSandboxRequest{
 		BaseImageRef:  "alpine:3.20",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 256,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -180,7 +180,7 @@ func TestQuotaEnforcement(t *testing.T) {
 	})
 	h.expectStatus(t, "token-a", http.MethodPost, "/v1/sandboxes", model.CreateSandboxRequest{
 		BaseImageRef:  "alpine:3.20",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 256,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -190,13 +190,66 @@ func TestQuotaEnforcement(t *testing.T) {
 	}, http.StatusBadRequest)
 }
 
+func TestCreateSandboxAcceptsFractionalCPUOnDocker(t *testing.T) {
+	h := newHarness(t)
+	defer h.close()
+
+	quota := h.cfg.DefaultQuota
+	quota.MaxCPUCores = model.MustParseCPUQuantity("2")
+	if err := h.store.SeedTenants(context.Background(), h.cfg.Tenants, quota); err != nil {
+		t.Fatal(err)
+	}
+
+	var sandbox model.Sandbox
+	h.mustDoRawJSON(t, "token-a", http.MethodPost, "/v1/sandboxes", `{
+		"base_image_ref":"alpine:3.20",
+		"cpu_limit":1.5,
+		"memory_limit_mb":256,
+		"pids_limit":128,
+		"disk_limit_mb":512,
+		"network_mode":"internet-disabled",
+		"allow_tunnels":false,
+		"start":false
+	}`, &sandbox, http.StatusCreated)
+	if sandbox.CPULimit != model.MustParseCPUQuantity("1500m") {
+		t.Fatalf("unexpected fractional cpu %v", sandbox.CPULimit)
+	}
+
+	h.expectStatus(t, "token-a", http.MethodPost, "/v1/sandboxes", map[string]any{
+		"base_image_ref":  "alpine:3.20",
+		"cpu_limit":       "600m",
+		"memory_limit_mb": 256,
+		"pids_limit":      128,
+		"disk_limit_mb":   512,
+		"network_mode":    model.NetworkModeInternetDisabled,
+		"allow_tunnels":   false,
+		"start":           false,
+	}, http.StatusBadRequest)
+}
+
+func TestCreateSandboxRejectsFractionalCPUOnQEMU(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	h.expectStatus(t, "token-a", http.MethodPost, "/v1/sandboxes", map[string]any{
+		"base_image_ref":  "guest-base.qcow2",
+		"cpu_limit":       "500m",
+		"memory_limit_mb": 256,
+		"pids_limit":      128,
+		"disk_limit_mb":   512,
+		"network_mode":    model.NetworkModeInternetDisabled,
+		"allow_tunnels":   false,
+		"start":           false,
+	}, http.StatusBadRequest)
+}
+
 func TestAllowTunnelsFalseIsRespected(t *testing.T) {
 	h := newHarness(t)
 	defer h.close()
 
 	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
 		BaseImageRef:  "alpine:3.20",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 256,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -226,7 +279,7 @@ func TestDetachedExecDoesNotConsumeExecQuotaForever(t *testing.T) {
 	}
 	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
 		BaseImageRef:  "python:3.12-alpine",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 256,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -259,7 +312,7 @@ func TestRuntimeHealthEndpoint(t *testing.T) {
 
 	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
 		BaseImageRef:  "alpine:3.20",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 256,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -287,7 +340,7 @@ func TestTunnelProxyTargetsSandboxLocalhost(t *testing.T) {
 
 	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
 		BaseImageRef:  "guest-base.qcow2",
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 256,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -332,7 +385,7 @@ func newHarness(t *testing.T) *harness {
 		BaseImageRef:         "alpine:3.20",
 		RuntimeBackend:       "docker",
 		TrustedDockerRuntime: true,
-		DefaultCPULimit:      1,
+		DefaultCPULimit:      model.CPUCores(1),
 		DefaultMemoryLimitMB: 256,
 		DefaultPIDsLimit:     128,
 		DefaultDiskLimitMB:   512,
@@ -353,7 +406,7 @@ func newHarness(t *testing.T) *harness {
 			MaxRunningSandboxes:     8,
 			MaxConcurrentExecs:      8,
 			MaxTunnels:              8,
-			MaxCPUCores:             16,
+			MaxCPUCores:             model.CPUCores(16),
 			MaxMemoryMB:             8192,
 			MaxStorageMB:            16384,
 			AllowTunnels:            true,
@@ -391,7 +444,7 @@ func newStubHarness(t *testing.T) *harness {
 		SnapshotRoot:         filepath.Join(root, "snapshots"),
 		BaseImageRef:         "guest-base.qcow2",
 		RuntimeBackend:       "qemu",
-		DefaultCPULimit:      1,
+		DefaultCPULimit:      model.CPUCores(1),
 		DefaultMemoryLimitMB: 256,
 		DefaultPIDsLimit:     128,
 		DefaultDiskLimitMB:   512,
@@ -412,7 +465,7 @@ func newStubHarness(t *testing.T) *harness {
 			MaxRunningSandboxes:     8,
 			MaxConcurrentExecs:      8,
 			MaxTunnels:              8,
-			MaxCPUCores:             16,
+			MaxCPUCores:             model.CPUCores(16),
 			MaxMemoryMB:             8192,
 			MaxStorageMB:            16384,
 			AllowTunnels:            true,
@@ -667,6 +720,30 @@ func (h *harness) mustDoJSON(t *testing.T, token, method, endpoint string, paylo
 	response, body := h.do(t, token, method, endpoint, payload, nil)
 	defer response.Body.Close()
 	if response.StatusCode != want {
+		t.Fatalf("%s %s returned %d, want %d: %s", method, endpoint, response.StatusCode, want, body)
+	}
+	if out != nil && response.StatusCode != http.StatusNoContent {
+		if err := json.NewDecoder(response.Body).Decode(out); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func (h *harness) mustDoRawJSON(t *testing.T, token, method, endpoint, payload string, out any, want int) {
+	t.Helper()
+	request, err := http.NewRequest(method, h.server.URL+endpoint, bytes.NewBufferString(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != want {
+		body, _ := io.ReadAll(response.Body)
 		t.Fatalf("%s %s returned %d, want %d: %s", method, endpoint, response.StatusCode, want, body)
 	}
 	if out != nil && response.StatusCode != http.StatusNoContent {

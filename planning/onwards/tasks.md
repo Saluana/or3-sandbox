@@ -66,18 +66,18 @@
 
 ## 9. Verify the workloads the project claims
 
-- [ ] (R7, R8) Extend `internal/api/integration_test.go` or add guest-runtime integration tests for Git usage inside a guest sandbox on both Linux and macOS host paths.
-- [ ] (R7, R8) Add restart-persistence tests for Python package installation.
-- [ ] (R7, R8) Add restart-persistence tests for npm package installation.
-- [ ] (R7, R8) Add headless browser end-to-end smoke coverage against the guest backend.
-- [ ] (R7, R8) Add guest-local container engine smoke coverage that proves the host runtime socket is not required or exposed.
-- [ ] (R7, R8) Add a restart-durability test for a supervised background service inside the guest.
-- [ ] (R8) Run lifecycle and exec smoke coverage on both Linux and macOS using the same QEMU backend with OS-appropriate acceleration.
+- [x] (R7, R8) Extend `internal/api/integration_test.go` or add guest-runtime integration tests for Git usage inside a guest sandbox on both Linux and macOS host paths.
+- [x] (R7, R8) Add restart-persistence tests for Python package installation.
+- [x] (R7, R8) Add restart-persistence tests for npm package installation.
+- [x] (R7, R8) Add headless browser end-to-end smoke coverage against the guest backend.
+- [x] (R7, R8) Add guest-local container engine smoke coverage that proves the host runtime socket is not required or exposed.
+- [x] (R7, R8) Add a restart-durability test for a supervised background service inside the guest.
+- [x] (R8) Run lifecycle and exec smoke coverage on both Linux and macOS using the same QEMU backend with OS-appropriate acceleration.
 
 ## 10. Low-cost follow-ons after the guest runtime lands
 
-- [ ] (R5) Extend CPU input, validation, persistence, and quota math from integer cores to fractional or millicore values while preserving backward compatibility.
-- [ ] (R4) Re-evaluate the SSH-only control channel after workload tests; add a small guest agent only if it removes a measured limitation rather than adding protocol churn.
+- [x] (R5) Extend CPU input, validation, persistence, and quota math from integer cores to fractional or millicore values while preserving backward compatibility.
+- [x] (R4) Re-evaluate the SSH-only control channel after workload tests; add a small guest agent only if it removes a measured limitation rather than adding protocol churn.
 
 ## 11. Out of scope for this phase
 

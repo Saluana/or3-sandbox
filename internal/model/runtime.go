@@ -10,7 +10,7 @@ type SandboxSpec struct {
 	SandboxID     string
 	TenantID      string
 	BaseImageRef  string
-	CPULimit      int
+	CPULimit      CPUQuantity
 	MemoryLimitMB int
 	PIDsLimit     int
 	DiskLimitMB   int

@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 func Open(ctx context.Context, path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path)
@@ -45,6 +45,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			max_concurrent_execs INTEGER NOT NULL,
 			max_tunnels INTEGER NOT NULL,
 			max_cpu_cores INTEGER NOT NULL,
+			max_cpu_millis INTEGER NOT NULL DEFAULT 0,
 			max_memory_mb INTEGER NOT NULL,
 			max_storage_mb INTEGER NOT NULL,
 			allow_tunnels INTEGER NOT NULL,
@@ -58,6 +59,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			runtime_backend TEXT NOT NULL,
 			base_image_ref TEXT NOT NULL,
 			cpu_limit INTEGER NOT NULL,
+			cpu_limit_millis INTEGER NOT NULL DEFAULT 0,
 			memory_limit_mb INTEGER NOT NULL,
 			pids_limit INTEGER NOT NULL,
 			disk_limit_mb INTEGER NOT NULL,
@@ -162,6 +164,18 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	if err := ensureColumn(ctx, tx, "tunnels", "auth_secret_hash", `ALTER TABLE tunnels ADD COLUMN auth_secret_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "sandboxes", "cpu_limit_millis", `ALTER TABLE sandboxes ADD COLUMN cpu_limit_millis INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "quotas", "max_cpu_millis", `ALTER TABLE quotas ADD COLUMN max_cpu_millis INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sandboxes SET cpu_limit_millis = cpu_limit * 1000 WHERE cpu_limit_millis = 0`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE quotas SET max_cpu_millis = max_cpu_cores * 1000 WHERE max_cpu_millis = 0`); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (?, ?)`, schemaVersion, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {

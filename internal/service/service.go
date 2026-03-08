@@ -52,6 +52,9 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 	if err := validateCreate(req); err != nil {
 		return model.Sandbox{}, err
 	}
+	if err := s.validateRuntimeCreate(req); err != nil {
+		return model.Sandbox{}, err
+	}
 	if err := s.checkQuota(ctx, tenant.ID, quota, req); err != nil {
 		return model.Sandbox{}, err
 	}
@@ -875,6 +878,13 @@ func validateCreate(req model.CreateSandboxRequest) error {
 	}
 	if req.NetworkMode != model.NetworkModeInternetEnabled && req.NetworkMode != model.NetworkModeInternetDisabled {
 		return fmt.Errorf("invalid network mode %q", req.NetworkMode)
+	}
+	return nil
+}
+
+func (s *Service) validateRuntimeCreate(req model.CreateSandboxRequest) error {
+	if s.cfg.RuntimeBackend == "qemu" && req.CPULimit.MilliValue()%1000 != 0 {
+		return fmt.Errorf("qemu runtime requires whole CPU cores until fractional throttling is implemented")
 	}
 	return nil
 }

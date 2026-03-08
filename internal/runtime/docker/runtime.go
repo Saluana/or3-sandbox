@@ -63,7 +63,7 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 		"--init",
 		"--label", "or3.sandbox.id=" + spec.SandboxID,
 		"--label", "or3.tenant.id=" + spec.TenantID,
-		"--cpus", strconv.Itoa(spec.CPULimit),
+		"--cpus", spec.CPULimit.String(),
 		"--memory", fmt.Sprintf("%dm", spec.MemoryLimitMB),
 		"--pids-limit", strconv.Itoa(spec.PIDsLimit),
 		"-v", fmt.Sprintf("%s:/workspace", spec.WorkspaceRoot),

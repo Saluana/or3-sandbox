@@ -62,7 +62,7 @@ func TestStartArgsIncludeNetworkingAndDisks(t *testing.T) {
 	}
 	sandbox := model.Sandbox{
 		ID:            "sbx-1",
-		CPULimit:      2,
+		CPULimit:      model.CPUCores(2),
 		MemoryLimitMB: 768,
 		NetworkMode:   model.NetworkModeInternetDisabled,
 	}
@@ -88,7 +88,7 @@ func TestStartArgsKeepHostExposureLoopbackOnly(t *testing.T) {
 	args := strings.Join(r.startArgs(model.Sandbox{
 		ID:            "sbx-net",
 		MemoryLimitMB: 512,
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		NetworkMode:   model.NetworkModeInternetEnabled,
 	}, sandboxLayout{
 		pidPath:           "/tmp/qemu.pid",
@@ -225,7 +225,7 @@ func TestStartUsesRunnerAndReadinessProbe(t *testing.T) {
 		WorkspaceRoot: filepath.Join(base, "workspace"),
 		CacheRoot:     filepath.Join(base, "cache"),
 		MemoryLimitMB: 512,
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		NetworkMode:   model.NetworkModeInternetEnabled,
 	}
 	layout := layoutForSandbox(sandbox)
@@ -266,7 +266,7 @@ func TestStartCleansUpFailedBoot(t *testing.T) {
 		WorkspaceRoot: filepath.Join(base, "workspace"),
 		CacheRoot:     filepath.Join(base, "cache"),
 		MemoryLimitMB: 512,
-		CPULimit:      1,
+		CPULimit:      model.CPUCores(1),
 		NetworkMode:   model.NetworkModeInternetEnabled,
 	}
 	layout := layoutForSandbox(sandbox)
