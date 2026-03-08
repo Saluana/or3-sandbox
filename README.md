@@ -24,6 +24,16 @@ See also:
 - `planning/onwards/design.md`
 - `planning/onwards/tasks.md`
 - `planning/onwards/status_matrix.md`
+- `docs/README.md`
+
+## Documentation
+
+For a beginner-friendly walkthrough of the project, see:
+
+- `docs/README.md`
+- `docs/setup.md`
+- `docs/usage.md`
+- `docs/tutorials/first-sandbox.md`
 
 ## Quick Start
 
