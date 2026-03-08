@@ -38,11 +38,6 @@ type storageMeasurer interface {
 	MeasureStorage(ctx context.Context, sandbox model.Sandbox) (model.StorageUsage, error)
 }
 
-type TenantQuotaView struct {
-	Quota model.TenantQuota      `json:"quota"`
-	Usage repository.TenantUsage `json:"usage"`
-}
-
 func New(cfg config.Config, store *repository.Store, runtime model.RuntimeManager) *Service {
 	return &Service{cfg: cfg, store: store, runtime: runtime}
 }
@@ -50,6 +45,9 @@ func New(cfg config.Config, store *repository.Store, runtime model.RuntimeManage
 func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota model.TenantQuota, req model.CreateSandboxRequest) (model.Sandbox, error) {
 	req = s.applyCreateDefaults(req)
 	if err := validateCreate(req); err != nil {
+		return model.Sandbox{}, err
+	}
+	if err := s.enforceCreatePolicy(ctx, tenant.ID, req); err != nil {
 		return model.Sandbox{}, err
 	}
 	if err := s.validateRuntimeCreate(req); err != nil {
@@ -167,14 +165,18 @@ func (s *Service) GetTenantQuotaView(ctx context.Context, tenantID string) (Tena
 	if err != nil {
 		return TenantQuotaView{}, err
 	}
-	return TenantQuotaView{Quota: quota, Usage: usage}, nil
+	return buildTenantQuotaView(quota, usage), nil
 }
 
 func (s *Service) RuntimeHealth(ctx context.Context, tenantID string) (model.RuntimeHealth, error) {
+	if err := s.enforceAdminInspectionPolicy(ctx, tenantID, "runtime.inspect"); err != nil {
+		return model.RuntimeHealth{}, err
+	}
 	health := model.RuntimeHealth{
-		Backend:   s.cfg.RuntimeBackend,
-		Healthy:   true,
-		CheckedAt: time.Now().UTC(),
+		Backend:      s.cfg.RuntimeBackend,
+		Healthy:      true,
+		CheckedAt:    time.Now().UTC(),
+		StatusCounts: make(map[string]int),
 	}
 	sandboxes, err := s.store.ListNonDeletedSandboxes(ctx)
 	if err != nil {
@@ -195,7 +197,8 @@ func (s *Service) RuntimeHealth(ctx context.Context, tenantID string) (model.Run
 		}
 		state, err := s.runtime.Inspect(ctx, sandbox)
 		if err != nil {
-			entry.ObservedStatus = model.SandboxStatusError
+			entry.ObservedStatus = model.SandboxStatusDegraded
+			entry.RuntimeStatus = string(model.SandboxStatusDegraded)
 			entry.Error = err.Error()
 			health.Healthy = false
 		} else {
@@ -205,16 +208,24 @@ func (s *Service) RuntimeHealth(ctx context.Context, tenantID string) (model.Run
 			entry.Pid = state.Pid
 			entry.IPAddress = state.IPAddress
 			entry.Error = state.Error
-			if state.Status == model.SandboxStatusError {
+			if state.Status == model.SandboxStatusError || state.Status == model.SandboxStatusDegraded {
 				health.Healthy = false
 			}
 		}
+		health.StatusCounts[string(entry.ObservedStatus)]++
 		health.Sandboxes = append(health.Sandboxes, entry)
 	}
 	return health, nil
 }
 
 func (s *Service) StartSandbox(ctx context.Context, tenantID, sandboxID string, quota model.TenantQuota) (model.Sandbox, error) {
+	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
+	if err != nil {
+		return model.Sandbox{}, err
+	}
+	if err := s.enforceLifecyclePolicy(ctx, sandbox, "start"); err != nil {
+		return model.Sandbox{}, err
+	}
 	if err := s.checkRunningQuota(ctx, tenantID, quota); err != nil {
 		return model.Sandbox{}, err
 	}
@@ -269,6 +280,13 @@ func (s *Service) SuspendSandbox(ctx context.Context, tenantID, sandboxID string
 }
 
 func (s *Service) ResumeSandbox(ctx context.Context, tenantID, sandboxID string, quota model.TenantQuota) (model.Sandbox, error) {
+	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
+	if err != nil {
+		return model.Sandbox{}, err
+	}
+	if err := s.enforceLifecyclePolicy(ctx, sandbox, "resume"); err != nil {
+		return model.Sandbox{}, err
+	}
 	if err := s.checkRunningQuota(ctx, tenantID, quota); err != nil {
 		return model.Sandbox{}, err
 	}
@@ -341,6 +359,9 @@ func (s *Service) ExecSandbox(ctx context.Context, tenant model.Tenant, quota mo
 	if sandbox.Status != model.SandboxStatusRunning {
 		return model.Execution{}, fmt.Errorf("sandbox %s is not running", sandbox.ID)
 	}
+	if err := s.enforceLifecyclePolicy(ctx, sandbox, "exec"); err != nil {
+		return model.Execution{}, err
+	}
 	usage, err := s.store.TenantUsage(ctx, tenant.ID)
 	if err != nil {
 		return model.Execution{}, err
@@ -374,6 +395,7 @@ func (s *Service) ExecSandbox(ctx context.Context, tenant model.Tenant, quota mo
 	}
 	handle, err := s.runtime.Exec(ctx, sandbox, req, streams)
 	if err != nil {
+		persistCtx := context.WithoutCancel(ctx)
 		now := time.Now().UTC()
 		exitCode := 1
 		durationMS := now.Sub(started).Milliseconds()
@@ -382,9 +404,10 @@ func (s *Service) ExecSandbox(ctx context.Context, tenant model.Tenant, quota mo
 		execution.StderrPreview = err.Error()
 		execution.CompletedAt = &now
 		execution.DurationMS = &durationMS
-		_ = s.store.UpdateExecution(ctx, execution)
+		_ = s.store.UpdateExecution(persistCtx, execution)
 		return model.Execution{}, err
 	}
+	persistCtx := context.WithoutCancel(ctx)
 	if req.Detached {
 		now := time.Now().UTC()
 		exitCode := 0
@@ -393,10 +416,10 @@ func (s *Service) ExecSandbox(ctx context.Context, tenant model.Tenant, quota mo
 		execution.ExitCode = &exitCode
 		execution.CompletedAt = &now
 		execution.DurationMS = &durationMS
-		if err := s.store.UpdateExecution(ctx, execution); err != nil {
+		if err := s.store.UpdateExecution(persistCtx, execution); err != nil {
 			return model.Execution{}, err
 		}
-		s.recordAudit(ctx, tenant.ID, sandbox.ID, "sandbox.exec.detached", execution.ID, "ok", execution.Command)
+		s.recordAudit(persistCtx, tenant.ID, sandbox.ID, "sandbox.exec.detached", execution.ID, "ok", execution.Command)
 		return execution, nil
 	}
 	result := handle.Wait()
@@ -411,10 +434,11 @@ func (s *Service) ExecSandbox(ctx context.Context, tenant model.Tenant, quota mo
 	durationMS := result.Duration.Milliseconds()
 	execution.CompletedAt = &completed
 	execution.DurationMS = &durationMS
-	if err := s.store.UpdateExecution(ctx, execution); err != nil {
+	if err := s.store.UpdateExecution(persistCtx, execution); err != nil {
 		return model.Execution{}, err
 	}
-	s.recordAudit(ctx, tenant.ID, sandbox.ID, "sandbox.exec", execution.ID, string(execution.Status), execution.Command)
+	_ = s.touchSandboxActivity(persistCtx, sandbox)
+	s.recordAudit(persistCtx, tenant.ID, sandbox.ID, "sandbox.exec", execution.ID, string(execution.Status), execution.Command)
 	return execution, nil
 }
 
@@ -425,6 +449,9 @@ func (s *Service) CreateTTYSession(ctx context.Context, tenantID, sandboxID stri
 	}
 	if sandbox.Status != model.SandboxStatusRunning {
 		return model.Sandbox{}, model.TTYSession{}, nil, fmt.Errorf("sandbox %s is not running", sandbox.ID)
+	}
+	if err := s.enforceLifecyclePolicy(ctx, sandbox, "tty"); err != nil {
+		return model.Sandbox{}, model.TTYSession{}, nil, err
 	}
 	handle, err := s.runtime.AttachTTY(ctx, sandbox, req)
 	if err != nil {
@@ -443,6 +470,7 @@ func (s *Service) CreateTTYSession(ctx context.Context, tenantID, sandboxID stri
 		_ = handle.Close()
 		return model.Sandbox{}, model.TTYSession{}, nil, err
 	}
+	_ = s.touchSandboxActivity(ctx, sandbox)
 	return sandbox, session, handle, nil
 }
 
@@ -464,7 +492,11 @@ func (s *Service) ReadFile(ctx context.Context, tenantID, sandboxID, path string
 		return model.FileReadResponse{}, err
 	}
 	if runtime, ok := s.runtime.(workspaceFileRuntime); ok {
-		return runtime.ReadWorkspaceFile(ctx, sandbox, relativePath)
+		file, err := runtime.ReadWorkspaceFile(ctx, sandbox, relativePath)
+		if err == nil {
+			_ = s.touchSandboxActivity(ctx, sandbox)
+		}
+		return file, err
 	}
 	target, err := resolveWorkspacePath(sandbox.WorkspaceRoot, relativePath)
 	if err != nil {
@@ -474,6 +506,7 @@ func (s *Service) ReadFile(ctx context.Context, tenantID, sandboxID, path string
 	if err != nil {
 		return model.FileReadResponse{}, err
 	}
+	_ = s.touchSandboxActivity(ctx, sandbox)
 	return model.FileReadResponse{Path: relativePath, Content: string(data), Size: int64(len(data)), Encoding: "utf-8"}, nil
 }
 
@@ -503,6 +536,7 @@ func (s *Service) WriteFile(ctx context.Context, tenantID, sandboxID, path strin
 		}
 	}
 	s.recordAudit(ctx, tenantID, sandboxID, "file.write", relativePath, "ok", "file written")
+	_ = s.touchSandboxActivity(ctx, sandbox)
 	return s.refreshStorage(ctx, sandbox)
 }
 
@@ -529,6 +563,7 @@ func (s *Service) DeleteFile(ctx context.Context, tenantID, sandboxID, path stri
 		}
 	}
 	s.recordAudit(ctx, tenantID, sandboxID, "file.delete", relativePath, "ok", "path deleted")
+	_ = s.touchSandboxActivity(ctx, sandbox)
 	return s.refreshStorage(ctx, sandbox)
 }
 
@@ -555,6 +590,7 @@ func (s *Service) Mkdir(ctx context.Context, tenantID, sandboxID, path string) e
 		}
 	}
 	s.recordAudit(ctx, tenantID, sandboxID, "file.mkdir", relativePath, "ok", "directory created")
+	_ = s.touchSandboxActivity(ctx, sandbox)
 	return s.refreshStorage(ctx, sandbox)
 }
 
@@ -607,6 +643,9 @@ func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, 
 	if req.Visibility != "private" && req.Visibility != "public" {
 		return model.Tunnel{}, fmt.Errorf("unsupported visibility %q", req.Visibility)
 	}
+	if err := s.enforceTunnelPolicy(ctx, sandbox, req); err != nil {
+		return model.Tunnel{}, err
+	}
 	accessToken := ""
 	tunnel := model.Tunnel{
 		ID:         id,
@@ -627,6 +666,7 @@ func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, 
 	if err := s.store.CreateTunnel(ctx, tunnel); err != nil {
 		return model.Tunnel{}, err
 	}
+	_ = s.touchSandboxActivity(ctx, sandbox)
 	s.recordAudit(ctx, tenantID, sandboxID, "tunnel.create", tunnel.ID, "ok", tunnel.Endpoint)
 	return tunnel, nil
 }
@@ -703,15 +743,22 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 		return failSnapshot(err)
 	}
 	if info.ImageRef != "" {
-		targetImage := filepath.Join(snapshotDir, "rootfs.img")
-		if info.ImageRef != targetImage {
-			if err := copyFile(targetImage, info.ImageRef); err != nil {
-				return failSnapshot(err)
+		if looksLikeFilesystemPath(info.ImageRef) {
+			if !isReadableFile(info.ImageRef) {
+				return failSnapshot(fmt.Errorf("snapshot image artifact is not readable: %s", info.ImageRef))
 			}
-		}
-		snapshot.ImageRef = targetImage
-		if info.ImageRef != targetImage {
-			_ = os.Remove(info.ImageRef)
+			targetImage := filepath.Join(snapshotDir, "rootfs.img")
+			if info.ImageRef != targetImage {
+				if err := copyFile(targetImage, info.ImageRef); err != nil {
+					return failSnapshot(err)
+				}
+			}
+			snapshot.ImageRef = targetImage
+			if info.ImageRef != targetImage {
+				_ = os.Remove(info.ImageRef)
+			}
+		} else {
+			snapshot.ImageRef = info.ImageRef
 		}
 	} else {
 		snapshot.ImageRef = info.ImageRef
@@ -801,6 +848,12 @@ func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID stri
 }
 
 func (s *Service) Reconcile(ctx context.Context) error {
+	if err := s.reconcileOrphanedExecutions(ctx); err != nil {
+		return err
+	}
+	if err := s.reconcileIncompleteSnapshots(ctx); err != nil {
+		return err
+	}
 	sandboxes, err := s.store.ListNonDeletedSandboxes(ctx)
 	if err != nil {
 		return err
@@ -808,8 +861,8 @@ func (s *Service) Reconcile(ctx context.Context) error {
 	for _, sandbox := range sandboxes {
 		state, err := s.runtime.Inspect(ctx, sandbox)
 		if err != nil {
-			sandbox.Status = model.SandboxStatusError
-			sandbox.RuntimeStatus = string(model.SandboxStatusError)
+			sandbox.Status = model.SandboxStatusDegraded
+			sandbox.RuntimeStatus = string(model.SandboxStatusDegraded)
 			sandbox.LastRuntimeError = err.Error()
 			sandbox.UpdatedAt = time.Now().UTC()
 			_ = s.store.UpdateSandboxState(ctx, sandbox)
@@ -818,6 +871,8 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		switch {
 		case state.Status == model.SandboxStatusBooting:
 			sandbox.Status = model.SandboxStatusBooting
+		case state.Status == model.SandboxStatusDegraded:
+			sandbox.Status = model.SandboxStatusDegraded
 		case state.Status == model.SandboxStatusRunning:
 			sandbox.Status = model.SandboxStatusRunning
 		case state.Status == model.SandboxStatusStopped:
@@ -835,6 +890,50 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		_ = s.refreshStorage(ctx, sandbox)
 	}
 	return nil
+}
+
+func (s *Service) reconcileOrphanedExecutions(ctx context.Context) error {
+	executions, err := s.store.ListRunningExecutions(ctx)
+	if err != nil {
+		return err
+	}
+	for _, execution := range executions {
+		now := time.Now().UTC()
+		exitCode := 1
+		durationMS := now.Sub(execution.StartedAt).Milliseconds()
+		execution.Status = model.ExecutionStatusCanceled
+		execution.ExitCode = &exitCode
+		execution.StderrPreview = "control plane restarted during execution"
+		execution.CompletedAt = &now
+		execution.DurationMS = &durationMS
+		if err := s.store.UpdateExecution(ctx, execution); err != nil {
+			return err
+		}
+		s.recordAudit(ctx, execution.TenantID, execution.SandboxID, "sandbox.exec.reconcile", execution.ID, "canceled", execution.Command)
+	}
+	return nil
+}
+
+func (s *Service) reconcileIncompleteSnapshots(ctx context.Context) error {
+	snapshots, err := s.store.ListSnapshotsByStatus(ctx, model.SnapshotStatusCreating)
+	if err != nil {
+		return err
+	}
+	for _, snapshot := range snapshots {
+		snapshot.Status = model.SnapshotStatusError
+		if err := s.store.UpdateSnapshot(ctx, snapshot); err != nil {
+			return err
+		}
+		s.recordAudit(ctx, snapshot.TenantID, snapshot.SandboxID, "snapshot.reconcile", snapshot.ID, "error", "control plane restarted during snapshot creation")
+	}
+	return nil
+}
+
+func (s *Service) touchSandboxActivity(ctx context.Context, sandbox model.Sandbox) error {
+	now := time.Now().UTC()
+	sandbox.LastActiveAt = now
+	sandbox.UpdatedAt = now
+	return s.store.UpdateSandboxState(ctx, sandbox)
 }
 
 func (s *Service) refreshStorage(ctx context.Context, sandbox model.Sandbox) error {
@@ -1019,6 +1118,9 @@ func (s *Service) ensureSnapshotArtifacts(ctx context.Context, sandbox model.San
 	haveLocal := true
 	for _, path := range []string{snapshot.ImageRef, snapshot.WorkspaceTar} {
 		if path == "" {
+			continue
+		}
+		if !looksLikeFilesystemPath(path) {
 			continue
 		}
 		if _, err := os.Stat(path); err != nil {

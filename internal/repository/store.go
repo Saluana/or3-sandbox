@@ -71,6 +71,38 @@ func (s *Store) SeedTenants(ctx context.Context, tenants []config.TenantConfig, 
 	})
 }
 
+func (s *Store) EnsureTenantQuota(ctx context.Context, tenant model.Tenant, quota model.TenantQuota, tokenHash string) error {
+	return s.WithTx(ctx, func(tx *sql.Tx) error {
+		name := tenant.Name
+		if name == "" {
+			name = tenant.ID
+		}
+		if tokenHash == "" {
+			tokenHash = config.HashToken("jwt:" + tenant.ID)
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO tenants(tenant_id, name, token_hash, created_at)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(tenant_id) DO UPDATE SET name=excluded.name
+		`, tenant.ID, name, tokenHash, now); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO quotas(
+				tenant_id, max_sandboxes, max_running_sandboxes, max_concurrent_execs, max_tunnels,
+				max_cpu_cores, max_cpu_millis, max_memory_mb, max_storage_mb, allow_tunnels,
+				default_tunnel_auth_mode, default_tunnel_visibility
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(tenant_id) DO NOTHING
+		`, tenant.ID, quota.MaxSandboxes, quota.MaxRunningSandboxes, quota.MaxConcurrentExecs, quota.MaxTunnels, quota.MaxCPUCores.VCPUCount(), quota.MaxCPUCores.MilliValue(), quota.MaxMemoryMB, quota.MaxStorageMB, boolToInt(quota.AllowTunnels), quota.DefaultTunnelAuthMode, quota.DefaultTunnelVisibility); err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
 func (s *Store) AuthenticateTenant(ctx context.Context, tokenHash string) (model.Tenant, model.TenantQuota, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT t.tenant_id, t.name, t.token_hash, t.created_at,
@@ -286,14 +318,14 @@ func (s *Store) UpdateStorageUsage(ctx context.Context, sandboxID string, rootfs
 }
 
 type TenantUsage struct {
-	Sandboxes          int
-	RunningSandboxes   int
-	ConcurrentExecs    int
-	ActiveTunnels      int
-	RequestedCPU       model.CPUQuantity
-	RequestedMemory    int
-	RequestedStorage   int
-	ActualStorageBytes int64
+	Sandboxes          int               `json:"sandboxes"`
+	RunningSandboxes   int               `json:"running_sandboxes"`
+	ConcurrentExecs    int               `json:"concurrent_execs"`
+	ActiveTunnels      int               `json:"active_tunnels"`
+	RequestedCPU       model.CPUQuantity `json:"requested_cpu"`
+	RequestedMemory    int               `json:"requested_memory_mb"`
+	RequestedStorage   int               `json:"requested_storage_mb"`
+	ActualStorageBytes int64             `json:"actual_storage_bytes"`
 }
 
 func (s *Store) TenantUsage(ctx context.Context, tenantID string) (TenantUsage, error) {
@@ -497,6 +529,126 @@ func (s *Store) AddAuditEvent(ctx context.Context, event model.AuditEvent) error
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, event.ID, event.TenantID, event.SandboxID, event.Action, event.ResourceID, event.Outcome, event.Message, event.CreatedAt.UTC().Format(time.RFC3339Nano))
 	return err
+}
+
+func (s *Store) ListRunningExecutions(ctx context.Context) ([]model.Execution, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT execution_id, sandbox_id, tenant_id, command, cwd, timeout_seconds, status, started_at
+		FROM executions
+		WHERE status = ?
+		ORDER BY started_at
+	`, string(model.ExecutionStatusRunning))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var executions []model.Execution
+	for rows.Next() {
+		var execution model.Execution
+		var started string
+		if err := rows.Scan(&execution.ID, &execution.SandboxID, &execution.TenantID, &execution.Command, &execution.Cwd, &execution.TimeoutSeconds, &execution.Status, &started); err != nil {
+			return nil, err
+		}
+		execution.StartedAt = mustTime(started)
+		executions = append(executions, execution)
+	}
+	return executions, rows.Err()
+}
+
+func (s *Store) ListSnapshotsByStatus(ctx context.Context, status model.SnapshotStatus) ([]model.Snapshot, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, workspace_tar, export_location, created_at, completed_at
+		FROM snapshots
+		WHERE status = ?
+		ORDER BY created_at
+	`, string(status))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var snapshots []model.Snapshot
+	for rows.Next() {
+		snapshot, err := scanSnapshot(rows)
+		if err != nil {
+			return nil, err
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots, rows.Err()
+}
+
+func (s *Store) ExecutionCounts(ctx context.Context, tenantID string) (map[model.ExecutionStatus]int, error) {
+	query := `SELECT status, COUNT(*) FROM executions`
+	args := []any{}
+	if tenantID != "" {
+		query += ` WHERE tenant_id = ?`
+		args = append(args, tenantID)
+	}
+	query += ` GROUP BY status`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := make(map[model.ExecutionStatus]int)
+	for rows.Next() {
+		var status model.ExecutionStatus
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		counts[status] = count
+	}
+	return counts, rows.Err()
+}
+
+func (s *Store) SnapshotCounts(ctx context.Context, tenantID string) (map[model.SnapshotStatus]int, error) {
+	query := `SELECT status, COUNT(*) FROM snapshots`
+	args := []any{}
+	if tenantID != "" {
+		query += ` WHERE tenant_id = ?`
+		args = append(args, tenantID)
+	}
+	query += ` GROUP BY status`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := make(map[model.SnapshotStatus]int)
+	for rows.Next() {
+		var status model.SnapshotStatus
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		counts[status] = count
+	}
+	return counts, rows.Err()
+}
+
+func (s *Store) ListAuditEvents(ctx context.Context, tenantID string) ([]model.AuditEvent, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT audit_event_id, tenant_id, sandbox_id, action, resource_id, outcome, message, created_at
+		FROM audit_events
+		WHERE tenant_id = ?
+		ORDER BY created_at
+	`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []model.AuditEvent
+	for rows.Next() {
+		var event model.AuditEvent
+		var created string
+		if err := rows.Scan(&event.ID, &event.TenantID, &event.SandboxID, &event.Action, &event.ResourceID, &event.Outcome, &event.Message, &created); err != nil {
+			return nil, err
+		}
+		event.CreatedAt = mustTime(created)
+		events = append(events, event)
+	}
+	return events, rows.Err()
 }
 
 func scanSandbox(scanner interface{ Scan(...any) error }) (model.Sandbox, error) {

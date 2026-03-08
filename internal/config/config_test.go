@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -96,12 +98,79 @@ func TestValidateRuntimeConfigRejectsUnsupportedBackend(t *testing.T) {
 	}
 }
 
+func TestValidateAuthConfigJWTRequiresSecretPath(t *testing.T) {
+	err := validateAuthConfig(Config{
+		AuthMode:        "jwt-hs256",
+		AuthJWTIssuer:   "issuer.example",
+		AuthJWTAudience: "sandbox-api",
+	}, func(string) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "SANDBOX_AUTH_JWT_SECRET_PATHS") {
+		t.Fatalf("expected missing jwt secret path error, got %v", err)
+	}
+}
+
+func TestValidateTransportConfigRequiresTLSPairAndHTTPSProxyHost(t *testing.T) {
+	err := validateTransportConfig(Config{TLSCertPath: "/tmp/cert.pem"}, func(string) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "both SANDBOX_TLS_CERT_PATH and SANDBOX_TLS_KEY_PATH") {
+		t.Fatalf("expected tls pair error, got %v", err)
+	}
+	err = validateTransportConfig(Config{TrustedProxyHeaders: true, OperatorHost: "http://sandbox.invalid"}, func(string) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "https://") {
+		t.Fatalf("expected https operator host error, got %v", err)
+	}
+}
+
+func TestValidateProductionModeRejectsUnsafeSettings(t *testing.T) {
+	cfg := Config{
+		DeploymentMode:       "production",
+		ListenAddress:        ":8080",
+		DatabasePath:         "/tmp/test.db",
+		StorageRoot:          t.TempDir(),
+		SnapshotRoot:         t.TempDir(),
+		BaseImageRef:         "alpine:3.20",
+		RuntimeBackend:       "docker",
+		TrustedDockerRuntime: true,
+		AuthMode:             "static",
+		DefaultCPULimit:      model.CPUCores(1),
+		DefaultQuota: model.TenantQuota{
+			MaxCPUCores: model.CPUCores(4),
+		},
+		DefaultNetworkMode: model.NetworkModeInternetEnabled,
+		OperatorHost:       "http://sandbox.invalid",
+		Tenants:            []TenantConfig{{ID: "tenant-a", Name: "Tenant A", Token: "token-a"}},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "SANDBOX_RUNTIME=qemu") || !strings.Contains(err.Error(), "SANDBOX_AUTH_MODE=jwt-hs256") || !strings.Contains(err.Error(), "SANDBOX_TRUST_PROXY_HEADERS=true") {
+		t.Fatalf("expected production mode validation errors, got %v", err)
+	}
+}
+
+func TestValidateAuthConfigJWTAcceptsReadableSecrets(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "jwt.secret")
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := validateAuthConfig(Config{
+		AuthMode:           "jwt-hs256",
+		AuthJWTIssuer:      "issuer.example",
+		AuthJWTAudience:    "sandbox-api",
+		AuthJWTSecretPaths: []string{secret},
+	}, requireReadableFile)
+	if err != nil {
+		t.Fatalf("expected jwt config to validate, got %v", err)
+	}
+}
+
 func TestLoadParsesFractionalCPUDefaultsAndQuota(t *testing.T) {
 	t.Setenv("SANDBOX_RUNTIME", "docker")
 	t.Setenv("SANDBOX_TRUSTED_DOCKER_RUNTIME", "true")
 	t.Setenv("SANDBOX_DEFAULT_CPU", "1.5")
 	t.Setenv("SANDBOX_QUOTA_MAX_CPU", "2500m")
 	t.Setenv("SANDBOX_TOKENS", "token-a=tenant-a")
+	t.Setenv("SANDBOX_POLICY_ALLOWED_IMAGES", "ghcr.io/acme/*,alpine:3.20")
+	t.Setenv("SANDBOX_POLICY_ALLOW_PUBLIC_TUNNELS", "true")
+	t.Setenv("SANDBOX_POLICY_MAX_SANDBOX_LIFETIME", "24h")
+	t.Setenv("SANDBOX_POLICY_MAX_IDLE_TIMEOUT", "90m")
 
 	cfg, err := Load(nil)
 	if err != nil {
@@ -112,6 +181,18 @@ func TestLoadParsesFractionalCPUDefaultsAndQuota(t *testing.T) {
 	}
 	if cfg.DefaultQuota.MaxCPUCores != model.MustParseCPUQuantity("2500m") {
 		t.Fatalf("unexpected max cpu quota %v", cfg.DefaultQuota.MaxCPUCores)
+	}
+	if len(cfg.PolicyAllowedImages) != 2 || cfg.PolicyAllowedImages[0] != "ghcr.io/acme/*" || cfg.PolicyAllowedImages[1] != "alpine:3.20" {
+		t.Fatalf("unexpected policy allowed images %#v", cfg.PolicyAllowedImages)
+	}
+	if !cfg.PolicyAllowPublicTunnels {
+		t.Fatal("expected public tunnels policy to be enabled")
+	}
+	if cfg.PolicyMaxSandboxLifetime != 24*time.Hour {
+		t.Fatalf("unexpected sandbox lifetime policy %v", cfg.PolicyMaxSandboxLifetime)
+	}
+	if cfg.PolicyMaxIdleTimeout != 90*time.Minute {
+		t.Fatalf("unexpected idle timeout policy %v", cfg.PolicyMaxIdleTimeout)
 	}
 }
 

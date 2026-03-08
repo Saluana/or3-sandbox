@@ -14,13 +14,15 @@ In this project, the runtime is the engine under the hood.
 | Runtime | Best for | Current status | Main control method |
 | --- | --- | --- | --- |
 | `docker` | local development and trusted setups | most complete today | Docker CLI |
-| `qemu` | production-like isolation work | newer and still being hardened | QEMU + SSH |
+| `qemu` | production isolation and security-sensitive workloads | newer and still being hardened | QEMU + SSH |
 
 ## Docker runtime
 
 ### What it does well
 
 The Docker runtime is the easiest place to start.
+
+It is also the lower-cost option when the workload is trusted.
 
 It currently supports:
 
@@ -64,6 +66,8 @@ That setting is the project's way of saying:
 
 The QEMU runtime is the production-oriented direction.
 
+It is the stronger isolation option when security matters more than density.
+
 Instead of a container, each sandbox becomes a guest machine.
 
 That gives a stronger isolation story than Docker's shared-kernel model.
@@ -90,6 +94,18 @@ The main ones are:
 - operator-owned guest image prep matters a lot
 - the guest-backed path still needs more long-term hardening than the trusted Docker path
 
+### Runtime state signals
+
+The QEMU runtime now exposes more honest status values:
+
+- `booting` means the guest process exists but SSH readiness has not finished yet
+- `running` means the guest is reachable and ready
+- `suspended` means the guest was intentionally paused
+- `degraded` means the guest process is still alive but readiness checks are failing after the boot window
+- `error` means the daemon found a clearer failure signal, such as a guest boot failure marker
+
+That makes it easier for operators to tell the difference between "still starting" and "needs attention."
+
 If you are new to the project, do **not** start here.
 
 ## Which runtime should you pick?
@@ -100,11 +116,12 @@ Choose `docker` if:
 - you want the shortest setup path
 - you are testing API and CLI behavior
 - you are working on a trusted local machine
+- you want the cheaper, denser option for trusted internal work
 
 Choose `qemu` if:
 
-- you want to study the guest-backed design
-- you are working on production-like isolation ideas
+- you need the stronger production isolation boundary
+- you are working on untrusted or security-sensitive workloads
 - you are comfortable preparing guest images and SSH access
 
 ## Storage behavior
@@ -119,6 +136,7 @@ Choose `qemu` if:
 - root filesystem lives in a writable disk image
 - workspace lives in a separate disk image
 - snapshots copy both disk artifacts
+- restart reconciliation keeps incomplete snapshots conservative instead of pretending they finished cleanly
 
 ## Network behavior
 
@@ -138,3 +156,8 @@ Choose `qemu` if:
 Use Docker first.
 
 Then, once the project makes sense to you, read `images/guest/README.md` and try the QEMU path.
+
+For production planning, remember the simple rule:
+
+- choose Docker to save money when the workload is trusted
+- choose QEMU when the security boundary matters more than density

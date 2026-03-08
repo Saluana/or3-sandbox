@@ -11,30 +11,24 @@ import (
 	"golang.org/x/time/rate"
 
 	"or3-sandbox/internal/config"
-	"or3-sandbox/internal/model"
 	"or3-sandbox/internal/repository"
 )
 
-type tenantContextKey struct{}
-
-type TenantContext struct {
-	Tenant model.Tenant
-	Quota  model.TenantQuota
-}
-
 type Middleware struct {
-	store    *repository.Store
-	limiters sync.Map
-	rate     rate.Limit
-	burst    int
+	store         *repository.Store
+	authenticator Authenticator
+	limiters      sync.Map
+	rate          rate.Limit
+	burst         int
 }
 
 func New(store *repository.Store, cfg config.Config) *Middleware {
 	perSecond := float64(cfg.RequestRatePerMinute) / 60.0
 	return &Middleware{
-		store: store,
-		rate:  rate.Limit(perSecond),
-		burst: cfg.RequestBurst,
+		store:         store,
+		authenticator: newAuthenticator(store, cfg),
+		rate:          rate.Limit(perSecond),
+		burst:         cfg.RequestBurst,
 	}
 }
 
@@ -53,7 +47,7 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		tenant, quota, err := m.store.AuthenticateTenant(r.Context(), config.HashToken(token))
+		identity, tenant, quota, err := m.authenticator.Authenticate(r.Context(), token)
 		if err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -64,8 +58,9 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			return
 		}
 		ctx := context.WithValue(r.Context(), tenantContextKey{}, TenantContext{
-			Tenant: tenant,
-			Quota:  quota,
+			Tenant:   tenant,
+			Quota:    quota,
+			Identity: identity,
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -73,11 +68,6 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 
 func isTunnelProxyPath(path string) bool {
 	return strings.HasPrefix(path, "/v1/tunnels/") && strings.Contains(path, "/proxy")
-}
-
-func FromContext(ctx context.Context) (TenantContext, bool) {
-	value, ok := ctx.Value(tenantContextKey{}).(TenantContext)
-	return value, ok
 }
 
 func bearerToken(header string) (string, error) {

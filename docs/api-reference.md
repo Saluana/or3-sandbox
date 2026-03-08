@@ -12,7 +12,9 @@ Authorization: Bearer <token>
 
 - `GET /healthz` — basic health check
 - `GET /v1/runtime/health` — runtime and sandbox health view
+- `GET /v1/runtime/capacity` — operator capacity summary with quota pressure
 - `GET /v1/quotas/me` — current tenant quota and usage
+- `GET /metrics` — scrape-friendly counters for operators and monitoring systems
 
 ## Sandboxes
 
@@ -74,3 +76,4 @@ curl -X POST http://127.0.0.1:8080/v1/sandboxes \
 - if you are new, it is easiest to omit optional duration fields and let the server use defaults
 - streamed exec output uses server-sent events, not plain JSON lines
 - terminal sessions use WebSocket, not regular HTTP request-response
+- some admin endpoints, such as runtime capacity and metrics, may require a stronger role than normal sandbox use

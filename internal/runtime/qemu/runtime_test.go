@@ -163,7 +163,7 @@ func TestCreateAndSnapshotArtifacts(t *testing.T) {
 	}
 }
 
-func TestInspectReportsErrorWhenGuestIsAliveButNotReady(t *testing.T) {
+func TestInspectReportsBootingWhenGuestIsAliveButNotReadyWithinBootWindow(t *testing.T) {
 	cmd := exec.Command("sleep", "30")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start sleep: %v", err)
@@ -200,7 +200,53 @@ func TestInspectReportsErrorWhenGuestIsAliveButNotReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inspect failed: %v", err)
 	}
-	if state.Status != model.SandboxStatusError {
+	if state.Status != model.SandboxStatusBooting {
+		t.Fatalf("unexpected status: %s", state.Status)
+	}
+}
+
+func TestInspectReportsDegradedWhenGuestIsAliveButNotReadyAfterBootWindow(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	defer cmd.Process.Kill()
+
+	base := t.TempDir()
+	layout := sandboxLayout{
+		baseDir:    base,
+		runtimeDir: filepath.Join(base, ".runtime"),
+		pidPath:    filepath.Join(base, ".runtime", "qemu.pid"),
+	}
+	if err := ensureLayout(layout); err != nil {
+		t.Fatalf("ensure layout: %v", err)
+	}
+	if err := os.WriteFile(layout.pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+	old := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(layout.pidPath, old, old); err != nil {
+		t.Fatalf("age pid file: %v", err)
+	}
+	r := &Runtime{
+		bootTimeout:  time.Second,
+		pollInterval: 10 * time.Millisecond,
+		sshReady: func(context.Context, sshTarget) error {
+			return errors.New("not ready")
+		},
+	}
+	sandbox := model.Sandbox{
+		ID:            "sbx-inspect-degraded",
+		RuntimeID:     "qemu-sbx-inspect-degraded",
+		StorageRoot:   filepath.Join(base, "rootfs"),
+		WorkspaceRoot: filepath.Join(base, "workspace"),
+		CacheRoot:     filepath.Join(base, "cache"),
+	}
+	state, err := r.Inspect(context.Background(), sandbox)
+	if err != nil {
+		t.Fatalf("inspect failed: %v", err)
+	}
+	if state.Status != model.SandboxStatusDegraded {
 		t.Fatalf("unexpected status: %s", state.Status)
 	}
 }

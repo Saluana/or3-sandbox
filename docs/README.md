@@ -11,7 +11,7 @@ This project is a **single-node sandbox control plane**. In simple words, it is 
 - `sandboxd`: the server (daemon) that creates and manages sandboxes
 - `sandboxctl`: the command-line tool (CLI) you use to talk to the server
 
-Right now, the most complete path is the **Docker runtime**. It is meant for **trusted** or **development** use. The project also includes a **QEMU guest runtime** for a more production-like setup, but that path is still newer and more limited.
+Right now, the simplest path is the **Docker runtime**. It is meant for **trusted** or **development** use. The project also includes a **QEMU guest runtime** for the stronger production isolation path.
 
 ## Honest project status
 
@@ -19,7 +19,8 @@ This part matters:
 
 - **Docker is the shipped and easiest path today**
 - **Docker is not treated as a hostile multi-tenant security boundary**
-- **QEMU is the production-oriented direction**
+- **QEMU is the supported production isolation path**
+- **Docker is the lower-cost option; QEMU is the higher-isolation option**
 - Some advanced features are still being improved, especially around guest images, recovery drills, and broader production testing
 
 If you are learning the project or trying it on your own computer, start with Docker.

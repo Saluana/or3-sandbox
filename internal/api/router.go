@@ -36,7 +36,9 @@ func New(log *slog.Logger, svc *service.Service) http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", router.health)
+	mux.HandleFunc("/metrics", router.handleMetrics)
 	mux.HandleFunc("/v1/runtime/health", router.handleRuntimeHealth)
+	mux.HandleFunc("/v1/runtime/capacity", router.handleRuntimeCapacity)
 	mux.HandleFunc("/v1/quotas/me", router.handleQuota)
 	mux.HandleFunc("/v1/sandboxes", router.handleSandboxes)
 	mux.HandleFunc("/v1/sandboxes/", router.handleSandboxRoutes)
@@ -67,12 +69,58 @@ func (rt *Router) handleRuntimeHealth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !requirePermission(w, r, auth.PermissionAdminInspect) {
+		return
+	}
 	health, err := rt.service.RuntimeHealth(r.Context(), tenantCtx.Tenant.ID)
 	if err != nil {
 		handleError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, health)
+}
+
+func (rt *Router) handleRuntimeCapacity(w http.ResponseWriter, r *http.Request) {
+	tenantCtx, ok := auth.FromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requirePermission(w, r, auth.PermissionAdminInspect) {
+		return
+	}
+	report, err := rt.service.CapacityReport(r.Context(), tenantCtx.Tenant.ID)
+	if err != nil {
+		handleError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (rt *Router) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	tenantCtx, ok := auth.FromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requirePermission(w, r, auth.PermissionAdminInspect) {
+		return
+	}
+	metrics, err := rt.service.MetricsReport(r.Context(), tenantCtx.Tenant.ID)
+	if err != nil {
+		handleError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	_, _ = io.WriteString(w, metrics)
 }
 
 func (rt *Router) handleQuota(w http.ResponseWriter, r *http.Request) {
@@ -101,6 +149,9 @@ func (rt *Router) handleSandboxes(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPost:
+		if !requirePermission(w, r, auth.PermissionSandboxLifecycle) {
+			return
+		}
 		var req model.CreateSandboxRequest
 		if err := decodeJSON(r, &req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -113,6 +164,9 @@ func (rt *Router) handleSandboxes(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusCreated, sandbox)
 	case http.MethodGet:
+		if !requirePermission(w, r, auth.PermissionSandboxRead) {
+			return
+		}
 		sandboxes, err := rt.service.ListSandboxes(r.Context(), tenantCtx.Tenant.ID)
 		if err != nil {
 			handleError(w, err)
@@ -140,6 +194,9 @@ func (rt *Router) handleSandboxRoutes(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 1 {
 		switch r.Method {
 		case http.MethodGet:
+			if !requirePermission(w, r, auth.PermissionSandboxRead) {
+				return
+			}
 			sandbox, err := rt.service.GetSandbox(r.Context(), tenantCtx.Tenant.ID, sandboxID)
 			if err != nil {
 				handleError(w, err)
@@ -147,6 +204,9 @@ func (rt *Router) handleSandboxRoutes(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, http.StatusOK, sandbox)
 		case http.MethodDelete:
+			if !requirePermission(w, r, auth.PermissionSandboxLifecycle) {
+				return
+			}
 			if err := rt.service.DeleteSandbox(r.Context(), tenantCtx.Tenant.ID, sandboxID, false); err != nil {
 				handleError(w, err)
 				return
@@ -159,30 +219,54 @@ func (rt *Router) handleSandboxRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 	switch parts[1] {
 	case "start":
+		if !requirePermission(w, r, auth.PermissionSandboxLifecycle) {
+			return
+		}
 		rt.handleLifecycle(w, r, func(ctx context.Context) (model.Sandbox, error) {
 			return rt.service.StartSandbox(ctx, tenantCtx.Tenant.ID, sandboxID, tenantCtx.Quota)
 		})
 	case "stop":
+		if !requirePermission(w, r, auth.PermissionSandboxLifecycle) {
+			return
+		}
 		var req model.LifecycleRequest
 		_ = decodeJSON(r, &req)
 		rt.handleLifecycle(w, r, func(ctx context.Context) (model.Sandbox, error) {
 			return rt.service.StopSandbox(ctx, tenantCtx.Tenant.ID, sandboxID, req.Force)
 		})
 	case "suspend":
+		if !requirePermission(w, r, auth.PermissionSandboxLifecycle) {
+			return
+		}
 		rt.handleLifecycle(w, r, func(ctx context.Context) (model.Sandbox, error) {
 			return rt.service.SuspendSandbox(ctx, tenantCtx.Tenant.ID, sandboxID)
 		})
 	case "resume":
+		if !requirePermission(w, r, auth.PermissionSandboxLifecycle) {
+			return
+		}
 		rt.handleLifecycle(w, r, func(ctx context.Context) (model.Sandbox, error) {
 			return rt.service.ResumeSandbox(ctx, tenantCtx.Tenant.ID, sandboxID, tenantCtx.Quota)
 		})
 	case "exec":
+		if !requirePermission(w, r, auth.PermissionExecRun) {
+			return
+		}
 		rt.handleExec(w, r, tenantCtx, sandboxID)
 	case "tty":
+		if !requirePermission(w, r, auth.PermissionTTYAttach) {
+			return
+		}
 		rt.handleTTY(w, r, tenantCtx, sandboxID)
 	case "files":
+		if !requireFilePermission(w, r) {
+			return
+		}
 		rt.handleFiles(w, r, tenantCtx.Tenant.ID, sandboxID, strings.Join(parts[2:], "/"))
 	case "mkdir":
+		if !requirePermission(w, r, auth.PermissionFilesWrite) {
+			return
+		}
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -199,6 +283,19 @@ func (rt *Router) handleSandboxRoutes(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	case "tunnels":
 		if len(parts) > 2 {
+			if !requirePermission(w, r, auth.PermissionTunnelsWrite) {
+				return
+			}
+		} else if r.Method == http.MethodGet {
+			if !requirePermission(w, r, auth.PermissionTunnelsRead) {
+				return
+			}
+		} else if r.Method == http.MethodPost {
+			if !requirePermission(w, r, auth.PermissionTunnelsWrite) {
+				return
+			}
+		}
+		if len(parts) > 2 {
 			if r.Method != http.MethodDelete {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 				return
@@ -214,6 +311,9 @@ func (rt *Router) handleSandboxRoutes(w http.ResponseWriter, r *http.Request) {
 	case "snapshots":
 		switch r.Method {
 		case http.MethodPost:
+			if !requirePermission(w, r, auth.PermissionSnapshotsWrite) {
+				return
+			}
 			var req model.CreateSnapshotRequest
 			if err := decodeJSON(r, &req); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -226,6 +326,9 @@ func (rt *Router) handleSandboxRoutes(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, http.StatusCreated, snapshot)
 		case http.MethodGet:
+			if !requirePermission(w, r, auth.PermissionSnapshotsRead) {
+				return
+			}
 			snapshots, err := rt.service.ListSnapshots(r.Context(), tenantCtx.Tenant.ID, sandboxID)
 			if err != nil {
 				handleError(w, err)
@@ -447,6 +550,9 @@ func (rt *Router) handleSnapshotRoutes(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if !requirePermission(w, r, auth.PermissionSnapshotsRead) {
+			return
+		}
 		snapshot, err := rt.service.GetSnapshot(r.Context(), tenantCtx.Tenant.ID, parts[0])
 		if err != nil {
 			handleError(w, err)
@@ -457,6 +563,9 @@ func (rt *Router) handleSnapshotRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) < 2 || parts[1] != "restore" || r.Method != http.MethodPost {
 		http.NotFound(w, r)
+		return
+	}
+	if !requirePermission(w, r, auth.PermissionSnapshotsWrite) {
 		return
 	}
 	var req model.RestoreSnapshotRequest
@@ -488,6 +597,9 @@ func (rt *Router) handleTunnelRoutes(w http.ResponseWriter, r *http.Request) {
 		}
 		if r.Method != http.MethodDelete {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !requirePermission(w, r, auth.PermissionTunnelsWrite) {
 			return
 		}
 		if err := rt.service.RevokeTunnel(r.Context(), tenantCtx.Tenant.ID, tunnelID); err != nil {
@@ -616,11 +728,30 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func handleError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, auth.ErrForbidden):
+		http.Error(w, "forbidden", http.StatusForbidden)
 	case errors.Is(err, repository.ErrNotFound):
 		http.Error(w, "not found", http.StatusNotFound)
 	default:
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	}
+}
+
+func requirePermission(w http.ResponseWriter, r *http.Request, permission string) bool {
+	if err := auth.Require(r.Context(), permission); err != nil {
+		handleError(w, err)
+		return false
+	}
+	return true
+}
+
+func requireFilePermission(w http.ResponseWriter, r *http.Request) bool {
+	permission := auth.PermissionFilesRead
+	switch r.Method {
+	case http.MethodPut, http.MethodDelete, http.MethodPost:
+		permission = auth.PermissionFilesWrite
+	}
+	return requirePermission(w, r, permission)
 }
 
 func mustJSON(payload any) string {

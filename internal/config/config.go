@@ -24,51 +24,79 @@ type TenantConfig struct {
 }
 
 type Config struct {
-	ListenAddress          string
-	DatabasePath           string
-	StorageRoot            string
-	SnapshotRoot           string
-	BaseImageRef           string
-	RuntimeBackend         string
-	TrustedDockerRuntime   bool
-	DefaultCPULimit        model.CPUQuantity
-	DefaultMemoryLimitMB   int
-	DefaultPIDsLimit       int
-	DefaultDiskLimitMB     int
-	DefaultNetworkMode     model.NetworkMode
-	DefaultAllowTunnels    bool
-	RequestRatePerMinute   int
-	RequestBurst           int
-	DefaultQuota           model.TenantQuota
-	GracefulShutdown       time.Duration
-	ReconcileInterval      time.Duration
-	CleanupInterval        time.Duration
-	OperatorHost           string
-	Tenants                []TenantConfig
-	OptionalSnapshotExport string
-	QEMUBinary             string
-	QEMUAccel              string
-	QEMUBaseImagePath      string
-	QEMUSSHUser            string
-	QEMUSSHPrivateKeyPath  string
-	QEMUBootTimeout        time.Duration
+	DeploymentMode           string
+	ListenAddress            string
+	DatabasePath             string
+	StorageRoot              string
+	SnapshotRoot             string
+	BaseImageRef             string
+	RuntimeBackend           string
+	AuthMode                 string
+	AuthJWTIssuer            string
+	AuthJWTAudience          string
+	AuthJWTSecretPaths       []string
+	TLSCertPath              string
+	TLSKeyPath               string
+	TrustedProxyHeaders      bool
+	TrustedDockerRuntime     bool
+	PolicyAllowedImages      []string
+	PolicyAllowPublicTunnels bool
+	PolicyMaxSandboxLifetime time.Duration
+	PolicyMaxIdleTimeout     time.Duration
+	DefaultCPULimit          model.CPUQuantity
+	DefaultMemoryLimitMB     int
+	DefaultPIDsLimit         int
+	DefaultDiskLimitMB       int
+	DefaultNetworkMode       model.NetworkMode
+	DefaultAllowTunnels      bool
+	RequestRatePerMinute     int
+	RequestBurst             int
+	DefaultQuota             model.TenantQuota
+	GracefulShutdown         time.Duration
+	ReconcileInterval        time.Duration
+	CleanupInterval          time.Duration
+	OperatorHost             string
+	Tenants                  []TenantConfig
+	OptionalSnapshotExport   string
+	QEMUBinary               string
+	QEMUAccel                string
+	QEMUBaseImagePath        string
+	QEMUSSHUser              string
+	QEMUSSHPrivateKeyPath    string
+	QEMUBootTimeout          time.Duration
 }
 
 func Load(args []string) (Config, error) {
 	fs := flag.NewFlagSet("sandboxd", flag.ContinueOnError)
 	cfg := Config{}
+	fs.StringVar(&cfg.DeploymentMode, "mode", env("SANDBOX_MODE", "development"), "deployment mode")
 	fs.StringVar(&cfg.ListenAddress, "listen", env("SANDBOX_LISTEN", ":8080"), "HTTP listen address")
 	fs.StringVar(&cfg.DatabasePath, "db", env("SANDBOX_DB_PATH", "./data/sandbox.db"), "SQLite path")
 	fs.StringVar(&cfg.StorageRoot, "storage-root", env("SANDBOX_STORAGE_ROOT", "./data/storage"), "storage root")
 	fs.StringVar(&cfg.SnapshotRoot, "snapshot-root", env("SANDBOX_SNAPSHOT_ROOT", "./data/snapshots"), "snapshot root")
 	fs.StringVar(&cfg.BaseImageRef, "base-image", env("SANDBOX_BASE_IMAGE", "mcr.microsoft.com/playwright:v1.51.1-noble"), "default base image")
 	fs.StringVar(&cfg.RuntimeBackend, "runtime", env("SANDBOX_RUNTIME", "docker"), "runtime backend")
+	fs.StringVar(&cfg.AuthMode, "auth-mode", env("SANDBOX_AUTH_MODE", "static"), "auth mode")
+	fs.StringVar(&cfg.AuthJWTIssuer, "auth-jwt-issuer", env("SANDBOX_AUTH_JWT_ISSUER", ""), "jwt issuer")
+	fs.StringVar(&cfg.AuthJWTAudience, "auth-jwt-audience", env("SANDBOX_AUTH_JWT_AUDIENCE", ""), "jwt audience")
+	authJWTSecretPaths := env("SANDBOX_AUTH_JWT_SECRET_PATHS", "")
+	fs.StringVar(&authJWTSecretPaths, "auth-jwt-secret-paths", authJWTSecretPaths, "comma-separated jwt secret file paths")
+	fs.StringVar(&cfg.TLSCertPath, "tls-cert", env("SANDBOX_TLS_CERT_PATH", ""), "tls certificate path")
+	fs.StringVar(&cfg.TLSKeyPath, "tls-key", env("SANDBOX_TLS_KEY_PATH", ""), "tls private key path")
+	policyAllowedImages := env("SANDBOX_POLICY_ALLOWED_IMAGES", "")
+	fs.StringVar(&policyAllowedImages, "policy-allowed-images", policyAllowedImages, "comma-separated allowed image references or prefixes ending with *")
+	policyAllowPublicTunnels := strings.EqualFold(env("SANDBOX_POLICY_ALLOW_PUBLIC_TUNNELS", "false"), "true")
+	fs.BoolVar(&policyAllowPublicTunnels, "policy-allow-public-tunnels", policyAllowPublicTunnels, "allow public tunnels")
+	fs.DurationVar(&cfg.PolicyMaxSandboxLifetime, "policy-max-sandbox-lifetime", envDuration("SANDBOX_POLICY_MAX_SANDBOX_LIFETIME", 0), "maximum sandbox lifetime before policy denial; 0 disables")
+	fs.DurationVar(&cfg.PolicyMaxIdleTimeout, "policy-max-idle-timeout", envDuration("SANDBOX_POLICY_MAX_IDLE_TIMEOUT", 0), "maximum sandbox idle time before policy denial; 0 disables")
 	fs.StringVar(&cfg.QEMUBinary, "qemu-binary", env("SANDBOX_QEMU_BINARY", defaultQEMUBinary()), "qemu system binary")
 	fs.StringVar(&cfg.QEMUAccel, "qemu-accel", env("SANDBOX_QEMU_ACCEL", "auto"), "qemu accelerator selection")
 	fs.StringVar(&cfg.QEMUBaseImagePath, "qemu-base-image-path", env("SANDBOX_QEMU_BASE_IMAGE_PATH", ""), "qemu base guest image path")
 	fs.StringVar(&cfg.QEMUSSHUser, "qemu-ssh-user", env("SANDBOX_QEMU_SSH_USER", ""), "qemu guest ssh user")
 	fs.StringVar(&cfg.QEMUSSHPrivateKeyPath, "qemu-ssh-private-key", env("SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH", ""), "qemu guest ssh private key path")
 	trustedDockerRuntime := env("SANDBOX_TRUSTED_DOCKER_RUNTIME", "false")
+	trustedProxyHeaders := strings.EqualFold(env("SANDBOX_TRUST_PROXY_HEADERS", "false"), "true")
+	fs.BoolVar(&trustedProxyHeaders, "trust-proxy-headers", trustedProxyHeaders, "trust reverse-proxy tls headers")
 	defaultCPU := env("SANDBOX_DEFAULT_CPU", "2")
 	fs.StringVar(&defaultCPU, "default-cpu", defaultCPU, "default cpu limit")
 	fs.IntVar(&cfg.DefaultMemoryLimitMB, "default-memory-mb", envInt("SANDBOX_DEFAULT_MEMORY_MB", 2048), "default memory limit")
@@ -98,6 +126,10 @@ func Load(args []string) (Config, error) {
 	cfg.DefaultNetworkMode = model.NetworkMode(networkMode)
 	cfg.DefaultAllowTunnels = strings.EqualFold(allowTunnels, "true")
 	cfg.TrustedDockerRuntime = strings.EqualFold(trustedDockerRuntime, "true")
+	cfg.TrustedProxyHeaders = trustedProxyHeaders
+	cfg.AuthJWTSecretPaths = parseCommaSeparated(authJWTSecretPaths)
+	cfg.PolicyAllowedImages = parseCommaSeparated(policyAllowedImages)
+	cfg.PolicyAllowPublicTunnels = policyAllowPublicTunnels
 	cfg.OptionalSnapshotExport = env("SANDBOX_S3_EXPORT_URI", "")
 	cfg.DefaultQuota = model.TenantQuota{
 		MaxSandboxes:            envInt("SANDBOX_QUOTA_MAX_SANDBOXES", 10),
@@ -117,6 +149,9 @@ func Load(args []string) (Config, error) {
 
 func (c Config) Validate() error {
 	var problems []string
+	if c.DeploymentMode != "development" && c.DeploymentMode != "production" {
+		problems = append(problems, fmt.Sprintf("unsupported deployment mode %q", c.DeploymentMode))
+	}
 	if c.ListenAddress == "" {
 		problems = append(problems, "listen address is required")
 	}
@@ -131,6 +166,18 @@ func (c Config) Validate() error {
 	}
 	if c.BaseImageRef == "" {
 		problems = append(problems, "base image reference is required")
+	}
+	if c.PolicyMaxSandboxLifetime < 0 {
+		problems = append(problems, "policy max sandbox lifetime must be zero or positive")
+	}
+	if c.PolicyMaxIdleTimeout < 0 {
+		problems = append(problems, "policy max idle timeout must be zero or positive")
+	}
+	if err := validateAuthConfig(c, requireReadableFile); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if err := validateTransportConfig(c, requireReadableFile); err != nil {
+		problems = append(problems, err.Error())
 	}
 	if err := validateRuntimeConfig(c, defaultRuntimeValidationProbe()); err != nil {
 		problems = append(problems, err.Error())
@@ -147,8 +194,19 @@ func (c Config) Validate() error {
 	if c.DefaultNetworkMode != model.NetworkModeInternetEnabled && c.DefaultNetworkMode != model.NetworkModeInternetDisabled {
 		problems = append(problems, fmt.Sprintf("unsupported default network mode %q", c.DefaultNetworkMode))
 	}
-	if len(c.Tenants) == 0 {
+	if c.AuthMode == "static" && len(c.Tenants) == 0 {
 		problems = append(problems, "at least one tenant token is required")
+	}
+	if c.DeploymentMode == "production" {
+		if c.RuntimeBackend != "qemu" {
+			problems = append(problems, "production mode requires SANDBOX_RUNTIME=qemu")
+		}
+		if c.AuthMode == "static" {
+			problems = append(problems, "production mode requires SANDBOX_AUTH_MODE=jwt-hs256")
+		}
+		if c.TLSCertPath == "" && !c.TrustedProxyHeaders {
+			problems = append(problems, "production mode requires TLS certificate paths or SANDBOX_TRUST_PROXY_HEADERS=true")
+		}
 	}
 	for _, dir := range []string{filepath.Dir(c.DatabasePath), c.StorageRoot, c.SnapshotRoot} {
 		if dir == "" {
@@ -164,21 +222,74 @@ func (c Config) Validate() error {
 	return nil
 }
 
+func validateAuthConfig(c Config, fileReadable func(string) error) error {
+	switch c.AuthMode {
+	case "static":
+		return nil
+	case "jwt-hs256":
+		var problems []string
+		if strings.TrimSpace(c.AuthJWTIssuer) == "" {
+			problems = append(problems, "jwt auth requires SANDBOX_AUTH_JWT_ISSUER")
+		}
+		if strings.TrimSpace(c.AuthJWTAudience) == "" {
+			problems = append(problems, "jwt auth requires SANDBOX_AUTH_JWT_AUDIENCE")
+		}
+		if len(c.AuthJWTSecretPaths) == 0 {
+			problems = append(problems, "jwt auth requires SANDBOX_AUTH_JWT_SECRET_PATHS")
+		}
+		for _, path := range c.AuthJWTSecretPaths {
+			if err := fileReadable(path); err != nil {
+				problems = append(problems, fmt.Sprintf("jwt auth secret path is not readable: %v", err))
+			}
+		}
+		if len(problems) > 0 {
+			return errors.New(strings.Join(problems, "; "))
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported auth mode %q", c.AuthMode)
+	}
+}
+
+func validateTransportConfig(c Config, fileReadable func(string) error) error {
+	hasCert := strings.TrimSpace(c.TLSCertPath) != ""
+	hasKey := strings.TrimSpace(c.TLSKeyPath) != ""
+	if hasCert != hasKey {
+		return errors.New("tls requires both SANDBOX_TLS_CERT_PATH and SANDBOX_TLS_KEY_PATH")
+	}
+	var problems []string
+	if hasCert {
+		if err := fileReadable(c.TLSCertPath); err != nil {
+			problems = append(problems, fmt.Sprintf("tls certificate path is not readable: %v", err))
+		}
+		if err := fileReadable(c.TLSKeyPath); err != nil {
+			problems = append(problems, fmt.Sprintf("tls key path is not readable: %v", err))
+		}
+	}
+	if c.TrustedProxyHeaders && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.OperatorHost)), "https://") {
+		problems = append(problems, "trusted proxy mode requires SANDBOX_OPERATOR_HOST to use https://")
+	}
+	if len(problems) > 0 {
+		return errors.New(strings.Join(problems, "; "))
+	}
+	return nil
+}
+
 type runtimeValidationProbe struct {
-	goos         string
+	goos          string
 	commandExists func(string) error
-	fileReadable func(string) error
-	kvmAvailable func() error
-	hvfAvailable func() error
+	fileReadable  func(string) error
+	kvmAvailable  func() error
+	hvfAvailable  func() error
 }
 
 func defaultRuntimeValidationProbe() runtimeValidationProbe {
 	return runtimeValidationProbe{
-		goos: goruntime.GOOS,
+		goos:          goruntime.GOOS,
 		commandExists: requireCommand,
-		fileReadable: requireReadableFile,
-		kvmAvailable: requireKVM,
-		hvfAvailable: requireHVF,
+		fileReadable:  requireReadableFile,
+		kvmAvailable:  requireKVM,
+		hvfAvailable:  requireHVF,
 	}
 }
 
@@ -366,4 +477,16 @@ func parseTenants(raw string) []TenantConfig {
 		})
 	}
 	return tenants
+}
+
+func parseCommaSeparated(raw string) []string {
+	var values []string
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		values = append(values, entry)
+	}
+	return values
 }

@@ -16,10 +16,10 @@ import (
 	"or3-sandbox/internal/db"
 	"or3-sandbox/internal/logging"
 	"or3-sandbox/internal/model"
+	"or3-sandbox/internal/repository"
 	runtimedocker "or3-sandbox/internal/runtime/docker"
 	runtimeqemu "or3-sandbox/internal/runtime/qemu"
 	"or3-sandbox/internal/service"
-	"or3-sandbox/internal/repository"
 )
 
 func main() {
@@ -63,8 +63,14 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
-		log.Info("sandboxd listening", "addr", cfg.ListenAddress, "runtime", cfg.RuntimeBackend)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Info("sandboxd listening", "addr", cfg.ListenAddress, "runtime", cfg.RuntimeBackend, "mode", cfg.DeploymentMode, "auth_mode", cfg.AuthMode, "tls", cfg.TLSCertPath != "", "trusted_proxy", cfg.TrustedProxyHeaders)
+		var err error
+		if cfg.TLSCertPath != "" {
+			err = server.ListenAndServeTLS(cfg.TLSCertPath, cfg.TLSKeyPath)
+		} else {
+			err = server.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("server failed", "error", err)
 			stop()
 		}

@@ -311,9 +311,18 @@ func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.Run
 				Error:     reason,
 			}, nil
 		}
+		if withinBootWindow(layout.pidPath, r.effectiveBootTimeout()) {
+			return model.RuntimeState{
+				RuntimeID: sandbox.RuntimeID,
+				Status:    model.SandboxStatusBooting,
+				Running:   false,
+				Pid:       pid,
+				Error:     fmt.Sprintf("guest is still booting: %v", err),
+			}, nil
+		}
 		return model.RuntimeState{
 			RuntimeID: sandbox.RuntimeID,
-			Status:    model.SandboxStatusError,
+			Status:    model.SandboxStatusDegraded,
 			Running:   false,
 			Pid:       pid,
 			Error:     fmt.Sprintf("guest process is alive but not ready: %v", err),
@@ -752,6 +761,17 @@ func readPID(path string) (int, error) {
 		return 0, fmt.Errorf("parse pid %s: %w", path, err)
 	}
 	return pid, nil
+}
+
+func withinBootWindow(pidPath string, bootTimeout time.Duration) bool {
+	if bootTimeout <= 0 {
+		return false
+	}
+	info, err := os.Stat(pidPath)
+	if err != nil {
+		return false
+	}
+	return time.Since(info.ModTime()) <= bootTimeout
 }
 
 func terminatePID(pid int, force bool) error {

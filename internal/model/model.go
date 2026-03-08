@@ -7,6 +7,7 @@ type SandboxStatus string
 const (
 	SandboxStatusCreating   SandboxStatus = "creating"
 	SandboxStatusBooting    SandboxStatus = "booting"
+	SandboxStatusDegraded   SandboxStatus = "degraded"
 	SandboxStatusStopped    SandboxStatus = "stopped"
 	SandboxStatusStarting   SandboxStatus = "starting"
 	SandboxStatusRunning    SandboxStatus = "running"
@@ -157,18 +158,18 @@ type CreateTunnelRequest struct {
 }
 
 type Tunnel struct {
-	ID         string         `json:"id"`
-	SandboxID  string         `json:"sandbox_id"`
-	TenantID   string         `json:"tenant_id"`
-	TargetPort int            `json:"target_port"`
-	Protocol   TunnelProtocol `json:"protocol"`
-	AuthMode   string         `json:"auth_mode"`
-	Visibility string         `json:"visibility"`
-	Endpoint   string         `json:"endpoint"`
-	AccessToken string        `json:"access_token,omitempty"`
-	AuthSecretHash string     `json:"-"`
-	CreatedAt  time.Time      `json:"created_at"`
-	RevokedAt  *time.Time     `json:"revoked_at,omitempty"`
+	ID             string         `json:"id"`
+	SandboxID      string         `json:"sandbox_id"`
+	TenantID       string         `json:"tenant_id"`
+	TargetPort     int            `json:"target_port"`
+	Protocol       TunnelProtocol `json:"protocol"`
+	AuthMode       string         `json:"auth_mode"`
+	Visibility     string         `json:"visibility"`
+	Endpoint       string         `json:"endpoint"`
+	AccessToken    string         `json:"access_token,omitempty"`
+	AuthSecretHash string         `json:"-"`
+	CreatedAt      time.Time      `json:"created_at"`
+	RevokedAt      *time.Time     `json:"revoked_at,omitempty"`
 }
 
 type CreateSnapshotRequest struct {
@@ -193,10 +194,11 @@ type RestoreSnapshotRequest struct {
 }
 
 type RuntimeHealth struct {
-	Backend   string                 `json:"backend"`
-	Healthy   bool                   `json:"healthy"`
-	CheckedAt time.Time              `json:"checked_at"`
-	Sandboxes []RuntimeSandboxHealth `json:"sandboxes"`
+	Backend      string                 `json:"backend"`
+	Healthy      bool                   `json:"healthy"`
+	CheckedAt    time.Time              `json:"checked_at"`
+	StatusCounts map[string]int         `json:"status_counts,omitempty"`
+	Sandboxes    []RuntimeSandboxHealth `json:"sandboxes"`
 }
 
 type RuntimeSandboxHealth struct {
@@ -219,17 +221,17 @@ type Tenant struct {
 }
 
 type TenantQuota struct {
-	TenantID               string `json:"tenant_id"`
-	MaxSandboxes           int    `json:"max_sandboxes"`
-	MaxRunningSandboxes    int    `json:"max_running_sandboxes"`
-	MaxConcurrentExecs     int    `json:"max_concurrent_execs"`
-	MaxTunnels             int    `json:"max_tunnels"`
-	MaxCPUCores            CPUQuantity `json:"max_cpu_cores"`
-	MaxMemoryMB            int    `json:"max_memory_mb"`
-	MaxStorageMB           int    `json:"max_storage_mb"`
-	AllowTunnels           bool   `json:"allow_tunnels"`
-	DefaultTunnelAuthMode  string `json:"default_tunnel_auth_mode"`
-	DefaultTunnelVisibility string `json:"default_tunnel_visibility"`
+	TenantID                string      `json:"tenant_id"`
+	MaxSandboxes            int         `json:"max_sandboxes"`
+	MaxRunningSandboxes     int         `json:"max_running_sandboxes"`
+	MaxConcurrentExecs      int         `json:"max_concurrent_execs"`
+	MaxTunnels              int         `json:"max_tunnels"`
+	MaxCPUCores             CPUQuantity `json:"max_cpu_cores"`
+	MaxMemoryMB             int         `json:"max_memory_mb"`
+	MaxStorageMB            int         `json:"max_storage_mb"`
+	AllowTunnels            bool        `json:"allow_tunnels"`
+	DefaultTunnelAuthMode   string      `json:"default_tunnel_auth_mode"`
+	DefaultTunnelVisibility string      `json:"default_tunnel_visibility"`
 }
 
 type AuditEvent struct {

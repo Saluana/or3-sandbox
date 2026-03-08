@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"or3-sandbox/internal/auth"
 	"or3-sandbox/internal/config"
 	"or3-sandbox/internal/db"
 	"or3-sandbox/internal/model"
@@ -405,6 +406,240 @@ func TestRuntimeHealthReportsBootingState(t *testing.T) {
 	}
 	if len(health.Sandboxes) != 1 || health.Sandboxes[0].ObservedStatus != model.SandboxStatusBooting {
 		t.Fatalf("unexpected runtime health: %+v", health)
+	}
+}
+
+func TestRuntimeHealthMarksDegradedGuestsUnhealthy(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	runtime.inspectState = model.RuntimeState{
+		RuntimeID: "rt-degraded",
+		Status:    model.SandboxStatusDegraded,
+		Pid:       4242,
+		Error:     "ssh readiness failed",
+	}
+
+	health, err := svc.RuntimeHealth(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("runtime health: %v", err)
+	}
+	if health.Healthy {
+		t.Fatalf("expected degraded runtime health to be unhealthy, got %+v", health)
+	}
+	if len(health.Sandboxes) != 1 || health.Sandboxes[0].SandboxID != sandbox.ID || health.Sandboxes[0].ObservedStatus != model.SandboxStatusDegraded {
+		t.Fatalf("unexpected runtime health payload: %+v", health)
+	}
+}
+
+func TestStartSandboxPolicyDenialPreservesStoppedState(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.PolicyMaxIdleTimeout = time.Minute
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	sandbox.LastActiveAt = time.Now().UTC().Add(-2 * time.Minute)
+	sandbox.UpdatedAt = time.Now().UTC()
+	if err := store.UpdateSandboxState(ctx, sandbox); err != nil {
+		t.Fatalf("age sandbox activity: %v", err)
+	}
+
+	if _, err := svc.StartSandbox(ctx, tenantA.ID, sandbox.ID, quota); !errors.Is(err, auth.ErrForbidden) {
+		t.Fatalf("expected policy denial, got %v", err)
+	}
+
+	stored, err := svc.GetSandbox(ctx, tenantA.ID, sandbox.ID)
+	if err != nil {
+		t.Fatalf("get sandbox: %v", err)
+	}
+	if stored.Status != model.SandboxStatusStopped {
+		t.Fatalf("expected stopped sandbox after denied start, got %+v", stored)
+	}
+}
+
+func TestCreateSandboxPolicyAllowsAndDeniesImages(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.PolicyAllowedImages = []string{"ghcr.io/acme/*", "guest-base.qcow2"}
+
+	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "ghcr.io/acme/app:1",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	}); err != nil {
+		t.Fatalf("expected allowed image to succeed, got %v", err)
+	}
+
+	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "docker.io/library/alpine:3.20",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	}); err == nil || !strings.Contains(err.Error(), "not allowed by policy") {
+		t.Fatalf("expected policy denial, got %v", err)
+	}
+
+	events, err := store.ListAuditEvents(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	if len(events) == 0 || events[len(events)-1].Action != "policy.create" || events[len(events)-1].Outcome != "denied" {
+		t.Fatalf("expected policy denial audit event, got %+v", events)
+	}
+}
+
+func TestTunnelPolicyRejectsPublicVisibility(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.PolicyAllowPublicTunnels = false
+	quota.AllowTunnels = true
+	if err := store.SeedTenants(ctx, []config.TenantConfig{{ID: "tenant-a", Name: "Tenant A", Token: "token-a"}, {ID: "tenant-b", Name: "Tenant B", Token: "token-b"}}, quota); err != nil {
+		t.Fatalf("seed tenants: %v", err)
+	}
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	if _, err := svc.CreateTunnel(ctx, tenantA.ID, sandbox.ID, model.CreateTunnelRequest{
+		TargetPort: 8080,
+		Protocol:   model.TunnelProtocolHTTP,
+		AuthMode:   "token",
+		Visibility: "public",
+	}); err == nil || !strings.Contains(err.Error(), "disabled by policy") {
+		t.Fatalf("expected public tunnel denial, got %v", err)
+	}
+
+	events, err := store.ListAuditEvents(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	if len(events) == 0 || events[len(events)-1].Action != "policy.tunnel" {
+		t.Fatalf("expected tunnel policy audit event, got %+v", events)
+	}
+}
+
+func TestTunnelPolicyRejectsDefaultPublicVisibility(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.PolicyAllowPublicTunnels = false
+	quota.AllowTunnels = true
+	quota.DefaultTunnelVisibility = "public"
+	if err := store.SeedTenants(ctx, []config.TenantConfig{{ID: "tenant-a", Name: "Tenant A", Token: "token-a"}}, quota); err != nil {
+		t.Fatalf("seed tenants: %v", err)
+	}
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	if _, err := svc.CreateTunnel(ctx, tenantA.ID, sandbox.ID, model.CreateTunnelRequest{
+		TargetPort: 8080,
+		Protocol:   model.TunnelProtocolHTTP,
+		AuthMode:   "token",
+	}); !errors.Is(err, auth.ErrForbidden) {
+		t.Fatalf("expected default public tunnel denial, got %v", err)
+	}
+}
+
+func TestCapacityReportAndMetricsShowQuotaPressure(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	quota.MaxStorageMB = 1024
+	runtime.storageUsage = model.StorageUsage{}
+	if err := store.SeedTenants(ctx, []config.TenantConfig{{ID: tenantA.ID, Name: tenantA.Name, Token: "token-a"}}, quota); err != nil {
+		t.Fatalf("seed tenants: %v", err)
+	}
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	runtime.storageUsage = model.StorageUsage{RootfsBytes: 900 * 1024 * 1024, WorkspaceBytes: 32 * 1024 * 1024}
+	if err := svc.WriteFile(ctx, tenantA.ID, sandbox.ID, "note.txt", "hello"); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	report, err := svc.CapacityReport(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("capacity report: %v", err)
+	}
+	if report.QuotaView.StoragePressure < 0.8 {
+		t.Fatalf("expected storage pressure >= 0.8, got %f", report.QuotaView.StoragePressure)
+	}
+	if len(report.Alerts) == 0 {
+		t.Fatalf("expected capacity alerts, got %+v", report)
+	}
+	metrics, err := svc.MetricsReport(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("metrics report: %v", err)
+	}
+	if !strings.Contains(metrics, "or3_sandbox_storage_pressure_ratio") || !strings.Contains(metrics, "or3_sandbox_runtime_status_count") {
+		t.Fatalf("unexpected metrics output: %s", metrics)
 	}
 }
 

@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	jwt "github.com/golang-jwt/jwt/v5"
+
 	"or3-sandbox/internal/api"
 	"or3-sandbox/internal/auth"
 	"or3-sandbox/internal/config"
@@ -344,6 +346,40 @@ func TestRuntimeHealthEndpoint(t *testing.T) {
 	}
 }
 
+func TestJWTAuthorizationEnforcesRolePermissions(t *testing.T) {
+	h := newJWTStubHarness(t)
+	defer h.close()
+
+	adminToken := h.jwtToken(t, "tenant-a", []string{"admin"}, false)
+	viewerToken := h.jwtToken(t, "tenant-a", []string{"viewer"}, false)
+	serviceToken := h.jwtToken(t, "tenant-a", nil, true)
+	invalidToken := h.jwtTokenWithSecret(t, "wrong-secret", "tenant-a", []string{"admin"}, false)
+
+	sandbox := h.createSandbox(t, adminToken, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         false,
+	})
+
+	h.expectStatus(t, invalidToken, http.MethodGet, "/v1/sandboxes", nil, http.StatusUnauthorized)
+	h.expectStatus(t, viewerToken, http.MethodGet, "/v1/sandboxes/"+sandbox.ID, nil, http.StatusOK)
+	h.expectStatus(t, viewerToken, http.MethodPost, "/v1/sandboxes/"+sandbox.ID+"/start", map[string]any{}, http.StatusForbidden)
+	h.expectStatus(t, viewerToken, http.MethodPut, "/v1/sandboxes/"+sandbox.ID+"/files/notes.txt", model.FileWriteRequest{Content: "nope"}, http.StatusForbidden)
+	h.expectStatus(t, viewerToken, http.MethodPost, "/v1/sandboxes/"+sandbox.ID+"/snapshots", model.CreateSnapshotRequest{Name: "snap"}, http.StatusForbidden)
+	h.expectStatus(t, viewerToken, http.MethodPost, "/v1/sandboxes/"+sandbox.ID+"/tunnels", model.CreateTunnelRequest{TargetPort: 8080, Protocol: model.TunnelProtocolHTTP, AuthMode: "token", Visibility: "private"}, http.StatusForbidden)
+	h.expectStatus(t, viewerToken, http.MethodGet, "/v1/runtime/health", nil, http.StatusForbidden)
+	h.expectStatus(t, viewerToken, http.MethodGet, "/v1/runtime/capacity", nil, http.StatusForbidden)
+	h.expectStatus(t, viewerToken, http.MethodGet, "/metrics", nil, http.StatusForbidden)
+	h.expectStatus(t, serviceToken, http.MethodGet, "/v1/runtime/health", nil, http.StatusOK)
+	h.expectStatus(t, serviceToken, http.MethodGet, "/v1/runtime/capacity", nil, http.StatusOK)
+	h.expectStatus(t, serviceToken, http.MethodGet, "/metrics", nil, http.StatusOK)
+}
+
 func TestTunnelProxyTargetsSandboxLocalhost(t *testing.T) {
 	h := newStubHarness(t)
 	defer h.close()
@@ -379,6 +415,9 @@ type harness struct {
 	runtime     *runtimedocker.Runtime
 	stubRuntime *apiStubRuntime
 	server      *httptest.Server
+	jwtSecret   string
+	jwtIssuer   string
+	jwtAudience string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -388,12 +427,14 @@ func newHarness(t *testing.T) *harness {
 	}
 	root := t.TempDir()
 	cfg := config.Config{
+		DeploymentMode:       "development",
 		ListenAddress:        "127.0.0.1:0",
 		DatabasePath:         filepath.Join(root, "sandbox.db"),
 		StorageRoot:          filepath.Join(root, "storage"),
 		SnapshotRoot:         filepath.Join(root, "snapshots"),
 		BaseImageRef:         "alpine:3.20",
 		RuntimeBackend:       "docker",
+		AuthMode:             "static",
 		TrustedDockerRuntime: true,
 		DefaultCPULimit:      model.CPUCores(1),
 		DefaultMemoryLimitMB: 256,
@@ -448,12 +489,14 @@ func newStubHarness(t *testing.T) *harness {
 	t.Helper()
 	root := t.TempDir()
 	cfg := config.Config{
+		DeploymentMode:       "development",
 		ListenAddress:        "127.0.0.1:0",
 		DatabasePath:         filepath.Join(root, "sandbox.db"),
 		StorageRoot:          filepath.Join(root, "storage"),
 		SnapshotRoot:         filepath.Join(root, "snapshots"),
 		BaseImageRef:         "guest-base.qcow2",
 		RuntimeBackend:       "qemu",
+		AuthMode:             "static",
 		DefaultCPULimit:      model.CPUCores(1),
 		DefaultMemoryLimitMB: 256,
 		DefaultPIDsLimit:     128,
@@ -498,6 +541,25 @@ func newStubHarness(t *testing.T) *harness {
 	svc = service.New(cfg, store, runtime)
 	server.Config.Handler = auth.New(store, cfg).Wrap(api.New(logging.New(), svc))
 	return &harness{t: t, cfg: cfg, db: sqlDB, store: store, service: svc, stubRuntime: runtime, server: server}
+}
+
+func newJWTStubHarness(t *testing.T) *harness {
+	t.Helper()
+	h := newStubHarness(t)
+	secretPath := filepath.Join(t.TempDir(), "jwt.secret")
+	secret := "jwt-test-secret"
+	if err := os.WriteFile(secretPath, []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.cfg.AuthMode = "jwt-hs256"
+	h.cfg.AuthJWTIssuer = "issuer.example"
+	h.cfg.AuthJWTAudience = "sandbox-api"
+	h.cfg.AuthJWTSecretPaths = []string{secretPath}
+	h.server.Config.Handler = auth.New(h.store, h.cfg).Wrap(api.New(logging.New(), h.service))
+	h.jwtSecret = secret
+	h.jwtIssuer = h.cfg.AuthJWTIssuer
+	h.jwtAudience = h.cfg.AuthJWTAudience
+	return h
 }
 
 func (h *harness) close() {
@@ -808,4 +870,30 @@ func (h *harness) do(t *testing.T, token, method, endpoint string, payload any, 
 	}
 	response.Body = io.NopCloser(bytes.NewReader(data))
 	return response, string(data)
+}
+
+func (h *harness) jwtToken(t *testing.T, tenantID string, roles []string, service bool) string {
+	t.Helper()
+	return h.jwtTokenWithSecret(t, h.jwtSecret, tenantID, roles, service)
+}
+
+func (h *harness) jwtTokenWithSecret(t *testing.T, secret, tenantID string, roles []string, service bool) string {
+	t.Helper()
+	claims := jwt.MapClaims{
+		"iss":       h.jwtIssuer,
+		"aud":       h.jwtAudience,
+		"sub":       tenantID + "-subject",
+		"tenant_id": tenantID,
+		"service":   service,
+		"exp":       time.Now().Add(time.Hour).Unix(),
+	}
+	if roles != nil {
+		claims["roles"] = roles
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString([]byte(secret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signed
 }
