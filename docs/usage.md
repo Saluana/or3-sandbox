@@ -43,6 +43,9 @@ The CLI supports these top-level commands:
 - `snapshot-list`
 - `snapshot-inspect`
 - `snapshot-restore`
+- `preset list`
+- `preset inspect`
+- `preset run`
 
 ## 1. Create a sandbox
 
@@ -246,6 +249,57 @@ go run ./cmd/sandboxctl snapshot-restore <snapshot-id> <sandbox-id>
 ```
 
 This is useful when you want to save a known-good state before making changes.
+
+## 11. Run example presets
+
+List presets:
+
+```bash
+go run ./cmd/sandboxctl preset list
+```
+
+Inspect one preset:
+
+```bash
+go run ./cmd/sandboxctl preset inspect playwright
+```
+
+Run a preset:
+
+```bash
+go run ./cmd/sandboxctl preset run playwright
+```
+
+The command stays the same for Docker and QEMU. The difference is packaging:
+
+- Docker presets usually point at container images directly.
+- QEMU presets usually point at a guest image path or use a documented `runtime.profile` plus `--env QEMU_GUEST_IMAGE=...`.
+- QEMU runs also have an extra guest-ready phase before bootstrap and app readiness begin.
+
+Useful preset flags:
+
+- `--env KEY=VALUE` for preset inputs like tokens or target URLs
+- `--set image=...` or `--set memory-mb=2048` for sandbox overrides
+- `--cleanup always|never|on-success`
+- `--keep` to preserve the sandbox for inspection
+
+Examples:
+
+```bash
+go run ./cmd/sandboxctl preset run claude-code --env ANTHROPIC_AUTH_TOKEN=... --cleanup never
+go run ./cmd/sandboxctl preset run playwright --env TARGET_URL=https://example.com
+go run ./cmd/sandboxctl preset run openclaw --env OPENCLAW_GATEWAY_TOKEN=secret --keep
+go run ./cmd/sandboxctl preset run qemu-bootstrap --env QEMU_GUEST_IMAGE="$SANDBOX_QEMU_BASE_IMAGE_PATH"
+go run ./cmd/sandboxctl preset run qemu-service --env QEMU_GUEST_IMAGE="$SANDBOX_QEMU_BASE_IMAGE_PATH" --keep
+```
+
+Preset artifacts download into the example directory by default, and the runner always prints the sandbox ID.
+
+QEMU notes:
+
+- Use a guest image that matches the preset README or `runtime.profile` hint.
+- Expect slower startup because QEMU must boot a guest before running bootstrap steps.
+- HTTP readiness, tunnel creation, and artifact downloads still use the same shared preset UX as Docker.
 
 ## API basics
 

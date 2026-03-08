@@ -1,0 +1,34 @@
+name: claude-code
+description: Install Claude Code in a Node sandbox and run a one-shot prompt.
+runtime:
+  allowed: [docker]
+sandbox:
+  image: node:22-bookworm
+  cpu: "1"
+  memory_mb: 1024
+  pids: 256
+  disk_mb: 4096
+  network: internet-enabled
+  allow_tunnels: false
+inputs:
+  - name: ANTHROPIC_AUTH_TOKEN
+    required: true
+    secret: true
+    description: Anthropic auth token used by claude-code.
+  - name: ANTHROPIC_BASE_URL
+    description: Optional Anthropic base URL override.
+  - name: ANTHROPIC_MODEL
+    description: Optional Claude model override.
+    default: claude_sonnet4
+bootstrap:
+  - name: install-claude-code
+    command: ["npm", "i", "-g", "@anthropic-ai/claude-code@latest"]
+    timeout: 10m
+  - name: run-claude-code
+    command: ["sh", "-lc", "claude \"Compute 1+1=?\""]
+    timeout: 5m
+    env:
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL}
+cleanup: on-success

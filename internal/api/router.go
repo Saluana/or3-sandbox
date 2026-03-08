@@ -2,12 +2,20 @@ package api
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,15 +29,27 @@ import (
 )
 
 type Router struct {
-	log      *slog.Logger
-	service  *service.Service
-	upgrader websocket.Upgrader
+	log              *slog.Logger
+	service          *service.Service
+	operatorHost     string
+	tunnelSigningKey []byte
+	upgrader         websocket.Upgrader
 }
 
-func New(log *slog.Logger, svc *service.Service) http.Handler {
+const (
+	tunnelSignedURLDefaultTTL = 5 * time.Minute
+	tunnelSignedURLMaxTTL     = 15 * time.Minute
+	tunnelSignedURLExpiryKey  = "or3_exp"
+	tunnelSignedURLSigKey     = "or3_sig"
+	tunnelAuthCookieName      = "or3_tunnel_auth"
+)
+
+func New(log *slog.Logger, svc *service.Service, cfg config.Config) http.Handler {
 	router := &Router{
-		log:     log,
-		service: svc,
+		log:              log,
+		service:          svc,
+		operatorHost:     strings.TrimRight(cfg.OperatorHost, "/"),
+		tunnelSigningKey: newTunnelSigningKey(cfg),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -479,7 +499,7 @@ func (rt *Router) handleTTY(w http.ResponseWriter, r *http.Request, tenantCtx au
 func (rt *Router) handleFiles(w http.ResponseWriter, r *http.Request, tenantID, sandboxID, path string) {
 	switch r.Method {
 	case http.MethodGet:
-		content, err := rt.service.ReadFile(r.Context(), tenantID, sandboxID, path)
+		content, err := rt.service.ReadFile(r.Context(), tenantID, sandboxID, path, r.URL.Query().Get("encoding"))
 		if err != nil {
 			handleError(w, err)
 			return
@@ -491,7 +511,31 @@ func (rt *Router) handleFiles(w http.ResponseWriter, r *http.Request, tenantID, 
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := rt.service.WriteFile(r.Context(), tenantID, sandboxID, path, req.Content); err != nil {
+		var err error
+		encoding := strings.TrimSpace(req.Encoding)
+		contentBase64 := strings.TrimSpace(req.ContentBase64)
+		if strings.EqualFold(encoding, "base64") {
+			if contentBase64 == "" {
+				http.Error(w, "content_base64 is required when encoding=base64", http.StatusBadRequest)
+				return
+			}
+			data, decodeErr := base64.StdEncoding.DecodeString(contentBase64)
+			if decodeErr != nil {
+				http.Error(w, "invalid content_base64 payload", http.StatusBadRequest)
+				return
+			}
+			err = rt.service.WriteFileBytes(r.Context(), tenantID, sandboxID, path, data)
+		} else if contentBase64 != "" {
+			data, decodeErr := base64.StdEncoding.DecodeString(contentBase64)
+			if decodeErr != nil {
+				http.Error(w, "invalid content_base64 payload", http.StatusBadRequest)
+				return
+			}
+			err = rt.service.WriteFileBytes(r.Context(), tenantID, sandboxID, path, data)
+		} else {
+			err = rt.service.WriteFile(r.Context(), tenantID, sandboxID, path, req.Content)
+		}
+		if err != nil {
 			handleError(w, err)
 			return
 		}
@@ -613,7 +657,78 @@ func (rt *Router) handleTunnelRoutes(w http.ResponseWriter, r *http.Request) {
 		rt.handleTunnelProxy(w, r, tunnelID)
 		return
 	}
+	if parts[1] == "signed-url" {
+		rt.handleTunnelSignedURL(w, r, tunnelID)
+		return
+	}
 	http.NotFound(w, r)
+}
+
+func (rt *Router) handleTunnelSignedURL(w http.ResponseWriter, r *http.Request, tunnelID string) {
+	tenantCtx, ok := auth.FromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !requirePermission(w, r, auth.PermissionTunnelsRead) {
+		return
+	}
+	tunnel, _, err := rt.service.GetTunnelForProxy(r.Context(), tunnelID)
+	if err != nil {
+		handleError(w, err)
+		return
+	}
+	if tunnel.RevokedAt != nil {
+		http.Error(w, "tunnel revoked", http.StatusGone)
+		return
+	}
+	if tenantCtx.Tenant.ID != tunnel.TenantID {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	var req model.CreateTunnelSignedURLRequest
+	if r.ContentLength > 0 {
+		if err := decodeJSON(r, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	path := req.Path
+	if path == "" {
+		path = "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		http.Error(w, "signed tunnel path must start with '/'", http.StatusBadRequest)
+		return
+	}
+	ttl := tunnelSignedURLDefaultTTL
+	if req.TTLSeconds > 0 {
+		ttl = time.Duration(req.TTLSeconds) * time.Second
+	}
+	if ttl <= 0 {
+		http.Error(w, "signed tunnel ttl must be positive", http.StatusBadRequest)
+		return
+	}
+	if ttl > tunnelSignedURLMaxTTL {
+		http.Error(w, fmt.Sprintf("signed tunnel ttl must be <= %s", tunnelSignedURLMaxTTL), http.StatusBadRequest)
+		return
+	}
+	expiresAt := time.Now().UTC().Add(ttl)
+	expiry := strconv.FormatInt(expiresAt.Unix(), 10)
+	sig := rt.signTunnelCapability(tunnel.ID, expiry)
+	signedURL, err := rt.buildTunnelProxyURL(tunnel.ID, path, url.Values{
+		tunnelSignedURLExpiryKey: []string{expiry},
+		tunnelSignedURLSigKey:    []string{sig},
+	}, r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, model.TunnelSignedURL{URL: signedURL, ExpiresAt: expiresAt})
 }
 
 func (rt *Router) handleTunnelProxy(w http.ResponseWriter, r *http.Request, tunnelID string) {
@@ -627,26 +742,44 @@ func (rt *Router) handleTunnelProxy(w http.ResponseWriter, r *http.Request, tunn
 		return
 	}
 	tenantCtx, hasTenant := auth.FromContext(r.Context())
+	browserAuthorized, bootstrapped := rt.authorizeTunnelBrowserSession(w, r, tunnel)
+	if bootstrapped {
+		return
+	}
 	if tunnel.Visibility != "public" {
-		if !hasTenant || tenantCtx.Tenant.ID != tunnel.TenantID {
+		if (!hasTenant || tenantCtx.Tenant.ID != tunnel.TenantID) && !browserAuthorized {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 	}
+	queryAccessToken := ""
 	if tunnel.AuthMode == "token" {
+		authorized := browserAuthorized
 		presented := r.Header.Get("X-Tunnel-Token")
 		if presented == "" {
 			presented = r.URL.Query().Get("token")
+			queryAccessToken = presented
 		}
-		if presented == "" || config.HashToken(presented) != tunnel.AuthSecretHash {
+		if !authorized && presented != "" && config.HashToken(presented) == tunnel.AuthSecretHash {
+			authorized = true
+		}
+		if !authorized {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 	}
+	if websocket.IsWebSocketUpgrade(r) {
+		rt.handleTunnelWebSocket(w, r, tunnel, sandbox, queryAccessToken)
+		return
+	}
 	target := fmt.Sprintf("http://127.0.0.1:%d%s", tunnel.TargetPort, strings.TrimPrefix(r.URL.Path, "/v1/tunnels/"+tunnel.ID+"/proxy"))
-	if raw := r.URL.RawQuery; raw != "" {
+	if raw := tunnelUpstreamQuery(r.URL.Query(), queryAccessToken).Encode(); raw != "" {
 		target += "?" + raw
 	}
+	rt.handleTunnelHTTPRequest(w, r, tunnel, sandbox, target)
+}
+
+func (rt *Router) handleTunnelHTTPRequest(w http.ResponseWriter, r *http.Request, tunnel model.Tunnel, sandbox model.Sandbox, target string) {
 	script := `
 if command -v curl >/dev/null 2>&1; then
 	exec curl -sS -i -X "$METHOD" "$URL"
@@ -690,9 +823,24 @@ exec curl -sS -i -X "$METHOD" --data-binary "$BODY" "$URL"
 		handleError(w, err)
 		return
 	}
-	_, err = rt.service.ExecSandbox(r.Context(), model.Tenant{ID: tunnel.TenantID}, quotaView.Quota, sandbox.ID, req, &stdout, &stderr)
+	execution, err := rt.service.ExecSandbox(r.Context(), model.Tenant{ID: tunnel.TenantID}, quotaView.Quota, sandbox.ID, req, &stdout, &stderr)
 	if err != nil {
 		handleError(w, err)
+		return
+	}
+	if execution.Status != model.ExecutionStatusSucceeded {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = strings.TrimSpace(execution.StderrPreview)
+		}
+		if message == "" {
+			message = fmt.Sprintf("tunnel upstream request failed with status %s", execution.Status)
+		}
+		status := http.StatusBadGateway
+		if execution.Status == model.ExecutionStatusTimedOut {
+			status = http.StatusGatewayTimeout
+		}
+		http.Error(w, message, status)
 		return
 	}
 	payload := stdout.String()
@@ -711,6 +859,267 @@ exec curl -sS -i -X "$METHOD" --data-binary "$BODY" "$URL"
 		return
 	}
 	_, _ = io.WriteString(w, payload)
+}
+
+func (rt *Router) handleTunnelWebSocket(w http.ResponseWriter, r *http.Request, tunnel model.Tunnel, sandbox model.Sandbox, queryAccessToken string) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	bridgeConn, err := rt.service.OpenSandboxLocalConn(ctx, sandbox, tunnel.TargetPort)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	upstreamURL := url.URL{
+		Scheme:   "ws",
+		Host:     fmt.Sprintf("127.0.0.1:%d", tunnel.TargetPort),
+		Path:     strings.TrimPrefix(r.URL.Path, "/v1/tunnels/"+tunnel.ID+"/proxy"),
+		RawQuery: tunnelUpstreamQuery(r.URL.Query(), queryAccessToken).Encode(),
+	}
+	requestHeader := http.Header{}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		requestHeader.Set("Origin", origin)
+	}
+	if userAgent := r.Header.Get("User-Agent"); userAgent != "" {
+		requestHeader.Set("User-Agent", userAgent)
+	}
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 15 * time.Second,
+		Subprotocols:     websocket.Subprotocols(r),
+		NetDialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+			return bridgeConn, nil
+		},
+	}
+	upstreamConn, response, err := dialer.DialContext(ctx, upstreamURL.String(), requestHeader)
+	if err != nil {
+		_ = bridgeConn.Close()
+		status := http.StatusBadGateway
+		if response != nil {
+			status = response.StatusCode
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	responseHeader := http.Header{}
+	if subprotocol := upstreamConn.Subprotocol(); subprotocol != "" {
+		responseHeader.Set("Sec-WebSocket-Protocol", subprotocol)
+	}
+	clientConn, err := rt.upgrader.Upgrade(w, r, responseHeader)
+	if err != nil {
+		_ = upstreamConn.Close()
+		return
+	}
+	defer clientConn.Close()
+	defer upstreamConn.Close()
+	errCh := make(chan error, 2)
+	go proxyWebSocketMessages(clientConn, upstreamConn, errCh)
+	go proxyWebSocketMessages(upstreamConn, clientConn, errCh)
+	<-errCh
+}
+
+func (rt *Router) authorizeTunnelBrowserSession(w http.ResponseWriter, r *http.Request, tunnel model.Tunnel) (authorized bool, bootstrapped bool) {
+	if cookie, err := r.Cookie(tunnelAuthCookieName); err == nil {
+		if expiry, sig, ok := parseTunnelAuthCookie(cookie.Value); ok && rt.validateTunnelCapability(tunnel.ID, expiry, sig) {
+			return true, false
+		}
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false, false
+	}
+	expiry := r.URL.Query().Get(tunnelSignedURLExpiryKey)
+	sig := r.URL.Query().Get(tunnelSignedURLSigKey)
+	if !rt.validateTunnelCapability(tunnel.ID, expiry, sig) {
+		return false, false
+	}
+	expiresAt, _ := strconv.ParseInt(expiry, 10, 64)
+	http.SetCookie(w, &http.Cookie{
+		Name:     tunnelAuthCookieName,
+		Value:    tunnelAuthCookieValue(expiry, sig),
+		Path:     "/v1/tunnels/" + tunnel.ID + "/proxy",
+		Expires:  time.Unix(expiresAt, 0).UTC(),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   strings.HasPrefix(strings.ToLower(rt.operatorHost), "https://") || r.TLS != nil,
+	})
+	redirectURL := *r.URL
+	query := redirectURL.Query()
+	query.Del(tunnelSignedURLExpiryKey)
+	query.Del(tunnelSignedURLSigKey)
+	redirectURL.RawQuery = query.Encode()
+	rt.serveTunnelBootstrapPage(w, redirectURL.String())
+	return false, true
+}
+
+// serveTunnelBootstrapPage serves a small HTML page that clears stale gateway
+// settings from localStorage and then redirects the browser to redirectURL.
+// The JavaScript redirect preserves the URL fragment (e.g. #token=...) which
+// a 302 redirect cannot guarantee.
+//
+// Background: browser-based apps behind the tunnel proxy (e.g. OpenClaw) may
+// store the gateway WebSocket URL in localStorage.  When the tunnel is
+// recreated the stored URL points at the old (revoked) tunnel and the
+// WebSocket connection fails.  By clearing the stored gatewayUrl before the
+// app boots, the app falls back to deriving it from the current page URL.
+func (rt *Router) serveTunnelBootstrapPage(w http.ResponseWriter, redirectURL string) {
+	urlJSON, _ := json.Marshal(redirectURL)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = fmt.Fprintf(w, `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Loading…</title>
+<script>
+try{var k="openclaw.control.settings.v1",r=localStorage.getItem(k);if(r){var s=JSON.parse(r);delete s.gatewayUrl;localStorage.setItem(k,JSON.stringify(s))}}catch(e){}
+window.location.replace(%s+window.location.hash);
+</script></head><body><noscript><a href=%s>Continue</a></noscript></body></html>`, urlJSON, urlJSON)
+}
+
+func (rt *Router) buildTunnelProxyURL(tunnelID, path string, query url.Values, r *http.Request) (string, error) {
+	base := rt.operatorHost
+	if base == "" {
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		base = scheme + "://" + r.Host
+	}
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return "", fmt.Errorf("invalid operator host: %w", err)
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/v1/tunnels/" + tunnelID + "/proxy" + path
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
+}
+
+func (rt *Router) signTunnelCapability(tunnelID, expiry string) string {
+	mac := hmac.New(sha256.New, rt.tunnelSigningKey)
+	_, _ = io.WriteString(mac, tunnelID)
+	_, _ = io.WriteString(mac, ":")
+	_, _ = io.WriteString(mac, expiry)
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func (rt *Router) validateTunnelCapability(tunnelID, expiry, signature string) bool {
+	if strings.TrimSpace(expiry) == "" || strings.TrimSpace(signature) == "" {
+		return false
+	}
+	expiresAt, err := strconv.ParseInt(expiry, 10, 64)
+	if err != nil {
+		return false
+	}
+	if time.Now().UTC().After(time.Unix(expiresAt, 0).UTC()) {
+		return false
+	}
+	expected := rt.signTunnelCapability(tunnelID, expiry)
+	return hmac.Equal([]byte(expected), []byte(signature))
+}
+
+func newTunnelSigningKey(cfg config.Config) []byte {
+	if key := strings.TrimSpace(cfg.TunnelSigningKey); key != "" {
+		sum := sha256.Sum256([]byte(key))
+		return sum[:]
+	}
+	if path := strings.TrimSpace(cfg.TunnelSigningKeyPath); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			if trimmed := strings.TrimSpace(string(data)); trimmed != "" {
+				sum := sha256.Sum256([]byte(trimmed))
+				return sum[:]
+			}
+		}
+	}
+	seed := stableTunnelSigningSeed(cfg)
+	sum := sha256.Sum256(seed)
+	return sum[:]
+}
+
+func stableTunnelSigningSeed(cfg config.Config) []byte {
+	var builder strings.Builder
+	builder.WriteString("or3-sandbox-tunnel-signing-key\n")
+	builder.WriteString("auth_mode=")
+	builder.WriteString(cfg.AuthMode)
+	builder.WriteString("\n")
+	switch cfg.AuthMode {
+	case "jwt-hs256":
+		builder.WriteString("issuer=")
+		builder.WriteString(cfg.AuthJWTIssuer)
+		builder.WriteString("\n")
+		builder.WriteString("audience=")
+		builder.WriteString(cfg.AuthJWTAudience)
+		builder.WriteString("\n")
+		paths := append([]string(nil), cfg.AuthJWTSecretPaths...)
+		sort.Strings(paths)
+		for _, path := range paths {
+			builder.WriteString("jwt_secret=")
+			if data, err := os.ReadFile(path); err == nil {
+				builder.Write(data)
+			}
+			builder.WriteString("\n")
+		}
+	default:
+		tenants := append([]config.TenantConfig(nil), cfg.Tenants...)
+		sort.Slice(tenants, func(i, j int) bool {
+			if tenants[i].ID == tenants[j].ID {
+				return tenants[i].Token < tenants[j].Token
+			}
+			return tenants[i].ID < tenants[j].ID
+		})
+		for _, tenant := range tenants {
+			builder.WriteString("tenant=")
+			builder.WriteString(tenant.ID)
+			builder.WriteString(":")
+			builder.WriteString(tenant.Token)
+			builder.WriteString("\n")
+		}
+	}
+	return []byte(builder.String())
+}
+
+func tunnelUpstreamQuery(query url.Values, queryAccessToken string) url.Values {
+	filtered := url.Values{}
+	for key, values := range query {
+		switch key {
+		case tunnelSignedURLExpiryKey, tunnelSignedURLSigKey:
+			continue
+		case "token":
+			preserved := make([]string, 0, len(values))
+			for _, value := range values {
+				if queryAccessToken != "" && value == queryAccessToken {
+					continue
+				}
+				preserved = append(preserved, value)
+			}
+			if len(preserved) > 0 {
+				filtered[key] = preserved
+			}
+		default:
+			filtered[key] = append([]string(nil), values...)
+		}
+	}
+	return filtered
+}
+
+func tunnelAuthCookieValue(expiry, sig string) string {
+	return expiry + "." + sig
+}
+
+func parseTunnelAuthCookie(value string) (expiry string, sig string, ok bool) {
+	parts := strings.SplitN(value, ".", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+func proxyWebSocketMessages(src, dst *websocket.Conn, errCh chan<- error) {
+	for {
+		messageType, payload, err := src.ReadMessage()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		if err := dst.WriteMessage(messageType, payload); err != nil {
+			errCh <- err
+			return
+		}
+	}
 }
 
 func decodeJSON(r *http.Request, out any) error {

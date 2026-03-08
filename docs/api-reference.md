@@ -40,6 +40,12 @@ Authorization: Bearer <token>
 - `DELETE /v1/sandboxes/{id}/files/{path}` — delete a path
 - `POST /v1/sandboxes/{id}/mkdir` — make a directory
 
+Binary-safe transfer notes:
+
+- `GET /v1/sandboxes/{id}/files/{path}?encoding=base64` returns `content_base64` with `encoding="base64"`
+- `PUT /v1/sandboxes/{id}/files/{path}` accepts `{ "encoding": "base64", "content_base64": "..." }` for binary-safe uploads
+- plain UTF-8 text uploads and downloads still work the same as before
+
 ## Tunnels
 
 - `POST /v1/sandboxes/{id}/tunnels` — create tunnel

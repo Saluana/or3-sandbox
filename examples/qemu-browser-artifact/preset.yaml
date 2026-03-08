@@ -1,0 +1,39 @@
+name: qemu-browser-artifact
+description: Capture a screenshot-like browser artifact from a browser-capable QEMU guest profile.
+runtime:
+  allowed: [qemu]
+  profile: browser-guest
+sandbox:
+  image: ${QEMU_GUEST_IMAGE}
+  cpu: "2"
+  memory_mb: 2048
+  disk_mb: 6144
+  network: internet-enabled
+inputs:
+  - name: TARGET_URL
+    default: https://example.com
+bootstrap:
+  - name: capture-screenshot
+    command:
+      - sh
+      - -lc
+      - |
+        set -eu
+        for browser in chromium chromium-browser google-chrome google-chrome-stable; do
+          if command -v "$browser" >/dev/null 2>&1; then
+            "$browser" --headless --disable-gpu --no-sandbox --screenshot=/workspace/screenshot.png --window-size=1280,720 "$TARGET_URL"
+            exit 0
+          fi
+        done
+        echo "no browser binary found" >&2
+        exit 1
+readiness:
+  type: command
+  command: ["sh", "-lc", "test -s /workspace/screenshot.png"]
+  timeout: 45s
+  interval: 1s
+artifacts:
+  - remote_path: screenshot.png
+    local_path: outputs/screenshot.png
+    binary: true
+cleanup: on-success

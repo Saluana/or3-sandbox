@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"golang.org/x/term"
 
 	"or3-sandbox/internal/model"
 )
@@ -56,6 +57,10 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 			return model.RuntimeState{}, err
 		}
 	}
+	workspaceMount, err := absoluteHostPath(spec.WorkspaceRoot)
+	if err != nil {
+		return model.RuntimeState{}, err
+	}
 	args := []string{
 		"create",
 		"--name", containerName(spec.SandboxID),
@@ -66,10 +71,14 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 		"--cpus", spec.CPULimit.String(),
 		"--memory", fmt.Sprintf("%dm", spec.MemoryLimitMB),
 		"--pids-limit", strconv.Itoa(spec.PIDsLimit),
-		"-v", fmt.Sprintf("%s:/workspace", spec.WorkspaceRoot),
+		"-v", fmt.Sprintf("%s:/workspace", workspaceMount),
 	}
 	if spec.CacheRoot != "" {
-		args = append(args, "-v", fmt.Sprintf("%s:/cache", spec.CacheRoot))
+		cacheMount, err := absoluteHostPath(spec.CacheRoot)
+		if err != nil {
+			return model.RuntimeState{}, err
+		}
+		args = append(args, "-v", fmt.Sprintf("%s:/cache", cacheMount))
 	}
 	switch spec.NetworkMode {
 	case model.NetworkModeInternetEnabled:
@@ -89,6 +98,17 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 		Status:    model.SandboxStatusStopped,
 		Running:   false,
 	}, nil
+}
+
+func absoluteHostPath(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(abs), nil
 }
 
 func (r *Runtime) Start(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
@@ -217,9 +237,9 @@ func (r *Runtime) Exec(ctx context.Context, sandbox model.Sandbox, req model.Exe
 		now := time.Now().UTC()
 		return &execHandle{
 			resultCh: closedResult(model.ExecResult{
-				ExitCode:   0,
-				Status:     model.ExecutionStatusRunning,
-				StartedAt:  now,
+				ExitCode:    0,
+				Status:      model.ExecutionStatusRunning,
+				StartedAt:   now,
 				CompletedAt: now,
 			}),
 		}, nil
@@ -280,6 +300,13 @@ func (r *Runtime) AttachTTY(ctx context.Context, sandbox model.Sandbox, req mode
 		Cols: uint16(defaultInt(req.Cols, 80)),
 	})
 	if err != nil {
+		return nil, err
+	}
+	if _, err := term.MakeRaw(int(ptmx.Fd())); err != nil {
+		_ = ptmx.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
 		return nil, err
 	}
 	return &ttyHandle{cmd: cmd, pty: ptmx}, nil
@@ -543,8 +570,8 @@ func (w *previewWriter) Truncated() bool {
 }
 
 type inspectPayload struct {
-	ID              string `json:"Id"`
-	State           struct {
+	ID    string `json:"Id"`
+	State struct {
 		Status    string `json:"Status"`
 		Running   bool   `json:"Running"`
 		Paused    bool   `json:"Paused"`

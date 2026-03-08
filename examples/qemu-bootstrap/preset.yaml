@@ -1,0 +1,28 @@
+name: qemu-bootstrap
+description: Bootstrap a documented QEMU guest profile and download guest-produced text artifacts.
+runtime:
+  allowed: [qemu]
+  profile: base-guest
+sandbox:
+  image: ${QEMU_GUEST_IMAGE}
+  cpu: "1"
+  memory_mb: 1024
+  disk_mb: 4096
+  network: internet-enabled
+files:
+  - path: hello.txt
+    content: "qemu-bootstrap-ok"
+bootstrap:
+  - name: record-kernel
+    command: ["sh", "-lc", "cp /workspace/hello.txt /workspace/out.txt && uname -a > /workspace/uname.txt"]
+readiness:
+  type: command
+  command: ["sh", "-lc", "test -f /workspace/out.txt && grep -q qemu-bootstrap-ok /workspace/out.txt"]
+  timeout: 30s
+  interval: 500ms
+artifacts:
+  - remote_path: out.txt
+    local_path: outputs/out.txt
+  - remote_path: uname.txt
+    local_path: outputs/uname.txt
+cleanup: on-success

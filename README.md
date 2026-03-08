@@ -93,7 +93,10 @@ export SANDBOX_AUTH_MODE=jwt-hs256
 export SANDBOX_AUTH_JWT_ISSUER=https://issuer.example
 export SANDBOX_AUTH_JWT_AUDIENCE=sandbox-api
 export SANDBOX_AUTH_JWT_SECRET_PATHS=/run/secrets/or3-jwt-hmac
+export SANDBOX_TUNNEL_SIGNING_KEY_PATH=/run/secrets/or3-tunnel-signing-key
 ```
+
+For browser-facing tunnel flows behind rolling restarts or multiple replicas, configure a shared tunnel signing secret so signed URLs and bootstrap cookies validate consistently across instances.
 
 ## Runtime Notes
 

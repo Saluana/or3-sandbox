@@ -1,1 +1,4 @@
 planning/completed
+.tmp
+.env
+.playwright-mcp

@@ -1,0 +1,91 @@
+name: openclaw
+description: Start an OpenClaw-style gateway service in a Docker sandbox and expose it through a tunnel.
+runtime:
+  allowed: [docker]
+sandbox:
+  image: ghcr.io/openclaw/openclaw:latest
+  cpu: "1"
+  memory_mb: 2048
+  pids: 256
+  disk_mb: 4096
+  network: internet-enabled
+  allow_tunnels: true
+inputs:
+  - name: OPENCLAW_GATEWAY_TOKEN
+    required: true
+    secret: true
+    description: Token used by the gateway.
+  - name: OPENROUTER_API_KEY
+    secret: true
+    description: Optional OpenRouter API key used for hosted model access.
+  - name: OPENCLAW_MODEL
+    default: minimax/minimax-m2.5
+    description: Optional default model. When OpenRouter is enabled, bare provider/model values are normalized to openrouter/provider/model.
+bootstrap:
+  - name: seed-openclaw-config
+    command:
+      - sh
+      - -lc
+      - |
+        set -eu
+        mkdir -p /home/node/.openclaw
+        HOME=/home/node openclaw config set gateway.auth.mode token >/dev/null
+        HOME=/home/node openclaw config set gateway.auth.token "$OPENCLAW_GATEWAY_TOKEN" >/dev/null
+        HOME=/home/node openclaw config set env.shellEnv.enabled true >/dev/null
+        HOME=/home/node openclaw config set env.shellEnv.timeoutMs 15000 >/dev/null
+        node <<'NODE'
+        const fs = require("fs");
+        const path = "/home/node/.openclaw/openclaw.json";
+        let config = {};
+        try {
+          config = JSON.parse(fs.readFileSync(path, "utf8"));
+        } catch {
+          config = {};
+        }
+        const openRouterAPIKey = (process.env.OPENROUTER_API_KEY || "").trim();
+        let model = (process.env.OPENCLAW_MODEL || "").trim();
+        if (openRouterAPIKey) {
+          if (!model) {
+            model = "openrouter/minimax/minimax-m2.5";
+          } else if (!model.startsWith("openrouter/")) {
+            model = `openrouter/${model}`;
+          }
+          config.env = { ...(config.env || {}), OPENROUTER_API_KEY: openRouterAPIKey };
+          config.agents = config.agents || {};
+          config.agents.defaults = config.agents.defaults || {};
+          config.agents.defaults.model = config.agents.defaults.model || {};
+          config.agents.defaults.model.primary = model;
+          config.agents.defaults.models = config.agents.defaults.models || {};
+          config.agents.defaults.models[model] = config.agents.defaults.models[model] || {};
+        }
+        fs.writeFileSync(path, JSON.stringify(config, null, 2) + "\n");
+        NODE
+        if [ -n "${OPENROUTER_API_KEY:-}" ]; then
+          printf 'OPENROUTER_API_KEY=%s\n' "$OPENROUTER_API_KEY" > /home/node/.openclaw/.env
+        fi
+    env:
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENCLAW_MODEL: ${OPENCLAW_MODEL}
+startup:
+  name: start-openclaw
+  command: ["node", "openclaw.mjs", "gateway", "--bind=loopback", "--port", "18789", "--allow-unconfigured", "--verbose"]
+  env:
+    HOME: /home/node
+    OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
+    OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+    OPENCLAW_MODEL: ${OPENCLAW_MODEL}
+  cwd: /app
+  detached: true
+  timeout: 5m
+readiness:
+  type: http
+  path: /healthz
+  timeout: 45s
+  interval: 1s
+tunnel:
+  port: 18789
+  protocol: http
+  auth_mode: token
+  visibility: private
+cleanup: on-success

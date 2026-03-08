@@ -49,7 +49,7 @@ func TestGuestFileOpsUseRuntimeBoundaryAndTenantIsolation(t *testing.T) {
 	if err := svc.WriteFile(ctx, tenantA.ID, sandbox.ID, "notes/hello.txt", "hello"); err != nil {
 		t.Fatalf("write via runtime: %v", err)
 	}
-	file, err := svc.ReadFile(ctx, tenantA.ID, sandbox.ID, "notes/hello.txt")
+	file, err := svc.ReadFile(ctx, tenantA.ID, sandbox.ID, "notes/hello.txt", "")
 	if err != nil {
 		t.Fatalf("read via runtime: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestGuestFileOpsUseRuntimeBoundaryAndTenantIsolation(t *testing.T) {
 		t.Fatalf("unexpected measured storage: got %d want 100", usage.ActualStorageBytes)
 	}
 
-	if _, err := svc.ReadFile(ctx, tenantB.ID, sandbox.ID, "notes/hello.txt"); !errors.Is(err, repository.ErrNotFound) {
+	if _, err := svc.ReadFile(ctx, tenantB.ID, sandbox.ID, "notes/hello.txt", ""); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("expected cross-tenant read denial, got %v", err)
 	}
 	if err := svc.WriteFile(ctx, tenantA.ID, sandbox.ID, "../escape.txt", "nope"); err == nil {
@@ -117,7 +117,7 @@ func TestLocalFileOpsStayScopedToWorkspaceAndMeasuredStorage(t *testing.T) {
 	if err := svc.WriteFile(ctx, tenantA.ID, sandbox.ID, "nested/value.txt", "42"); err != nil {
 		t.Fatalf("write fallback: %v", err)
 	}
-	file, err := svc.ReadFile(ctx, tenantA.ID, sandbox.ID, "nested/value.txt")
+	file, err := svc.ReadFile(ctx, tenantA.ID, sandbox.ID, "nested/value.txt", "")
 	if err != nil {
 		t.Fatalf("read fallback: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestLocalFileOpsStayScopedToWorkspaceAndMeasuredStorage(t *testing.T) {
 	if err := svc.WriteFile(ctx, tenantA.ID, sandbox.ID, "../escape.txt", "nope"); err == nil {
 		t.Fatal("expected traversal write to fail")
 	}
-	if _, err := svc.ReadFile(ctx, tenantB.ID, sandbox.ID, "nested/value.txt"); !errors.Is(err, repository.ErrNotFound) {
+	if _, err := svc.ReadFile(ctx, tenantB.ID, sandbox.ID, "nested/value.txt", ""); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("expected cross-tenant read denial, got %v", err)
 	}
 }

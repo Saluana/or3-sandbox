@@ -1,0 +1,42 @@
+name: playwright
+description: Capture a screenshot with Playwright and download it as a binary artifact.
+runtime:
+  allowed: [docker]
+sandbox:
+  image: mcr.microsoft.com/playwright:v1.51.1-noble
+  cpu: "2"
+  memory_mb: 2048
+  pids: 512
+  disk_mb: 8192
+  network: internet-enabled
+  allow_tunnels: false
+inputs:
+  - name: TARGET_URL
+    description: URL to visit before taking a screenshot.
+    default: https://example.com
+files:
+  - path: shot.js
+    content: |
+      const { chromium } = require('playwright');
+      (async () => {
+        const browser = await chromium.launch({ headless: true });
+        const page = await browser.newPage();
+        await page.goto(process.env.TARGET_URL || 'https://example.com', { waitUntil: 'networkidle' });
+        await page.screenshot({ path: '/workspace/screenshot.png', fullPage: true });
+        console.log(await page.title());
+        await browser.close();
+      })().catch((error) => {
+        console.error(error);
+        process.exit(1);
+      });
+bootstrap:
+  - name: capture-screenshot
+    command: ["node", "/workspace/shot.js"]
+    timeout: 10m
+    env:
+      TARGET_URL: ${TARGET_URL}
+artifacts:
+  - remote_path: screenshot.png
+    local_path: outputs/screenshot.png
+    binary: true
+cleanup: on-success

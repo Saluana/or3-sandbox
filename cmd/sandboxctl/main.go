@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -73,6 +74,8 @@ func main() {
 		err = runSnapshotInspect(client, os.Args[2:])
 	case "snapshot-restore":
 		err = runSnapshotRestore(client, os.Args[2:])
+	case "preset":
+		err = runPreset(client, os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -299,7 +302,7 @@ func runUpload(client clientConfig, args []string) error {
 	if err != nil {
 		return err
 	}
-	return doJSON(client, http.MethodPut, "/v1/sandboxes/"+args[0]+"/files/"+strings.TrimLeft(args[2], "/"), model.FileWriteRequest{Content: string(data)}, nil)
+	return doJSON(client, http.MethodPut, "/v1/sandboxes/"+args[0]+"/files/"+strings.TrimLeft(args[2], "/"), model.FileWriteRequest{Encoding: "base64", ContentBase64: base64.StdEncoding.EncodeToString(data)}, nil)
 }
 
 func runDownload(client clientConfig, args []string) error {
@@ -307,10 +310,14 @@ func runDownload(client clientConfig, args []string) error {
 		return errors.New("usage: sandboxctl download <sandbox-id> <remote-path> <local-path>")
 	}
 	var file model.FileReadResponse
-	if err := doJSON(client, http.MethodGet, "/v1/sandboxes/"+args[0]+"/files/"+strings.TrimLeft(args[1], "/"), nil, &file); err != nil {
+	if err := doJSON(client, http.MethodGet, "/v1/sandboxes/"+args[0]+"/files/"+strings.TrimLeft(args[1], "/")+"?encoding=base64", nil, &file); err != nil {
 		return err
 	}
-	return os.WriteFile(args[2], []byte(file.Content), 0o644)
+	data, err := base64.StdEncoding.DecodeString(file.ContentBase64)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(args[2], data, 0o644)
 }
 
 func runMkdir(client clientConfig, args []string) error {
@@ -455,7 +462,11 @@ func doJSON(client clientConfig, method, endpoint string, requestBody any, out a
 		}
 		body = bytes.NewReader(data)
 	}
-	request, err := http.NewRequest(method, strings.TrimRight(client.baseURL, "/")+path.Clean("/"+endpoint), body)
+	requestURL, err := buildRequestURL(client.baseURL, endpoint)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequest(method, requestURL, body)
 	if err != nil {
 		return err
 	}
@@ -478,6 +489,19 @@ func doJSON(client clientConfig, method, endpoint string, requestBody any, out a
 	return json.NewDecoder(response.Body).Decode(out)
 }
 
+func buildRequestURL(baseURL, endpoint string) (string, error) {
+	base, err := url.Parse(strings.TrimRight(baseURL, "/") + "/")
+	if err != nil {
+		return "", err
+	}
+	ref, err := url.Parse(strings.TrimLeft(endpoint, "/"))
+	if err != nil {
+		return "", err
+	}
+	ref.Path = path.Clean("/" + ref.Path)
+	return base.ResolveReference(ref).String(), nil
+}
+
 func printJSON(value any) error {
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
@@ -485,7 +509,7 @@ func printJSON(value any) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: sandboxctl <create|list|inspect|start|stop|suspend|resume|delete|exec|tty|upload|download|mkdir|tunnel-create|tunnel-list|tunnel-revoke|quota|runtime-health|snapshot-create|snapshot-list|snapshot-inspect|snapshot-restore>")
+	fmt.Fprintln(os.Stderr, "usage: sandboxctl <create|list|inspect|start|stop|suspend|resume|delete|exec|tty|upload|download|mkdir|tunnel-create|tunnel-list|tunnel-revoke|quota|runtime-health|snapshot-create|snapshot-list|snapshot-inspect|snapshot-restore|preset>")
 }
 
 func env(key, fallback string) string {

@@ -56,6 +56,8 @@ type Config struct {
 	ReconcileInterval        time.Duration
 	CleanupInterval          time.Duration
 	OperatorHost             string
+	TunnelSigningKey         string
+	TunnelSigningKeyPath     string
 	Tenants                  []TenantConfig
 	OptionalSnapshotExport   string
 	QEMUBinary               string
@@ -109,6 +111,8 @@ func Load(args []string) (Config, error) {
 	fs.DurationVar(&cfg.CleanupInterval, "cleanup-interval", envDuration("SANDBOX_CLEANUP_INTERVAL", 5*time.Minute), "cleanup interval")
 	fs.DurationVar(&cfg.QEMUBootTimeout, "qemu-boot-timeout", envDuration("SANDBOX_QEMU_BOOT_TIMEOUT", 2*time.Minute), "qemu guest boot timeout")
 	fs.StringVar(&cfg.OperatorHost, "operator-host", env("SANDBOX_OPERATOR_HOST", "http://127.0.0.1:8080"), "public control plane host")
+	fs.StringVar(&cfg.TunnelSigningKey, "tunnel-signing-key", env("SANDBOX_TUNNEL_SIGNING_KEY", ""), "shared secret for tunnel signed URLs and browser bootstrap cookies")
+	fs.StringVar(&cfg.TunnelSigningKeyPath, "tunnel-signing-key-path", env("SANDBOX_TUNNEL_SIGNING_KEY_PATH", ""), "path to shared secret for tunnel signed URLs and browser bootstrap cookies")
 	networkMode := env("SANDBOX_DEFAULT_NETWORK_MODE", string(model.NetworkModeInternetEnabled))
 	allowTunnels := env("SANDBOX_DEFAULT_ALLOW_TUNNELS", "true")
 	if err := fs.Parse(args); err != nil {
@@ -258,6 +262,14 @@ func validateTransportConfig(c Config, fileReadable func(string) error) error {
 		return errors.New("tls requires both SANDBOX_TLS_CERT_PATH and SANDBOX_TLS_KEY_PATH")
 	}
 	var problems []string
+	if strings.TrimSpace(c.TunnelSigningKey) != "" && strings.TrimSpace(c.TunnelSigningKeyPath) != "" {
+		problems = append(problems, "set only one of SANDBOX_TUNNEL_SIGNING_KEY or SANDBOX_TUNNEL_SIGNING_KEY_PATH")
+	}
+	if strings.TrimSpace(c.TunnelSigningKeyPath) != "" {
+		if err := fileReadable(c.TunnelSigningKeyPath); err != nil {
+			problems = append(problems, fmt.Sprintf("tunnel signing key path is not readable: %v", err))
+		}
+	}
 	if hasCert {
 		if err := fileReadable(c.TLSCertPath); err != nil {
 			problems = append(problems, fmt.Sprintf("tls certificate path is not readable: %v", err))

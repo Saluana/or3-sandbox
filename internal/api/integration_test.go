@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +21,7 @@ import (
 	"time"
 
 	jwt "github.com/golang-jwt/jwt/v5"
+	"github.com/gorilla/websocket"
 
 	"or3-sandbox/internal/api"
 	"or3-sandbox/internal/auth"
@@ -346,6 +351,51 @@ func TestRuntimeHealthEndpoint(t *testing.T) {
 	}
 }
 
+func TestBinaryFileUploadAndDownload(t *testing.T) {
+	h := newHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "alpine:3.20",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+
+	pngData := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01}
+	h.mustDoJSON(t, "token-a", http.MethodPut, "/v1/sandboxes/"+sandbox.ID+"/files/pixel.png", model.FileWriteRequest{Encoding: "base64", ContentBase64: base64.StdEncoding.EncodeToString(pngData)}, nil, http.StatusNoContent)
+
+	request, err := http.NewRequest(http.MethodGet, h.server.URL+"/v1/sandboxes/"+sandbox.ID+"/files/pixel.png?encoding=base64", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer token-a")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, body)
+	}
+	var file model.FileReadResponse
+	if err := json.NewDecoder(response.Body).Decode(&file); err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(file.ContentBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded) != string(pngData) {
+		t.Fatalf("unexpected decoded payload: %v", decoded)
+	}
+}
+
 func TestJWTAuthorizationEnforcesRolePermissions(t *testing.T) {
 	h := newJWTStubHarness(t)
 	defer h.close()
@@ -404,6 +454,353 @@ func TestTunnelProxyTargetsSandboxLocalhost(t *testing.T) {
 	}
 	h.expectStatus(t, "token-a", http.MethodDelete, "/v1/tunnels/"+tunnel.ID, nil, http.StatusNoContent)
 	h.expectStatusWithHeaders(t, "token-a", http.MethodGet, "/v1/tunnels/"+tunnel.ID+"/proxy", nil, http.StatusGone, map[string]string{"X-Tunnel-Token": tunnel.AccessToken})
+}
+
+func TestTunnelProxyReturnsBadGatewayWhenSandboxRequestFails(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+	h.stubRuntime.execResult = model.ExecResult{
+		ExitCode:      7,
+		Status:        model.ExecutionStatusFailed,
+		StartedAt:     time.Now().UTC(),
+		CompletedAt:   time.Now().UTC(),
+		StderrPreview: "curl: (7) Failed to connect",
+	}
+	h.stubRuntime.execStderr = "curl: (7) Failed to connect"
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	h.expectStatusWithHeaders(t, "token-a", http.MethodGet, "/v1/tunnels/"+tunnel.ID+"/proxy/healthz", nil, http.StatusBadGateway, map[string]string{"X-Tunnel-Token": tunnel.AccessToken})
+}
+
+func TestTunnelSignedURLBootstrapsBrowserSession(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	signed := h.createTunnelSignedURL(t, "token-a", tunnel.ID, model.CreateTunnelSignedURLRequest{Path: "/"})
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Step 1: visit the signed URL → expect an HTML bootstrap page that
+	// sets the session cookie and clears stale localStorage.
+	client := &http.Client{Jar: jar}
+	response, err := client.Get(signed.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected signed tunnel status %d: %s", response.StatusCode, string(body))
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "window.location.replace") {
+		t.Fatalf("expected bootstrap page with JS redirect, got %q", string(body))
+	}
+	proxyURL, err := url.Parse(h.server.URL + "/v1/tunnels/" + tunnel.ID + "/proxy/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jar.Cookies(proxyURL)) == 0 {
+		t.Fatal("expected tunnel auth cookie to be set")
+	}
+	// Step 2: follow the redirect manually (the browser would do this via
+	// the JS redirect in the bootstrap page) → proxy reaches upstream.
+	cleanURL := h.server.URL + "/v1/tunnels/" + tunnel.ID + "/proxy/"
+	response2, err := client.Get(cleanURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response2.Body.Close()
+	body2, _ := io.ReadAll(response2.Body)
+	if response2.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected proxied status %d: %s", response2.StatusCode, string(body2))
+	}
+	if string(body2) != "proxy-ok" {
+		t.Fatalf("unexpected proxied body %q", string(body2))
+	}
+	if h.stubRuntime.lastExec.Env["URL"] != "http://127.0.0.1:8090/" {
+		t.Fatalf("expected signed tunnel proxy to target sandbox-localhost root, got %q", h.stubRuntime.lastExec.Env["URL"])
+	}
+}
+
+func TestTunnelSignedURLRejectsTampering(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	signed := h.createTunnelSignedURL(t, "token-a", tunnel.ID, model.CreateTunnelSignedURLRequest{Path: "/"})
+
+	parsed, err := url.Parse(signed.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	query.Set("or3_sig", query.Get("or3_sig")+"tamper")
+	parsed.RawQuery = query.Encode()
+
+	response, err := http.Get(parsed.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected tampered tunnel status %d: %s", response.StatusCode, string(body))
+	}
+}
+
+func TestTunnelSignedURLExpires(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	signed := h.createTunnelSignedURL(t, "token-a", tunnel.ID, model.CreateTunnelSignedURLRequest{Path: "/", TTLSeconds: 1})
+
+	time.Sleep(1100 * time.Millisecond)
+	response, err := http.Get(signed.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected expired tunnel status %d: %s", response.StatusCode, string(body))
+	}
+}
+
+func TestTunnelSignedURLSurvivesHandlerRestart(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	signed := h.createTunnelSignedURL(t, "token-a", tunnel.ID, model.CreateTunnelSignedURLRequest{Path: "/"})
+
+	h.server.Config.Handler = auth.New(h.store, h.cfg).Wrap(api.New(logging.New(), h.service, h.cfg))
+
+	response, err := http.Get(signed.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected signed tunnel status after restart %d: %s", response.StatusCode, string(body))
+	}
+}
+
+func TestTunnelWebSocketProxyForwardsMessages(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+	upstream := newTunnelWebSocketUpstream(t)
+	defer upstream.close()
+	h.stubRuntime.tunnelBridgeAddr = upstream.addr
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	wsURL := "ws" + strings.TrimPrefix(h.server.URL, "http") + "/v1/tunnels/" + tunnel.ID + "/proxy/socket"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{
+		"Authorization":  []string{"Bearer token-a"},
+		"X-Tunnel-Token": []string{tunnel.AccessToken},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	messageType, payload, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messageType != websocket.TextMessage || string(payload) != "echo:hello" {
+		t.Fatalf("unexpected proxied websocket payload type=%d body=%q", messageType, string(payload))
+	}
+	if h.stubRuntime.lastTTY.Env["OR3_TUNNEL_TARGET_PORT"] != "8090" {
+		t.Fatalf("expected tunnel bridge env port, got %q", h.stubRuntime.lastTTY.Env["OR3_TUNNEL_TARGET_PORT"])
+	}
+}
+
+func TestTunnelWebSocketProxySupportsSignedCookieAuth(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+	upstream := newTunnelWebSocketUpstream(t)
+	defer upstream.close()
+	h.stubRuntime.tunnelBridgeAddr = upstream.addr
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	signed := h.createTunnelSignedURL(t, "token-a", tunnel.ID, model.CreateTunnelSignedURLRequest{Path: "/"})
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpClient := &http.Client{Jar: jar}
+	response, err := httpClient.Get(signed.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	proxyURL := strings.TrimRight(h.server.URL, "/") + "/v1/tunnels/" + tunnel.ID + "/proxy/socket"
+	parsedProxyURL, err := url.Parse(proxyURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jar.Cookies(parsedProxyURL)) == 0 {
+		t.Fatal("expected signed tunnel cookie to be present for websocket dial")
+	}
+	dialer := websocket.Dialer{Jar: jar}
+	conn, _, err := dialer.Dial("ws"+strings.TrimPrefix(proxyURL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteMessage(websocket.TextMessage, []byte("signed")); err != nil {
+		t.Fatal(err)
+	}
+	_, payload, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(payload) != "echo:signed" {
+		t.Fatalf("unexpected signed websocket payload %q", string(payload))
+	}
+}
+
+func TestTunnelProxyPreservesApplicationTokenQueryWhenHeaderAuthUsed(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+
+	h.expectStatusWithHeaders(t, "token-a", http.MethodGet, "/v1/tunnels/"+tunnel.ID+"/proxy/app?token=upstream-token&mode=debug", nil, http.StatusOK, map[string]string{"X-Tunnel-Token": tunnel.AccessToken})
+	if h.stubRuntime.lastExec.Env["URL"] != "http://127.0.0.1:8090/app?mode=debug&token=upstream-token" {
+		t.Fatalf("expected upstream app token query to be preserved, got %q", h.stubRuntime.lastExec.Env["URL"])
+	}
+}
+
+func TestTunnelProxyRemovesTunnelTokenFromUpstreamQuery(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+
+	h.expectStatus(t, "token-a", http.MethodGet, "/v1/tunnels/"+tunnel.ID+"/proxy/app?token="+url.QueryEscape(tunnel.AccessToken)+"&mode=debug", nil, http.StatusOK)
+	if h.stubRuntime.lastExec.Env["URL"] != "http://127.0.0.1:8090/app?mode=debug" {
+		t.Fatalf("expected tunnel auth token to be stripped from upstream query, got %q", h.stubRuntime.lastExec.Env["URL"])
+	}
+}
+
+func TestWriteFileRejectsMissingContentBase64WhenEncodingBase64(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+
+	h.expectStatus(t, "token-a", http.MethodPut, "/v1/sandboxes/"+sandbox.ID+"/files/notes.txt", model.FileWriteRequest{Encoding: "base64", Content: "hello"}, http.StatusBadRequest)
 }
 
 type harness struct {
@@ -478,10 +875,10 @@ func newHarness(t *testing.T) *harness {
 	}
 	runtime := runtimedocker.New()
 	svc := service.New(cfg, store, runtime)
-	server := httptest.NewServer(auth.New(store, cfg).Wrap(api.New(logging.New(), svc)))
+	server := httptest.NewServer(auth.New(store, cfg).Wrap(api.New(logging.New(), svc, cfg)))
 	cfg.OperatorHost = server.URL
 	svc = service.New(cfg, store, runtime)
-	server.Config.Handler = auth.New(store, cfg).Wrap(api.New(logging.New(), svc))
+	server.Config.Handler = auth.New(store, cfg).Wrap(api.New(logging.New(), svc, cfg))
 	return &harness{t: t, cfg: cfg, db: sqlDB, store: store, service: svc, runtime: runtime, server: server}
 }
 
@@ -536,10 +933,10 @@ func newStubHarness(t *testing.T) *harness {
 	}
 	runtime := &apiStubRuntime{}
 	svc := service.New(cfg, store, runtime)
-	server := httptest.NewServer(auth.New(store, cfg).Wrap(api.New(logging.New(), svc)))
+	server := httptest.NewServer(auth.New(store, cfg).Wrap(api.New(logging.New(), svc, cfg)))
 	cfg.OperatorHost = server.URL
 	svc = service.New(cfg, store, runtime)
-	server.Config.Handler = auth.New(store, cfg).Wrap(api.New(logging.New(), svc))
+	server.Config.Handler = auth.New(store, cfg).Wrap(api.New(logging.New(), svc, cfg))
 	return &harness{t: t, cfg: cfg, db: sqlDB, store: store, service: svc, stubRuntime: runtime, server: server}
 }
 
@@ -555,7 +952,7 @@ func newJWTStubHarness(t *testing.T) *harness {
 	h.cfg.AuthJWTIssuer = "issuer.example"
 	h.cfg.AuthJWTAudience = "sandbox-api"
 	h.cfg.AuthJWTSecretPaths = []string{secretPath}
-	h.server.Config.Handler = auth.New(h.store, h.cfg).Wrap(api.New(logging.New(), h.service))
+	h.server.Config.Handler = auth.New(h.store, h.cfg).Wrap(api.New(logging.New(), h.service, h.cfg))
 	h.jwtSecret = secret
 	h.jwtIssuer = h.cfg.AuthJWTIssuer
 	h.jwtAudience = h.cfg.AuthJWTAudience
@@ -577,7 +974,12 @@ func (h *harness) close() {
 }
 
 type apiStubRuntime struct {
-	lastExec model.ExecRequest
+	lastExec         model.ExecRequest
+	lastTTY          model.TTYRequest
+	execResult       model.ExecResult
+	execStdout       string
+	execStderr       string
+	tunnelBridgeAddr string
 }
 
 func (r *apiStubRuntime) Create(context.Context, model.SandboxSpec) (model.RuntimeState, error) {
@@ -610,19 +1012,40 @@ func (r *apiStubRuntime) Inspect(context.Context, model.Sandbox) (model.RuntimeS
 
 func (r *apiStubRuntime) Exec(_ context.Context, _ model.Sandbox, req model.ExecRequest, streams model.ExecStreams) (model.ExecHandle, error) {
 	r.lastExec = req
-	if streams.Stdout != nil {
-		_, _ = io.WriteString(streams.Stdout, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nproxy-ok")
+	stdout := r.execStdout
+	if stdout == "" {
+		stdout = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nproxy-ok"
 	}
-	return &apiExecHandle{result: model.ExecResult{
-		ExitCode:    0,
-		Status:      model.ExecutionStatusSucceeded,
-		StartedAt:   time.Now().UTC(),
-		CompletedAt: time.Now().UTC(),
-	}}, nil
+	stderr := r.execStderr
+	if streams.Stdout != nil {
+		_, _ = io.WriteString(streams.Stdout, stdout)
+	}
+	if streams.Stderr != nil && stderr != "" {
+		_, _ = io.WriteString(streams.Stderr, stderr)
+	}
+	result := r.execResult
+	if result.Status == "" {
+		result = model.ExecResult{
+			ExitCode:    0,
+			Status:      model.ExecutionStatusSucceeded,
+			StartedAt:   time.Now().UTC(),
+			CompletedAt: time.Now().UTC(),
+		}
+	}
+	return &apiExecHandle{result: result}, nil
 }
 
-func (r *apiStubRuntime) AttachTTY(context.Context, model.Sandbox, model.TTYRequest) (model.TTYHandle, error) {
-	return nil, errors.New("not implemented")
+func (r *apiStubRuntime) AttachTTY(_ context.Context, _ model.Sandbox, req model.TTYRequest) (model.TTYHandle, error) {
+	r.lastTTY = req
+	if r.tunnelBridgeAddr == "" {
+		return nil, errors.New("not implemented")
+	}
+	conn, err := net.Dial("tcp", r.tunnelBridgeAddr)
+	if err != nil {
+		return nil, err
+	}
+	reader := io.MultiReader(strings.NewReader("__OR3_TUNNEL_BRIDGE_READY__\n"), conn)
+	return &stubTTYHandle{reader: reader, writer: conn, closer: conn}, nil
 }
 
 func (r *apiStubRuntime) CreateSnapshot(context.Context, model.Sandbox, string) (model.SnapshotInfo, error) {
@@ -635,6 +1058,31 @@ func (r *apiStubRuntime) RestoreSnapshot(context.Context, model.Sandbox, model.S
 
 type apiExecHandle struct {
 	result model.ExecResult
+}
+
+type stubTTYHandle struct {
+	reader io.Reader
+	writer io.Writer
+	closer io.Closer
+}
+
+func (h *stubTTYHandle) Reader() io.Reader {
+	return h.reader
+}
+
+func (h *stubTTYHandle) Writer() io.Writer {
+	return h.writer
+}
+
+func (h *stubTTYHandle) Resize(model.ResizeRequest) error {
+	return nil
+}
+
+func (h *stubTTYHandle) Close() error {
+	if h.closer != nil {
+		return h.closer.Close()
+	}
+	return nil
 }
 
 func (h *apiExecHandle) Wait() model.ExecResult {
@@ -730,6 +1178,13 @@ func (h *harness) createTunnel(t *testing.T, token, sandboxID string, port int) 
 	return tunnel
 }
 
+func (h *harness) createTunnelSignedURL(t *testing.T, token, tunnelID string, req model.CreateTunnelSignedURLRequest) model.TunnelSignedURL {
+	t.Helper()
+	var signed model.TunnelSignedURL
+	h.mustDoJSON(t, token, http.MethodPost, "/v1/tunnels/"+tunnelID+"/signed-url", req, &signed, http.StatusOK)
+	return signed
+}
+
 func (h *harness) tunnelGET(t *testing.T, token, tunnelID, accessToken string) string {
 	t.Helper()
 	request, err := http.NewRequest(http.MethodGet, h.server.URL+"/v1/tunnels/"+tunnelID+"/proxy", nil)
@@ -755,6 +1210,53 @@ func (h *harness) tunnelGET(t *testing.T, token, tunnelID, accessToken string) s
 
 func boolPtr(value bool) *bool {
 	return &value
+}
+
+type tunnelWebSocketUpstream struct {
+	listener net.Listener
+	server   *http.Server
+	addr     string
+}
+
+func newTunnelWebSocketUpstream(t *testing.T) *tunnelWebSocketUpstream {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if websocket.IsWebSocketUpgrade(r) {
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			for {
+				messageType, payload, err := conn.ReadMessage()
+				if err != nil {
+					return
+				}
+				if err := conn.WriteMessage(messageType, []byte("echo:"+string(payload))); err != nil {
+					return
+				}
+			}
+		}
+		_, _ = io.WriteString(w, "upstream-ok")
+	})}
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	return &tunnelWebSocketUpstream{listener: listener, server: server, addr: listener.Addr().String()}
+}
+
+func (u *tunnelWebSocketUpstream) close() {
+	if u.server != nil {
+		_ = u.server.Close()
+	}
+	if u.listener != nil {
+		_ = u.listener.Close()
+	}
 }
 
 func (h *harness) waitForFile(t *testing.T, token, sandboxID, path string, timeout time.Duration) {

@@ -41,6 +41,63 @@ func TestArchiveRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCreateUsesAbsoluteHostPathsForBindMounts(t *testing.T) {
+	root := t.TempDir()
+	argsLog := filepath.Join(root, "docker-args.txt")
+	fakeDocker := filepath.Join(root, "docker")
+	script := "#!/bin/sh\nprintf '%s\n' \"$@\" > \"$DOCKER_ARGS_LOG\"\nprintf 'container-id\\n'\n"
+	if err := os.WriteFile(fakeDocker, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_ARGS_LOG", argsLog)
+	runtime := NewWithBinary(fakeDocker)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relWorkspace := filepath.Join("testdata", "workspace")
+	relCache := filepath.Join("testdata", "cache")
+	if err := os.MkdirAll(relWorkspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(relCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(filepath.Join(wd, "testdata"))
+	})
+
+	_, err = runtime.Create(context.Background(), model.SandboxSpec{
+		SandboxID:     "sbx-relative",
+		TenantID:      "tenant-test",
+		BaseImageRef:  "alpine:3.20",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		StorageRoot:   filepath.Join("testdata", "rootfs"),
+		WorkspaceRoot: relWorkspace,
+		CacheRoot:     relCache,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logged, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceMount := filepath.Clean(filepath.Join(wd, relWorkspace)) + ":/workspace"
+	cacheMount := filepath.Clean(filepath.Join(wd, relCache)) + ":/cache"
+	text := string(logged)
+	if !strings.Contains(text, workspaceMount) {
+		t.Fatalf("expected absolute workspace mount %q in args %q", workspaceMount, text)
+	}
+	if !strings.Contains(text, cacheMount) {
+		t.Fatalf("expected absolute cache mount %q in args %q", cacheMount, text)
+	}
+}
+
 func TestPreviewWriterTracksTruncation(t *testing.T) {
 	writer := newPreviewWriter(nil, 4)
 	if _, err := writer.Write([]byte("abcdef")); err != nil {

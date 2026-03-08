@@ -128,12 +128,21 @@ Useful role examples:
 | `SANDBOX_TLS_CERT_PATH` | empty | TLS certificate file for in-process HTTPS |
 | `SANDBOX_TLS_KEY_PATH` | empty | TLS private key file for in-process HTTPS |
 | `SANDBOX_TRUST_PROXY_HEADERS` | `false` | trust a reverse proxy to handle HTTPS in front of `sandboxd` |
+| `SANDBOX_TUNNEL_SIGNING_KEY` | empty | shared secret for signed tunnel URLs and browser bootstrap cookies |
+| `SANDBOX_TUNNEL_SIGNING_KEY_PATH` | empty | file path containing the shared tunnel signing secret |
 
 Important truth:
 
 - you must provide both TLS files together or neither
 - if you use trusted proxy mode, set `SANDBOX_OPERATOR_HOST` to an `https://` address
 - production mode requires either in-process TLS or trusted-proxy mode
+- set one of `SANDBOX_TUNNEL_SIGNING_KEY` or `SANDBOX_TUNNEL_SIGNING_KEY_PATH` for rolling restarts or multiple replicas so signed browser tunnel URLs stay valid across instances
+
+Tunnel signing note:
+
+- signed browser tunnel URLs and the bootstrap cookie are HMAC-protected
+- if you do not set an explicit tunnel signing secret, the daemon derives a stable fallback from the current auth configuration
+- an explicit shared secret is still the recommended operator choice for multi-replica deployments because it makes signing independent from auth-secret rotation
 
 ## Quota settings
 
@@ -254,6 +263,7 @@ export SANDBOX_AUTH_MODE=jwt-hs256
 export SANDBOX_AUTH_JWT_ISSUER=https://issuer.example
 export SANDBOX_AUTH_JWT_AUDIENCE=sandbox-api
 export SANDBOX_AUTH_JWT_SECRET_PATHS=/run/secrets/or3-jwt-hmac
+export SANDBOX_TUNNEL_SIGNING_KEY_PATH=/run/secrets/or3-tunnel-signing-key
 export SANDBOX_TRUST_PROXY_HEADERS=true
 export SANDBOX_OPERATOR_HOST=https://sandbox.example.com
 export SANDBOX_POLICY_ALLOWED_IMAGES=ghcr.io/acme/runner:*,alpine:3.20

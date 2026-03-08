@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"or3-sandbox/internal/config"
 	"or3-sandbox/internal/model"
@@ -32,6 +34,11 @@ type workspaceFileRuntime interface {
 	WriteWorkspaceFile(ctx context.Context, sandbox model.Sandbox, relativePath string, content string) error
 	DeleteWorkspacePath(ctx context.Context, sandbox model.Sandbox, relativePath string) error
 	MkdirWorkspace(ctx context.Context, sandbox model.Sandbox, relativePath string) error
+}
+
+type workspaceBinaryFileRuntime interface {
+	ReadWorkspaceFileBytes(ctx context.Context, sandbox model.Sandbox, relativePath string) ([]byte, error)
+	WriteWorkspaceFileBytes(ctx context.Context, sandbox model.Sandbox, relativePath string, content []byte) error
 }
 
 type storageMeasurer interface {
@@ -482,7 +489,7 @@ func (s *Service) UpdateTTYResize(ctx context.Context, tenantID, sessionID strin
 	return s.store.UpdateTTYResize(ctx, tenantID, sessionID, fmt.Sprintf("%dx%d", cols, rows))
 }
 
-func (s *Service) ReadFile(ctx context.Context, tenantID, sandboxID, path string) (model.FileReadResponse, error) {
+func (s *Service) ReadFile(ctx context.Context, tenantID, sandboxID, path, encoding string) (model.FileReadResponse, error) {
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {
 		return model.FileReadResponse{}, err
@@ -490,6 +497,14 @@ func (s *Service) ReadFile(ctx context.Context, tenantID, sandboxID, path string
 	relativePath, err := cleanWorkspaceRelativePath(path)
 	if err != nil {
 		return model.FileReadResponse{}, err
+	}
+	if strings.EqualFold(strings.TrimSpace(encoding), "base64") {
+		data, err := s.readWorkspaceBytes(ctx, sandbox, relativePath)
+		if err != nil {
+			return model.FileReadResponse{}, err
+		}
+		_ = s.touchSandboxActivity(ctx, sandbox)
+		return model.FileReadResponse{Path: relativePath, ContentBase64: base64.StdEncoding.EncodeToString(data), Size: int64(len(data)), Encoding: "base64"}, nil
 	}
 	if runtime, ok := s.runtime.(workspaceFileRuntime); ok {
 		file, err := runtime.ReadWorkspaceFile(ctx, sandbox, relativePath)
@@ -511,6 +526,10 @@ func (s *Service) ReadFile(ctx context.Context, tenantID, sandboxID, path string
 }
 
 func (s *Service) WriteFile(ctx context.Context, tenantID, sandboxID, path string, content string) error {
+	return s.WriteFileBytes(ctx, tenantID, sandboxID, path, []byte(content))
+}
+
+func (s *Service) WriteFileBytes(ctx context.Context, tenantID, sandboxID, path string, content []byte) error {
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {
 		return err
@@ -519,8 +538,15 @@ func (s *Service) WriteFile(ctx context.Context, tenantID, sandboxID, path strin
 	if err != nil {
 		return err
 	}
-	if runtime, ok := s.runtime.(workspaceFileRuntime); ok {
-		if err := runtime.WriteWorkspaceFile(ctx, sandbox, relativePath, content); err != nil {
+	if runtime, ok := s.runtime.(workspaceBinaryFileRuntime); ok {
+		if err := runtime.WriteWorkspaceFileBytes(ctx, sandbox, relativePath, content); err != nil {
+			return err
+		}
+	} else if runtime, ok := s.runtime.(workspaceFileRuntime); ok {
+		if !utf8.Valid(content) {
+			return fmt.Errorf("binary file write is unsupported for runtime %q", sandbox.RuntimeBackend)
+		}
+		if err := runtime.WriteWorkspaceFile(ctx, sandbox, relativePath, string(content)); err != nil {
 			return err
 		}
 	} else {
@@ -531,13 +557,34 @@ func (s *Service) WriteFile(ctx context.Context, tenantID, sandboxID, path strin
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+		if err := os.WriteFile(target, content, 0o644); err != nil {
 			return err
 		}
 	}
 	s.recordAudit(ctx, tenantID, sandboxID, "file.write", relativePath, "ok", "file written")
 	_ = s.touchSandboxActivity(ctx, sandbox)
 	return s.refreshStorage(ctx, sandbox)
+}
+
+func (s *Service) readWorkspaceBytes(ctx context.Context, sandbox model.Sandbox, relativePath string) ([]byte, error) {
+	if runtime, ok := s.runtime.(workspaceBinaryFileRuntime); ok {
+		return runtime.ReadWorkspaceFileBytes(ctx, sandbox, relativePath)
+	}
+	if runtime, ok := s.runtime.(workspaceFileRuntime); ok {
+		file, err := runtime.ReadWorkspaceFile(ctx, sandbox, relativePath)
+		if err != nil {
+			return nil, err
+		}
+		if strings.EqualFold(file.Encoding, "base64") && strings.TrimSpace(file.ContentBase64) != "" {
+			return base64.StdEncoding.DecodeString(file.ContentBase64)
+		}
+		return []byte(file.Content), nil
+	}
+	target, err := resolveWorkspacePath(sandbox.WorkspaceRoot, relativePath)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(target)
 }
 
 func (s *Service) DeleteFile(ctx context.Context, tenantID, sandboxID, path string) error {

@@ -56,7 +56,7 @@ func main() {
 
 	go reconcileLoop(ctx, log, svc, cfg.ReconcileInterval)
 
-	handler := auth.New(store, cfg).Wrap(api.New(log, svc))
+	handler := auth.New(store, cfg).Wrap(api.New(log, svc, cfg))
 	server := &http.Server{
 		Addr:              cfg.ListenAddress,
 		Handler:           handler,

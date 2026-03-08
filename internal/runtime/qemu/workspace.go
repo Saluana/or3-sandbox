@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"path"
 	"path/filepath"
@@ -27,12 +28,26 @@ func (r *Runtime) ReadWorkspaceFile(ctx context.Context, sandbox model.Sandbox, 
 	}, nil
 }
 
+func (r *Runtime) ReadWorkspaceFileBytes(ctx context.Context, sandbox model.Sandbox, relativePath string) ([]byte, error) {
+	target := workspaceGuestPath(relativePath)
+	args := append(r.baseSSHArgs(r.sshTarget(sandbox, layoutForSandbox(sandbox)), false), "sh", "-lc", "cat "+shellQuote(target))
+	return r.runCommand(ctx, r.sshBinary, args...)
+}
+
 func (r *Runtime) WriteWorkspaceFile(ctx context.Context, sandbox model.Sandbox, relativePath string, content string) error {
+	return r.writeWorkspaceFileBytes(ctx, sandbox, relativePath, bytes.NewBufferString(content))
+}
+
+func (r *Runtime) WriteWorkspaceFileBytes(ctx context.Context, sandbox model.Sandbox, relativePath string, content []byte) error {
+	return r.writeWorkspaceFileBytes(ctx, sandbox, relativePath, bytes.NewReader(content))
+}
+
+func (r *Runtime) writeWorkspaceFileBytes(ctx context.Context, sandbox model.Sandbox, relativePath string, content io.Reader) error {
 	target := workspaceGuestPath(relativePath)
 	command := fmt.Sprintf("mkdir -p %s && cat > %s", shellQuote(path.Dir(target)), shellQuote(target))
 	args := append(r.baseSSHArgs(r.sshTarget(sandbox, layoutForSandbox(sandbox)), false), "sh", "-lc", command)
 	cmd := exec.CommandContext(ctx, r.sshBinary, args...)
-	cmd.Stdin = bytes.NewBufferString(content)
+	cmd.Stdin = content
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("write workspace file: %w: %s", err, strings.TrimSpace(string(output)))

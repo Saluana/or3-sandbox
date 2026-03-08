@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"golang.org/x/term"
 
 	"or3-sandbox/internal/model"
 )
@@ -85,6 +86,13 @@ func (r *Runtime) AttachTTY(ctx context.Context, sandbox model.Sandbox, req mode
 		Cols: uint16(defaultInt(req.Cols, 80)),
 	})
 	if err != nil {
+		return nil, err
+	}
+	if _, err := term.MakeRaw(int(ptmx.Fd())); err != nil {
+		_ = ptmx.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
 		return nil, err
 	}
 	return &ttyHandle{cmd: cmd, pty: ptmx}, nil

@@ -1,0 +1,84 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "run sandboxd docker dev",
+			"type": "shell",
+			"command": "mkdir -p /Users/brendon/Documents/or3-sandbox/.tmp/manual-run && env SANDBOX_LISTEN=127.0.0.1:18080 SANDBOX_DB_PATH=/Users/brendon/Documents/or3-sandbox/.tmp/manual-run/sandbox.db SANDBOX_STORAGE_ROOT=/Users/brendon/Documents/or3-sandbox/.tmp/manual-run/storage SANDBOX_SNAPSHOT_ROOT=/Users/brendon/Documents/or3-sandbox/.tmp/manual-run/snapshots SANDBOX_OPERATOR_HOST=http://127.0.0.1:18080 SANDBOX_RUNTIME=docker SANDBOX_TRUSTED_DOCKER_RUNTIME=true SANDBOX_MODE=development SANDBOX_AUTH_MODE=static SANDBOX_TOKENS=dev-token=tenant-dev go run ./cmd/sandboxd",
+			"isBackground": true,
+			"group": "build"
+		},
+		{
+			"label": "reconfigure-live-openclaw-openrouter",
+			"type": "shell",
+			"command": "set -a && . ./.env && set +a && SANDBOX_API=http://127.0.0.1:8080 SANDBOX_TOKEN=${OR3_API_TOKEN:-dev-token} go run ./cmd/sandboxctl exec sbx-342b281e8255c73c -- sh -lc 'set -eu; model=\"${OPENCLAW_MODEL:-minimax/minimax-m2.5}\"; case \"$model\" in openrouter/*) ;; *) model=\"openrouter/$model\" ;; esac; mkdir -p /home/node/.openclaw; printf \"OPENROUTER_API_KEY=%s\\n\" \"$OPENROUTER_API_KEY\" > /home/node/.openclaw/.env; HOME=/home/node openclaw config set env.OPENROUTER_API_KEY \"$OPENROUTER_API_KEY\" >/dev/null; HOME=/home/node openclaw config set env.shellEnv.enabled true >/dev/null; HOME=/home/node openclaw config set env.shellEnv.timeoutMs 15000 >/dev/null; HOME=/home/node openclaw config set agents.defaults.model.primary \"$model\" >/dev/null; printf \"%s\\n\" \"$model\"'",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "reconfigure-live-openclaw-openrouter-v2",
+			"type": "shell",
+			"command": "set -a && . ./.env && set +a && SANDBOX_API=http://127.0.0.1:8080 SANDBOX_TOKEN=${OR3_API_TOKEN:-dev-token} go run ./cmd/sandboxctl exec sbx-342b281e8255c73c -- sh -lc \"set -eu; model=\\\"${OPENCLAW_MODEL:-minimax/minimax-m2.5}\\\"; case \\\"$model\\\" in openrouter/*) ;; *) model=\\\"openrouter/$model\\\" ;; esac; mkdir -p /home/node/.openclaw; printf 'OPENROUTER_API_KEY=%s\\n' \\\"${OPENROUTER_API_KEY}\\\" > /home/node/.openclaw/.env; HOME=/home/node openclaw config set env.OPENROUTER_API_KEY \\\"${OPENROUTER_API_KEY}\\\" >/dev/null; HOME=/home/node openclaw config set env.shellEnv.enabled true >/dev/null; HOME=/home/node openclaw config set env.shellEnv.timeoutMs 15000 >/dev/null; HOME=/home/node openclaw config set agents.defaults.model.primary \\\"$model\\\" >/dev/null; printf '%s\\n' \\\"$model\\\"\"",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "restart-live-openclaw-gateway",
+			"type": "shell",
+			"command": "SANDBOX_API=http://127.0.0.1:8080 SANDBOX_TOKEN=${OR3_API_TOKEN:-dev-token} go run ./cmd/sandboxctl exec sbx-342b281e8255c73c -- sh -lc \"pkill -f 'node openclaw.mjs gateway' || true; cd /app; nohup node openclaw.mjs gateway --bind=loopback --port 18789 --allow-unconfigured --verbose >/tmp/openclaw-gateway.log 2>&1 &\"",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "inspect-live-openclaw-model-status",
+			"type": "shell",
+			"command": "SANDBOX_API=http://127.0.0.1:8080 SANDBOX_TOKEN=${OR3_API_TOKEN:-dev-token} go run ./cmd/sandboxctl exec sbx-342b281e8255c73c -- sh -lc 'HOME=/home/node openclaw models status 2>&1 | head -40; echo ---; HOME=/home/node openclaw config get agents.defaults.model.primary 2>&1; echo ---; cat /home/node/.openclaw/.env 2>&1'",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "fix-live-openclaw-model-primary",
+			"type": "shell",
+			"command": "SANDBOX_API=http://127.0.0.1:8080 SANDBOX_TOKEN=${OR3_API_TOKEN:-dev-token} go run ./cmd/sandboxctl exec sbx-342b281e8255c73c -- sh -lc 'HOME=/home/node openclaw config set agents.defaults.model.primary openrouter/minimax/minimax-m2.5 >/dev/null; HOME=/home/node openclaw config get agents.defaults.model.primary; echo ---; HOME=/home/node openclaw models status 2>&1 | head -20'",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "inspect-live-openclaw-model-primary-2",
+			"type": "shell",
+			"command": "SANDBOX_API=http://127.0.0.1:8080 SANDBOX_TOKEN=${OR3_API_TOKEN:-dev-token} go run ./cmd/sandboxctl exec sbx-342b281e8255c73c -- sh -lc 'HOME=/home/node openclaw config get agents.defaults.model.primary 2>&1; echo ---; HOME=/home/node openclaw models status 2>&1 | head -15'",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "restart-live-openclaw-via-cli",
+			"type": "shell",
+			"command": "SANDBOX_API=http://127.0.0.1:8080 SANDBOX_TOKEN=${OR3_API_TOKEN:-dev-token} go run ./cmd/sandboxctl exec sbx-342b281e8255c73c -- sh -lc 'HOME=/home/node openclaw gateway restart 2>&1 | head -40'",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "run-openclaw-preset-with-dotenv",
+			"type": "shell",
+			"command": "set -a && . ./.env && set +a && SANDBOX_API=http://127.0.0.1:8080 SANDBOX_TOKEN=${OR3_API_TOKEN:-dev-token} go run ./cmd/sandboxctl preset run openclaw --cleanup never",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "inspect-fresh-openclaw-preset-sandbox",
+			"type": "shell",
+			"command": "SANDBOX_API=http://127.0.0.1:8080 SANDBOX_TOKEN=${OR3_API_TOKEN:-dev-token} go run ./cmd/sandboxctl exec sbx-3059ebfc1a176873 -- sh -lc 'HOME=/home/node openclaw config get agents.defaults.model.primary 2>&1; echo ---; HOME=/home/node openclaw models status 2>&1 | head -15; echo ---; cat /home/node/.openclaw/.env 2>&1'",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}

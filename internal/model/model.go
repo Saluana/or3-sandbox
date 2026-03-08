@@ -136,14 +136,17 @@ type TTYSession struct {
 }
 
 type FileWriteRequest struct {
-	Content string `json:"content"`
+	Content       string `json:"content,omitempty"`
+	ContentBase64 string `json:"content_base64,omitempty"`
+	Encoding      string `json:"encoding,omitempty"`
 }
 
 type FileReadResponse struct {
-	Path     string `json:"path"`
-	Content  string `json:"content"`
-	Size     int64  `json:"size"`
-	Encoding string `json:"encoding"`
+	Path          string `json:"path"`
+	Content       string `json:"content,omitempty"`
+	ContentBase64 string `json:"content_base64,omitempty"`
+	Size          int64  `json:"size"`
+	Encoding      string `json:"encoding"`
 }
 
 type MkdirRequest struct {
@@ -155,6 +158,11 @@ type CreateTunnelRequest struct {
 	Protocol   TunnelProtocol `json:"protocol"`
 	AuthMode   string         `json:"auth_mode"`
 	Visibility string         `json:"visibility"`
+}
+
+type CreateTunnelSignedURLRequest struct {
+	Path       string `json:"path,omitempty"`
+	TTLSeconds int    `json:"ttl_seconds,omitempty"`
 }
 
 type Tunnel struct {
@@ -170,6 +178,11 @@ type Tunnel struct {
 	AuthSecretHash string         `json:"-"`
 	CreatedAt      time.Time      `json:"created_at"`
 	RevokedAt      *time.Time     `json:"revoked_at,omitempty"`
+}
+
+type TunnelSignedURL struct {
+	URL       string    `json:"url"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type CreateSnapshotRequest struct {

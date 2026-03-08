@@ -1,0 +1,31 @@
+name: qemu-service
+description: Start a guest-hosted HTTP service and expose it through the shared tunnel flow.
+runtime:
+  allowed: [qemu]
+  profile: python-service-guest
+sandbox:
+  image: ${QEMU_GUEST_IMAGE}
+  cpu: "1"
+  memory_mb: 1024
+  disk_mb: 4096
+  network: internet-enabled
+  allow_tunnels: true
+files:
+  - path: index.html
+    content: "qemu-service-ok"
+startup:
+  name: start-http
+  command: ["sh", "-lc", "python3 -m http.server 8080 -d /workspace"]
+  detached: true
+  timeout: 30s
+readiness:
+  type: http
+  path: /
+  timeout: 45s
+  interval: 1s
+tunnel:
+  port: 8080
+  protocol: http
+  auth_mode: token
+  visibility: private
+cleanup: always
