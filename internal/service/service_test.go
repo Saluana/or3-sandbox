@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"or3-sandbox/internal/config"
 	"or3-sandbox/internal/db"
@@ -260,6 +262,211 @@ func TestCreateSnapshotPersistsArtifactsOutsideSandboxRoot(t *testing.T) {
 	}
 }
 
+func TestCreateSnapshotMarksErrorOnPartialFailure(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      1,
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	validRootfs := filepath.Join(sandbox.StorageRoot, ".snapshots", "snap-raw", "rootfs.img")
+	if err := os.MkdirAll(filepath.Dir(validRootfs), 0o755); err != nil {
+		t.Fatalf("mkdir snapshot dir: %v", err)
+	}
+	if err := os.WriteFile(validRootfs, []byte("rootfs"), 0o644); err != nil {
+		t.Fatalf("write rootfs snapshot: %v", err)
+	}
+	runtime.snapshotInfo = model.SnapshotInfo{
+		ImageRef:     validRootfs,
+		WorkspaceTar: filepath.Join(sandbox.StorageRoot, ".snapshots", "snap-raw", "missing.img"),
+	}
+
+	snapshot, err := svc.CreateSnapshot(ctx, tenantA.ID, sandbox.ID, model.CreateSnapshotRequest{Name: "broken"})
+	if err == nil {
+		t.Fatal("expected snapshot create to fail")
+	}
+	stored, err := store.GetSnapshot(ctx, tenantA.ID, snapshot.ID)
+	if err != nil {
+		t.Fatalf("get snapshot: %v", err)
+	}
+	if stored.Status != model.SnapshotStatusError {
+		t.Fatalf("expected snapshot error status, got %#v", stored)
+	}
+}
+
+func TestRestoreSnapshotFetchesExportBundleWhenLocalArtifactsAreMissing(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.OptionalSnapshotExport = filepath.Join(filepath.Dir(svc.cfg.SnapshotRoot), "exports")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      1,
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	originalRootfs := filepath.Join(sandbox.StorageRoot, ".snapshots", "snap-export", "rootfs.img")
+	originalWorkspace := filepath.Join(sandbox.StorageRoot, ".snapshots", "snap-export", "workspace.img")
+	for path, content := range map[string]string{
+		originalRootfs:    "rootfs-export",
+		originalWorkspace: "workspace-export",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir snapshot fixture: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write snapshot fixture %s: %v", path, err)
+		}
+	}
+	runtime.snapshotInfo = model.SnapshotInfo{ImageRef: originalRootfs, WorkspaceTar: originalWorkspace}
+
+	snapshot, err := svc.CreateSnapshot(ctx, tenantA.ID, sandbox.ID, model.CreateSnapshotRequest{Name: "exported"})
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if snapshot.ExportLocation == "" {
+		t.Fatal("expected export location to be recorded")
+	}
+	if err := os.Remove(snapshot.ImageRef); err != nil {
+		t.Fatalf("remove local rootfs snapshot: %v", err)
+	}
+	if err := os.Remove(snapshot.WorkspaceTar); err != nil {
+		t.Fatalf("remove local workspace snapshot: %v", err)
+	}
+
+	if _, err := svc.RestoreSnapshot(ctx, tenantA.ID, snapshot.ID, model.RestoreSnapshotRequest{TargetSandboxID: sandbox.ID}); err != nil {
+		t.Fatalf("restore snapshot: %v", err)
+	}
+	for _, path := range []string{snapshot.ImageRef, snapshot.WorkspaceTar} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected restored snapshot artifact %s: %v", path, err)
+		}
+	}
+}
+
+func TestRuntimeHealthReportsBootingState(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      1,
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	runtime.inspectState = model.RuntimeState{
+		RuntimeID: "rt-booting",
+		Status:    model.SandboxStatusBooting,
+		Pid:       4242,
+		Error:     "still booting",
+	}
+
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	reconciled, err := svc.GetSandbox(ctx, tenantA.ID, sandbox.ID)
+	if err != nil {
+		t.Fatalf("get sandbox: %v", err)
+	}
+	if reconciled.Status != model.SandboxStatusBooting {
+		t.Fatalf("expected booting status after reconcile, got %s", reconciled.Status)
+	}
+
+	health, err := svc.RuntimeHealth(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("runtime health: %v", err)
+	}
+	if len(health.Sandboxes) != 1 || health.Sandboxes[0].ObservedStatus != model.SandboxStatusBooting {
+		t.Fatalf("unexpected runtime health: %+v", health)
+	}
+}
+
+func TestExecSandboxCancellationRecordsCanceledResult(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+
+	runtime.startState = model.RuntimeState{RuntimeID: "rt-start", Status: model.SandboxStatusRunning, Running: true}
+	runtime.execHandleFactory = func(ctx context.Context, _ model.ExecRequest) model.ExecHandle {
+		ch := make(chan model.ExecResult, 1)
+		go func() {
+			<-ctx.Done()
+			now := time.Now().UTC()
+			ch <- model.ExecResult{
+				ExitCode:    1,
+				Status:      model.ExecutionStatusCanceled,
+				StartedAt:   now,
+				CompletedAt: now,
+			}
+			close(ch)
+		}()
+		return stubExecHandle{ch: ch}
+	}
+
+	sandbox, err := svc.CreateSandbox(context.Background(), tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      1,
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+	execution, err := svc.ExecSandbox(ctx, tenantA, quota, sandbox.ID, model.ExecRequest{
+		Command: []string{"sh", "-lc", "sleep 30"},
+		Cwd:     "/workspace",
+		Timeout: 30 * time.Second,
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("exec sandbox: %v", err)
+	}
+	if execution.Status != model.ExecutionStatusCanceled {
+		t.Fatalf("expected canceled execution, got %+v", execution)
+	}
+	usage, err := store.TenantUsage(context.Background(), tenantA.ID)
+	if err != nil {
+		t.Fatalf("tenant usage: %v", err)
+	}
+	if usage.ConcurrentExecs != 0 {
+		t.Fatalf("expected no running execs after cancellation, got %d", usage.ConcurrentExecs)
+	}
+}
+
 func assertActualStorage(t *testing.T, store *repository.Store, tenantID string, want int64) {
 	t.Helper()
 	usage, err := store.TenantUsage(context.Background(), tenantID)
@@ -321,13 +528,15 @@ func boolPtr(value bool) *bool {
 }
 
 type stubRuntime struct {
-	createState  model.RuntimeState
-	startState   model.RuntimeState
-	stopState    model.RuntimeState
-	restoreState model.RuntimeState
-	inspectState model.RuntimeState
-	snapshotInfo model.SnapshotInfo
-	storageUsage model.StorageUsage
+	createState       model.RuntimeState
+	startState        model.RuntimeState
+	stopState         model.RuntimeState
+	restoreState      model.RuntimeState
+	inspectState      model.RuntimeState
+	snapshotInfo      model.SnapshotInfo
+	storageUsage      model.StorageUsage
+	inspectErr        error
+	execHandleFactory func(context.Context, model.ExecRequest) model.ExecHandle
 
 	reads   map[string]string
 	writes  []stubWrite
@@ -338,6 +547,18 @@ type stubRuntime struct {
 type stubWrite struct {
 	path    string
 	content string
+}
+
+type stubExecHandle struct {
+	ch chan model.ExecResult
+}
+
+func (h stubExecHandle) Wait() model.ExecResult {
+	return <-h.ch
+}
+
+func (h stubExecHandle) Cancel() error {
+	return nil
 }
 
 func newStubRuntime() *stubRuntime {
@@ -384,10 +605,16 @@ func (r *stubRuntime) Destroy(context.Context, model.Sandbox) error {
 }
 
 func (r *stubRuntime) Inspect(context.Context, model.Sandbox) (model.RuntimeState, error) {
+	if r.inspectErr != nil {
+		return model.RuntimeState{}, r.inspectErr
+	}
 	return withDefaultRuntimeState(r.inspectState, model.SandboxStatusStopped, false), nil
 }
 
-func (r *stubRuntime) Exec(context.Context, model.Sandbox, model.ExecRequest, model.ExecStreams) (model.ExecHandle, error) {
+func (r *stubRuntime) Exec(ctx context.Context, _ model.Sandbox, req model.ExecRequest, _ model.ExecStreams) (model.ExecHandle, error) {
+	if r.execHandleFactory != nil {
+		return r.execHandleFactory(ctx, req), nil
+	}
 	return nil, errors.New("not implemented")
 }
 

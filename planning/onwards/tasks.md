@@ -51,18 +51,18 @@
 
 ## 7. Preserve the network and tunnel contract
 
-- [ ] (R6) Implement `internet-enabled` and `internet-disabled` behavior for QEMU using the smallest viable networking setup.
-- [ ] (R6) Keep sandbox-access ports loopback-only on the host unless explicitly published by the tunnel subsystem.
-- [ ] (R6) Update tunnel activation logic so it can reach guest services through the QEMU backend without exposing arbitrary host ports directly.
-- [ ] (R6, R8) Add integration tests proving no east-west access by default, no direct host exposure by default, and successful explicit tunnel create and revoke behavior.
+- [x] (R6) Implement `internet-enabled` and `internet-disabled` behavior for QEMU using the smallest viable networking setup.
+- [x] (R6) Keep sandbox-access ports loopback-only on the host unless explicitly published by the tunnel subsystem.
+- [x] (R6) Update tunnel activation logic so it can reach guest services through the QEMU backend without exposing arbitrary host ports directly.
+- [x] (R6, R8) Add integration tests proving no east-west access by default, no direct host exposure by default, and successful explicit tunnel create and revoke behavior.
 
 ## 8. Snapshots, recovery, and operator inspection
 
-- [ ] (R3, R8) Implement guest-aware snapshot create and restore for the writable system disk plus workspace disk while keeping the existing snapshot metadata flow in `internal/service/service.go` and `internal/repository/store.go`.
-- [ ] (R3, R8) Add optional S3-compatible snapshot export and restore on top of local snapshot artifacts once local capture and restore are stable.
-- [ ] (R8) Extend startup reconciliation in `internal/service/service.go` or adjacent runtime-recovery helpers to distinguish booting, ready, stopped, absent, and failed QEMU guests conservatively.
-- [ ] (R8) Add operator-visible runtime health inspection, either as a small new API endpoint or a CLI command backed by existing health plumbing, without introducing a broad admin subsystem.
-- [ ] (R8) Add regression coverage for control-plane restart during exec, guest boot failure, and snapshot partial failure.
+- [x] (R3, R8) Implement guest-aware snapshot create and restore for the writable system disk plus workspace disk while keeping the existing snapshot metadata flow in `internal/service/service.go` and `internal/repository/store.go`.
+- [x] (R3, R8) Add optional S3-compatible snapshot export and restore on top of local snapshot artifacts once local capture and restore are stable.
+- [x] (R8) Extend startup reconciliation in `internal/service/service.go` or adjacent runtime-recovery helpers to distinguish booting, ready, stopped, absent, and failed QEMU guests conservatively.
+- [x] (R8) Add operator-visible runtime health inspection, either as a small new API endpoint or a CLI command backed by existing health plumbing, without introducing a broad admin subsystem.
+- [x] (R8) Add regression coverage for control-plane restart during exec, guest boot failure, and snapshot partial failure.
 
 ## 9. Verify the workloads the project claims
 

@@ -61,6 +61,8 @@ func main() {
 		err = runTunnelRevoke(client, os.Args[2:])
 	case "quota":
 		err = runQuota(client)
+	case "runtime-health":
+		err = runRuntimeHealth(client)
 	default:
 		usage()
 		os.Exit(2)
@@ -120,6 +122,14 @@ func runInspect(client clientConfig, args []string) error {
 		return err
 	}
 	return printJSON(sandbox)
+}
+
+func runRuntimeHealth(client clientConfig) error {
+	var health model.RuntimeHealth
+	if err := doJSON(client, http.MethodGet, "/v1/runtime/health", nil, &health); err != nil {
+		return err
+	}
+	return printJSON(health)
 }
 
 func runLifecycle(client clientConfig, op string, args []string) error {
@@ -394,7 +404,7 @@ func printJSON(value any) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: sandboxctl <create|list|inspect|start|stop|suspend|resume|delete|exec|tty|upload|download|mkdir|tunnel-create|tunnel-list|tunnel-revoke|quota>")
+	fmt.Fprintln(os.Stderr, "usage: sandboxctl <create|list|inspect|start|stop|suspend|resume|delete|exec|tty|upload|download|mkdir|tunnel-create|tunnel-list|tunnel-revoke|quota|runtime-health>")
 }
 
 func env(key, fallback string) string {

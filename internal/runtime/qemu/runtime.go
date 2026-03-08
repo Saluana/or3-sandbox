@@ -29,7 +29,16 @@ const (
 	qemuRuntimePrefix    = "qemu-"
 	sshPortBase          = 22000
 	sshPortSpan          = 20000
+	serialTailLimit      = 64 * 1024
 )
+
+var bootFailureMarkers = []string{
+	"kernel panic",
+	"no bootable device",
+	"emergency mode",
+	"failed to start",
+	"gave up waiting",
+}
 
 var _ model.RuntimeManager = (*Runtime)(nil)
 
@@ -171,7 +180,7 @@ func (r *Runtime) Start(ctx context.Context, sandbox model.Sandbox) (model.Runti
 	if _, err := waitForPID(layout.pidPath, r.bootTimeout); err != nil {
 		return model.RuntimeState{}, err
 	}
-	if err := r.waitForReady(ctx, target); err != nil {
+	if err := r.waitForReady(ctx, target, layout.serialLogPath); err != nil {
 		_, _ = r.Stop(context.Background(), sandboxWithRuntimeID(sandbox, runtimeID), true)
 		return model.RuntimeState{}, err
 	}
@@ -232,12 +241,21 @@ func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.Run
 	probeCtx, cancel := context.WithTimeout(ctx, readyProbeTimeout)
 	defer cancel()
 	if err := r.sshReady(probeCtx, target); err != nil {
+		if reason, ok := bootFailureReason(layout.serialLogPath); ok {
+			return model.RuntimeState{
+				RuntimeID: sandbox.RuntimeID,
+				Status:    model.SandboxStatusError,
+				Running:   false,
+				Pid:       pid,
+				Error:     reason,
+			}, nil
+		}
 		return model.RuntimeState{
 			RuntimeID: sandbox.RuntimeID,
 			Status:    model.SandboxStatusError,
 			Running:   false,
 			Pid:       pid,
-			Error:     fmt.Sprintf("guest process is alive but readiness probe failed: %v", err),
+			Error:     fmt.Sprintf("guest process is alive but not ready: %v", err),
 		}, nil
 	}
 	return model.RuntimeState{
@@ -406,7 +424,7 @@ func (r *Runtime) baseSSHArgs(target sshTarget, tty bool) []string {
 	return append(args, r.sshUser+"@127.0.0.1")
 }
 
-func (r *Runtime) waitForReady(ctx context.Context, target sshTarget) error {
+func (r *Runtime) waitForReady(ctx context.Context, target sshTarget, serialLogPath string) error {
 	timeoutCtx, cancel := context.WithTimeout(ctx, r.effectiveBootTimeout())
 	defer cancel()
 	ticker := time.NewTicker(r.effectivePollInterval())
@@ -418,15 +436,35 @@ func (r *Runtime) waitForReady(ctx context.Context, target sshTarget) error {
 		} else {
 			lastErr = err
 		}
+		if reason, ok := bootFailureReason(serialLogPath); ok {
+			return errors.New(reason)
+		}
 		select {
 		case <-timeoutCtx.Done():
-			if lastErr != nil {
-				return fmt.Errorf("guest readiness timed out: %w", lastErr)
-			}
-			return fmt.Errorf("guest readiness timed out: %w", timeoutCtx.Err())
+			return fmt.Errorf("guest readiness timed out: %w", lastErr)
 		case <-ticker.C:
 		}
 	}
+}
+
+func bootFailureReason(serialLogPath string) (string, bool) {
+	if strings.TrimSpace(serialLogPath) == "" {
+		return "", false
+	}
+	data, err := os.ReadFile(serialLogPath)
+	if err != nil || len(data) == 0 {
+		return "", false
+	}
+	if len(data) > serialTailLimit {
+		data = data[len(data)-serialTailLimit:]
+	}
+	logTail := strings.ToLower(string(data))
+	for _, marker := range bootFailureMarkers {
+		if strings.Contains(logTail, marker) {
+			return fmt.Sprintf("guest boot failed: %s", marker), true
+		}
+	}
+	return "", false
 }
 
 func (r *Runtime) defaultRunCommand(ctx context.Context, binary string, args ...string) ([]byte, error) {

@@ -6,6 +6,7 @@ type SandboxStatus string
 
 const (
 	SandboxStatusCreating   SandboxStatus = "creating"
+	SandboxStatusBooting    SandboxStatus = "booting"
 	SandboxStatusStopped    SandboxStatus = "stopped"
 	SandboxStatusStarting   SandboxStatus = "starting"
 	SandboxStatusRunning    SandboxStatus = "running"
@@ -189,6 +190,25 @@ type Snapshot struct {
 
 type RestoreSnapshotRequest struct {
 	TargetSandboxID string `json:"target_sandbox_id"`
+}
+
+type RuntimeHealth struct {
+	Backend   string                 `json:"backend"`
+	Healthy   bool                   `json:"healthy"`
+	CheckedAt time.Time              `json:"checked_at"`
+	Sandboxes []RuntimeSandboxHealth `json:"sandboxes"`
+}
+
+type RuntimeSandboxHealth struct {
+	SandboxID       string        `json:"sandbox_id"`
+	TenantID        string        `json:"tenant_id"`
+	PersistedStatus SandboxStatus `json:"persisted_status"`
+	ObservedStatus  SandboxStatus `json:"observed_status"`
+	RuntimeID       string        `json:"runtime_id"`
+	RuntimeStatus   string        `json:"runtime_status"`
+	Pid             int           `json:"pid"`
+	IPAddress       string        `json:"ip_address,omitempty"`
+	Error           string        `json:"error,omitempty"`
 }
 
 type Tenant struct {

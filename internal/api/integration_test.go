@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -252,15 +253,69 @@ func TestDetachedExecDoesNotConsumeExecQuotaForever(t *testing.T) {
 	}
 }
 
+func TestRuntimeHealthEndpoint(t *testing.T) {
+	h := newHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "alpine:3.20",
+		CPULimit:      1,
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	})
+
+	var health model.RuntimeHealth
+	h.mustDoJSON(t, "token-a", http.MethodGet, "/v1/runtime/health", nil, &health, http.StatusOK)
+	if health.Backend != "docker" {
+		t.Fatalf("unexpected backend %q", health.Backend)
+	}
+	if len(health.Sandboxes) == 0 {
+		t.Fatal("expected sandbox health entries")
+	}
+	if health.Sandboxes[0].SandboxID != sandbox.ID {
+		t.Fatalf("unexpected sandbox health entry %+v", health.Sandboxes[0])
+	}
+}
+
+func TestTunnelProxyTargetsSandboxLocalhost(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      1,
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	body := h.tunnelGET(t, "token-a", tunnel.ID, tunnel.AccessToken)
+	if body != "proxy-ok" {
+		t.Fatalf("unexpected tunnel body %q", body)
+	}
+	if h.stubRuntime.lastExec.Env["URL"] != "http://127.0.0.1:8090" {
+		t.Fatalf("expected tunnel proxy to target sandbox-localhost, got %q", h.stubRuntime.lastExec.Env["URL"])
+	}
+	h.expectStatus(t, "token-a", http.MethodDelete, "/v1/tunnels/"+tunnel.ID, nil, http.StatusNoContent)
+	h.expectStatusWithHeaders(t, "token-a", http.MethodGet, "/v1/tunnels/"+tunnel.ID+"/proxy", nil, http.StatusGone, map[string]string{"X-Tunnel-Token": tunnel.AccessToken})
+}
 
 type harness struct {
-	t       *testing.T
-	cfg     config.Config
-	db      *sql.DB
-	store   *repository.Store
-	service *service.Service
-	runtime *runtimedocker.Runtime
-	server  *httptest.Server
+	t           *testing.T
+	cfg         config.Config
+	db          *sql.DB
+	store       *repository.Store
+	service     *service.Service
+	runtime     *runtimedocker.Runtime
+	stubRuntime *apiStubRuntime
+	server      *httptest.Server
 }
 
 func newHarness(t *testing.T) *harness {
@@ -326,13 +381,143 @@ func newHarness(t *testing.T) *harness {
 	return &harness{t: t, cfg: cfg, db: sqlDB, store: store, service: svc, runtime: runtime, server: server}
 }
 
+func newStubHarness(t *testing.T) *harness {
+	t.Helper()
+	root := t.TempDir()
+	cfg := config.Config{
+		ListenAddress:        "127.0.0.1:0",
+		DatabasePath:         filepath.Join(root, "sandbox.db"),
+		StorageRoot:          filepath.Join(root, "storage"),
+		SnapshotRoot:         filepath.Join(root, "snapshots"),
+		BaseImageRef:         "guest-base.qcow2",
+		RuntimeBackend:       "qemu",
+		DefaultCPULimit:      1,
+		DefaultMemoryLimitMB: 256,
+		DefaultPIDsLimit:     128,
+		DefaultDiskLimitMB:   512,
+		DefaultNetworkMode:   model.NetworkModeInternetDisabled,
+		DefaultAllowTunnels:  true,
+		RequestRatePerMinute: 600,
+		RequestBurst:         120,
+		GracefulShutdown:     5 * time.Second,
+		ReconcileInterval:    30 * time.Second,
+		CleanupInterval:      30 * time.Second,
+		OperatorHost:         "http://example.invalid",
+		Tenants: []config.TenantConfig{
+			{ID: "tenant-a", Name: "Tenant A", Token: "token-a"},
+			{ID: "tenant-b", Name: "Tenant B", Token: "token-b"},
+		},
+		DefaultQuota: model.TenantQuota{
+			MaxSandboxes:            8,
+			MaxRunningSandboxes:     8,
+			MaxConcurrentExecs:      8,
+			MaxTunnels:              8,
+			MaxCPUCores:             16,
+			MaxMemoryMB:             8192,
+			MaxStorageMB:            16384,
+			AllowTunnels:            true,
+			DefaultTunnelAuthMode:   "token",
+			DefaultTunnelVisibility: "private",
+		},
+	}
+	sqlDB, err := db.Open(context.Background(), cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := repository.New(sqlDB)
+	if err := store.SeedTenants(context.Background(), cfg.Tenants, cfg.DefaultQuota); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &apiStubRuntime{}
+	svc := service.New(cfg, store, runtime)
+	server := httptest.NewServer(auth.New(store, cfg).Wrap(api.New(logging.New(), svc)))
+	cfg.OperatorHost = server.URL
+	svc = service.New(cfg, store, runtime)
+	server.Config.Handler = auth.New(store, cfg).Wrap(api.New(logging.New(), svc))
+	return &harness{t: t, cfg: cfg, db: sqlDB, store: store, service: svc, stubRuntime: runtime, server: server}
+}
+
 func (h *harness) close() {
 	sandboxes, _ := h.store.ListNonDeletedSandboxes(context.Background())
 	for _, sandbox := range sandboxes {
-		_ = h.runtime.Destroy(context.Background(), sandbox)
+		if h.runtime != nil {
+			_ = h.runtime.Destroy(context.Background(), sandbox)
+		}
+		if h.stubRuntime != nil {
+			_ = h.stubRuntime.Destroy(context.Background(), sandbox)
+		}
 	}
 	h.server.Close()
 	_ = h.db.Close()
+}
+
+type apiStubRuntime struct {
+	lastExec model.ExecRequest
+}
+
+func (r *apiStubRuntime) Create(context.Context, model.SandboxSpec) (model.RuntimeState, error) {
+	return model.RuntimeState{RuntimeID: "qemu-stub", Status: model.SandboxStatusStopped}, nil
+}
+
+func (r *apiStubRuntime) Start(context.Context, model.Sandbox) (model.RuntimeState, error) {
+	return model.RuntimeState{RuntimeID: "qemu-stub", Status: model.SandboxStatusRunning, Running: true, IPAddress: "127.0.0.1"}, nil
+}
+
+func (r *apiStubRuntime) Stop(context.Context, model.Sandbox, bool) (model.RuntimeState, error) {
+	return model.RuntimeState{RuntimeID: "qemu-stub", Status: model.SandboxStatusStopped}, nil
+}
+
+func (r *apiStubRuntime) Suspend(context.Context, model.Sandbox) (model.RuntimeState, error) {
+	return model.RuntimeState{}, errors.New("not implemented")
+}
+
+func (r *apiStubRuntime) Resume(context.Context, model.Sandbox) (model.RuntimeState, error) {
+	return model.RuntimeState{}, errors.New("not implemented")
+}
+
+func (r *apiStubRuntime) Destroy(context.Context, model.Sandbox) error {
+	return nil
+}
+
+func (r *apiStubRuntime) Inspect(context.Context, model.Sandbox) (model.RuntimeState, error) {
+	return model.RuntimeState{RuntimeID: "qemu-stub", Status: model.SandboxStatusRunning, Running: true, IPAddress: "127.0.0.1"}, nil
+}
+
+func (r *apiStubRuntime) Exec(_ context.Context, _ model.Sandbox, req model.ExecRequest, streams model.ExecStreams) (model.ExecHandle, error) {
+	r.lastExec = req
+	if streams.Stdout != nil {
+		_, _ = io.WriteString(streams.Stdout, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nproxy-ok")
+	}
+	return &apiExecHandle{result: model.ExecResult{
+		ExitCode:    0,
+		Status:      model.ExecutionStatusSucceeded,
+		StartedAt:   time.Now().UTC(),
+		CompletedAt: time.Now().UTC(),
+	}}, nil
+}
+
+func (r *apiStubRuntime) AttachTTY(context.Context, model.Sandbox, model.TTYRequest) (model.TTYHandle, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (r *apiStubRuntime) CreateSnapshot(context.Context, model.Sandbox, string) (model.SnapshotInfo, error) {
+	return model.SnapshotInfo{}, nil
+}
+
+func (r *apiStubRuntime) RestoreSnapshot(context.Context, model.Sandbox, model.Snapshot) (model.RuntimeState, error) {
+	return model.RuntimeState{RuntimeID: "qemu-stub", Status: model.SandboxStatusStopped}, nil
+}
+
+type apiExecHandle struct {
+	result model.ExecResult
+}
+
+func (h *apiExecHandle) Wait() model.ExecResult {
+	return h.result
+}
+
+func (h *apiExecHandle) Cancel() error {
+	return nil
 }
 
 func (h *harness) createSandbox(t *testing.T, token string, req model.CreateSandboxRequest) model.Sandbox {

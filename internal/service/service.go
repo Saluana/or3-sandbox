@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -164,6 +165,50 @@ func (s *Service) GetTenantQuotaView(ctx context.Context, tenantID string) (Tena
 		return TenantQuotaView{}, err
 	}
 	return TenantQuotaView{Quota: quota, Usage: usage}, nil
+}
+
+func (s *Service) RuntimeHealth(ctx context.Context, tenantID string) (model.RuntimeHealth, error) {
+	health := model.RuntimeHealth{
+		Backend:   s.cfg.RuntimeBackend,
+		Healthy:   true,
+		CheckedAt: time.Now().UTC(),
+	}
+	sandboxes, err := s.store.ListNonDeletedSandboxes(ctx)
+	if err != nil {
+		return health, err
+	}
+	for _, sandbox := range sandboxes {
+		if tenantID != "" && sandbox.TenantID != tenantID {
+			continue
+		}
+		entry := model.RuntimeSandboxHealth{
+			SandboxID:       sandbox.ID,
+			TenantID:        sandbox.TenantID,
+			PersistedStatus: sandbox.Status,
+			ObservedStatus:  sandbox.Status,
+			RuntimeID:       sandbox.RuntimeID,
+			RuntimeStatus:   sandbox.RuntimeStatus,
+			Error:           sandbox.LastRuntimeError,
+		}
+		state, err := s.runtime.Inspect(ctx, sandbox)
+		if err != nil {
+			entry.ObservedStatus = model.SandboxStatusError
+			entry.Error = err.Error()
+			health.Healthy = false
+		} else {
+			entry.ObservedStatus = state.Status
+			entry.RuntimeID = state.RuntimeID
+			entry.RuntimeStatus = string(state.Status)
+			entry.Pid = state.Pid
+			entry.IPAddress = state.IPAddress
+			entry.Error = state.Error
+			if state.Status == model.SandboxStatusError {
+				health.Healthy = false
+			}
+		}
+		health.Sandboxes = append(health.Sandboxes, entry)
+	}
+	return health, nil
 }
 
 func (s *Service) StartSandbox(ctx context.Context, tenantID, sandboxID string, quota model.TenantQuota) (model.Sandbox, error) {
@@ -641,21 +686,24 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 	if err := s.store.CreateSnapshot(ctx, snapshot); err != nil {
 		return model.Snapshot{}, err
 	}
-	info, err := s.runtime.CreateSnapshot(ctx, sandbox, snapshot.ID)
-	if err != nil {
+	failSnapshot := func(cause error) (model.Snapshot, error) {
 		snapshot.Status = model.SnapshotStatusError
 		_ = s.store.UpdateSnapshot(ctx, snapshot)
-		return model.Snapshot{}, err
+		return snapshot, cause
+	}
+	info, err := s.runtime.CreateSnapshot(ctx, sandbox, snapshot.ID)
+	if err != nil {
+		return failSnapshot(err)
 	}
 	snapshotDir := filepath.Join(s.cfg.SnapshotRoot, sandbox.ID, snapshot.ID)
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
-		return model.Snapshot{}, err
+		return failSnapshot(err)
 	}
 	if info.ImageRef != "" {
 		targetImage := filepath.Join(snapshotDir, "rootfs.img")
 		if info.ImageRef != targetImage {
 			if err := copyFile(targetImage, info.ImageRef); err != nil {
-				return model.Snapshot{}, err
+				return failSnapshot(err)
 			}
 		}
 		snapshot.ImageRef = targetImage
@@ -669,7 +717,7 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 		targetTar := filepath.Join(snapshotDir, "workspace.img")
 		if info.WorkspaceTar != targetTar {
 			if err := copyFile(targetTar, info.WorkspaceTar); err != nil {
-				return model.Snapshot{}, err
+				return failSnapshot(err)
 			}
 		}
 		snapshot.WorkspaceTar = targetTar
@@ -683,17 +731,17 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 	completed := time.Now().UTC()
 	snapshot.CompletedAt = &completed
 	if s.cfg.OptionalSnapshotExport != "" {
-		exportPath := filepath.Join(s.cfg.OptionalSnapshotExport, snapshot.ID+".tar.gz")
-		if err := os.MkdirAll(filepath.Dir(exportPath), 0o755); err == nil {
-			_ = copyFile(exportPath, snapshot.WorkspaceTar)
-			snapshot.ExportLocation = exportPath
+		exportLocation, err := s.exportSnapshotBundle(ctx, sandbox, snapshot)
+		if err != nil {
+			return failSnapshot(err)
 		}
+		snapshot.ExportLocation = exportLocation
 	}
 	if err := s.store.UpdateSnapshot(ctx, snapshot); err != nil {
-		return model.Snapshot{}, err
+		return failSnapshot(err)
 	}
 	if err := s.refreshStorage(ctx, sandbox); err != nil {
-		return model.Snapshot{}, err
+		return failSnapshot(err)
 	}
 	s.recordAudit(ctx, tenantID, sandboxID, "snapshot.create", snapshot.ID, "ok", snapshot.Name)
 	return snapshot, nil
@@ -713,6 +761,9 @@ func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID stri
 			return model.Sandbox{}, err
 		}
 		sandbox, _ = s.store.GetSandbox(ctx, tenantID, sandbox.ID)
+	}
+	if err := s.ensureSnapshotArtifacts(ctx, sandbox, snapshot); err != nil {
+		return model.Sandbox{}, err
 	}
 	state, err := s.runtime.RestoreSnapshot(ctx, sandbox, snapshot)
 	if err != nil {
@@ -751,6 +802,8 @@ func (s *Service) Reconcile(ctx context.Context) error {
 			continue
 		}
 		switch {
+		case state.Status == model.SandboxStatusBooting:
+			sandbox.Status = model.SandboxStatusBooting
 		case state.Status == model.SandboxStatusRunning:
 			sandbox.Status = model.SandboxStatusRunning
 		case state.Status == model.SandboxStatusStopped:
@@ -924,6 +977,90 @@ func dirSize(root string) (int64, error) {
 		return nil
 	})
 	return total, err
+}
+
+func (s *Service) exportSnapshotBundle(ctx context.Context, sandbox model.Sandbox, snapshot model.Snapshot) (string, error) {
+	snapshotDir := filepath.Join(s.cfg.SnapshotRoot, sandbox.ID, snapshot.ID)
+	bundle, err := os.CreateTemp(filepath.Dir(snapshotDir), snapshot.ID+"-*.tar.gz")
+	if err != nil {
+		return "", err
+	}
+	bundlePath := bundle.Name()
+	_ = bundle.Close()
+	defer os.Remove(bundlePath)
+	if err := writeTarGz(bundlePath, snapshotDir); err != nil {
+		return "", err
+	}
+	return putSnapshotBundle(ctx, s.cfg.OptionalSnapshotExport, sandbox.ID, snapshot.ID, bundlePath)
+}
+
+func (s *Service) ensureSnapshotArtifacts(ctx context.Context, sandbox model.Sandbox, snapshot model.Snapshot) error {
+	haveLocal := true
+	for _, path := range []string{snapshot.ImageRef, snapshot.WorkspaceTar} {
+		if path == "" {
+			continue
+		}
+		if _, err := os.Stat(path); err != nil {
+			haveLocal = false
+			break
+		}
+	}
+	if haveLocal {
+		return nil
+	}
+	if snapshot.ExportLocation == "" {
+		return nil
+	}
+	targetDir := filepath.Join(s.cfg.SnapshotRoot, sandbox.ID, snapshot.ID)
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return err
+	}
+	tempBundle := filepath.Join(targetDir, "snapshot.restore.tar.gz")
+	if err := fetchSnapshotBundle(ctx, snapshot.ExportLocation, tempBundle); err != nil {
+		return err
+	}
+	defer os.Remove(tempBundle)
+	return extractTarGz(tempBundle, targetDir)
+}
+
+func putSnapshotBundle(ctx context.Context, exportRoot, sandboxID, snapshotID, localBundle string) (string, error) {
+	switch {
+	case strings.HasPrefix(exportRoot, "s3://"):
+		target := strings.TrimRight(exportRoot, "/") + "/" + sandboxID + "/" + snapshotID + ".tar.gz"
+		cmd := exec.CommandContext(ctx, "aws", "s3", "cp", localBundle, target)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("export snapshot bundle: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+		return target, nil
+	case strings.HasPrefix(exportRoot, "file://"):
+		exportRoot = strings.TrimPrefix(exportRoot, "file://")
+		fallthrough
+	default:
+		target := filepath.Join(exportRoot, sandboxID, snapshotID+".tar.gz")
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return "", err
+		}
+		if err := copyFile(target, localBundle); err != nil {
+			return "", err
+		}
+		return target, nil
+	}
+}
+
+func fetchSnapshotBundle(ctx context.Context, exportLocation, localPath string) error {
+	switch {
+	case strings.HasPrefix(exportLocation, "s3://"):
+		cmd := exec.CommandContext(ctx, "aws", "s3", "cp", exportLocation, localPath)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("restore snapshot bundle: %w: %s", err, strings.TrimSpace(string(output)))
+		}
+		return nil
+	case strings.HasPrefix(exportLocation, "file://"):
+		exportLocation = strings.TrimPrefix(exportLocation, "file://")
+		fallthrough
+	default:
+		return copyFile(localPath, exportLocation)
+	}
 }
 
 func writeTarGz(destination, root string) error {

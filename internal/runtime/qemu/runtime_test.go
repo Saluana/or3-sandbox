@@ -83,6 +83,28 @@ func TestStartArgsIncludeNetworkingAndDisks(t *testing.T) {
 	}
 }
 
+func TestStartArgsKeepHostExposureLoopbackOnly(t *testing.T) {
+	r := &Runtime{qemuBinary: "qemu-system-x86_64", accelerator: "kvm"}
+	args := strings.Join(r.startArgs(model.Sandbox{
+		ID:            "sbx-net",
+		MemoryLimitMB: 512,
+		CPULimit:      1,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+	}, sandboxLayout{
+		pidPath:           "/tmp/qemu.pid",
+		monitorPath:       "/tmp/monitor.sock",
+		serialLogPath:     "/tmp/serial.log",
+		rootDiskPath:      "/tmp/root.qcow2",
+		workspaceDiskPath: "/tmp/workspace.img",
+	}, 2233), " ")
+	if !strings.Contains(args, "hostfwd=tcp:127.0.0.1:2233-:22") {
+		t.Fatalf("expected loopback ssh forwarding, got %s", args)
+	}
+	if strings.Contains(args, "0.0.0.0") || strings.Contains(args, "::") {
+		t.Fatalf("did not expect public host exposure in args: %s", args)
+	}
+}
+
 func TestWaitForReadyTimesOut(t *testing.T) {
 	r := &Runtime{
 		bootTimeout:  200 * time.Millisecond,
@@ -91,7 +113,7 @@ func TestWaitForReadyTimesOut(t *testing.T) {
 			return errors.New("still booting")
 		},
 	}
-	err := r.waitForReady(context.Background(), sshTarget{port: 2222})
+	err := r.waitForReady(context.Background(), sshTarget{port: 2222}, "")
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("expected timeout error, got %v", err)
 	}
@@ -343,6 +365,17 @@ func TestQemuSizePreservesExactBytes(t *testing.T) {
 	}
 	if got := qemuSize(256*1024*1024 + 512*1024); got != "268959744" {
 		t.Fatalf("unexpected qemu size for fractional MiB split: %q", got)
+	}
+}
+
+func TestBootFailureReasonReadsSerialMarkers(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "serial.log")
+	if err := os.WriteFile(logPath, []byte("Kernel panic - not syncing"), 0o644); err != nil {
+		t.Fatalf("write serial log: %v", err)
+	}
+	reason, ok := bootFailureReason(logPath)
+	if !ok || !strings.Contains(reason, "kernel panic") {
+		t.Fatalf("expected kernel panic marker, got %q %v", reason, ok)
 	}
 }
 

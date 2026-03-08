@@ -36,6 +36,7 @@ func New(log *slog.Logger, svc *service.Service) http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", router.health)
+	mux.HandleFunc("/v1/runtime/health", router.handleRuntimeHealth)
 	mux.HandleFunc("/v1/quotas/me", router.handleQuota)
 	mux.HandleFunc("/v1/sandboxes", router.handleSandboxes)
 	mux.HandleFunc("/v1/sandboxes/", router.handleSandboxRoutes)
@@ -54,6 +55,24 @@ func loggingMiddleware(log *slog.Logger, next http.Handler) http.Handler {
 
 func (rt *Router) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (rt *Router) handleRuntimeHealth(w http.ResponseWriter, r *http.Request) {
+	tenantCtx, ok := auth.FromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	health, err := rt.service.RuntimeHealth(r.Context(), tenantCtx.Tenant.ID)
+	if err != nil {
+		handleError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, health)
 }
 
 func (rt *Router) handleQuota(w http.ResponseWriter, r *http.Request) {
