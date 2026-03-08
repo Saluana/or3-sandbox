@@ -39,8 +39,10 @@ func main() {
 		err = runList(client)
 	case "inspect":
 		err = runInspect(client, os.Args[2:])
-	case "start", "stop", "suspend", "resume":
+	case "start", "suspend", "resume":
 		err = runLifecycle(client, os.Args[1], os.Args[2:])
+	case "stop":
+		err = runStop(client, os.Args[2:])
 	case "delete":
 		err = runDelete(client, os.Args[2:])
 	case "exec":
@@ -63,6 +65,14 @@ func main() {
 		err = runQuota(client)
 	case "runtime-health":
 		err = runRuntimeHealth(client)
+	case "snapshot-create":
+		err = runSnapshotCreate(client, os.Args[2:])
+	case "snapshot-list":
+		err = runSnapshotList(client, os.Args[2:])
+	case "snapshot-inspect":
+		err = runSnapshotInspect(client, os.Args[2:])
+	case "snapshot-restore":
+		err = runSnapshotRestore(client, os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -142,6 +152,23 @@ func runLifecycle(client clientConfig, op string, args []string) error {
 	}
 	var sandbox model.Sandbox
 	if err := doJSON(client, http.MethodPost, "/v1/sandboxes/"+args[0]+"/"+op, map[string]any{}, &sandbox); err != nil {
+		return err
+	}
+	return printJSON(sandbox)
+}
+
+func runStop(client clientConfig, args []string) error {
+	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
+	force := fs.Bool("force", false, "force stop")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) != 1 {
+		return errors.New("usage: sandboxctl stop [--force] <sandbox-id>")
+	}
+	var sandbox model.Sandbox
+	if err := doJSON(client, http.MethodPost, "/v1/sandboxes/"+rest[0]+"/stop", model.LifecycleRequest{Force: *force}, &sandbox); err != nil {
 		return err
 	}
 	return printJSON(sandbox)
@@ -344,6 +371,56 @@ func runQuota(client clientConfig) error {
 	return printJSON(view)
 }
 
+func runSnapshotCreate(client clientConfig, args []string) error {
+	fs := flag.NewFlagSet("snapshot-create", flag.ContinueOnError)
+	name := fs.String("name", "", "snapshot name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) != 1 {
+		return errors.New("usage: sandboxctl snapshot-create [--name <name>] <sandbox-id>")
+	}
+	var snapshot model.Snapshot
+	if err := doJSON(client, http.MethodPost, "/v1/sandboxes/"+rest[0]+"/snapshots", model.CreateSnapshotRequest{Name: *name}, &snapshot); err != nil {
+		return err
+	}
+	return printJSON(snapshot)
+}
+
+func runSnapshotList(client clientConfig, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: sandboxctl snapshot-list <sandbox-id>")
+	}
+	var snapshots []model.Snapshot
+	if err := doJSON(client, http.MethodGet, "/v1/sandboxes/"+args[0]+"/snapshots", nil, &snapshots); err != nil {
+		return err
+	}
+	return printJSON(snapshots)
+}
+
+func runSnapshotInspect(client clientConfig, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: sandboxctl snapshot-inspect <snapshot-id>")
+	}
+	var snapshot model.Snapshot
+	if err := doJSON(client, http.MethodGet, "/v1/snapshots/"+args[0], nil, &snapshot); err != nil {
+		return err
+	}
+	return printJSON(snapshot)
+}
+
+func runSnapshotRestore(client clientConfig, args []string) error {
+	if len(args) != 2 {
+		return errors.New("usage: sandboxctl snapshot-restore <snapshot-id> <target-sandbox-id>")
+	}
+	var sandbox model.Sandbox
+	if err := doJSON(client, http.MethodPost, "/v1/snapshots/"+args[0]+"/restore", model.RestoreSnapshotRequest{TargetSandboxID: args[1]}, &sandbox); err != nil {
+		return err
+	}
+	return printJSON(sandbox)
+}
+
 func streamExec(client clientConfig, sandboxID string, req model.ExecRequest) error {
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -408,7 +485,7 @@ func printJSON(value any) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: sandboxctl <create|list|inspect|start|stop|suspend|resume|delete|exec|tty|upload|download|mkdir|tunnel-create|tunnel-list|tunnel-revoke|quota|runtime-health>")
+	fmt.Fprintln(os.Stderr, "usage: sandboxctl <create|list|inspect|start|stop|suspend|resume|delete|exec|tty|upload|download|mkdir|tunnel-create|tunnel-list|tunnel-revoke|quota|runtime-health|snapshot-create|snapshot-list|snapshot-inspect|snapshot-restore>")
 }
 
 func env(key, fallback string) string {

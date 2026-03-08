@@ -192,36 +192,27 @@ func (r *Runtime) Stop(ctx context.Context, sandbox model.Sandbox, force bool) (
 	layout := layoutForSandbox(sandbox)
 	pid, err := readPID(layout.pidPath)
 	if errors.Is(err, os.ErrNotExist) {
+		_ = os.Remove(suspendedMarkerPath(layout))
 		return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
 	}
 	if err != nil {
 		return model.RuntimeState{}, err
 	}
+	if isSuspended(layout) && !force {
+		if err := syscall.Kill(pid, syscall.SIGCONT); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return model.RuntimeState{}, err
+		}
+	}
 	if err := terminatePID(pid, force); err != nil {
 		return model.RuntimeState{}, err
 	}
 	_ = os.Remove(layout.pidPath)
+	_ = os.Remove(suspendedMarkerPath(layout))
 	return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
 }
 
 func (r *Runtime) Suspend(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
 	_ = ctx
-	_ = sandbox
-	return model.RuntimeState{}, errors.New("qemu backend suspend is not supported in the first pass")
-}
-
-func (r *Runtime) Resume(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
-	_ = ctx
-	_ = sandbox
-	return model.RuntimeState{}, errors.New("qemu backend resume is not supported in the first pass")
-}
-
-func (r *Runtime) Destroy(ctx context.Context, sandbox model.Sandbox) error {
-	_, _ = r.Stop(ctx, sandbox, true)
-	return os.RemoveAll(layoutForSandbox(sandbox).baseDir)
-}
-
-func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
 	layout := layoutForSandbox(sandbox)
 	pid, err := readPID(layout.pidPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -233,9 +224,79 @@ func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.Run
 	if err := syscall.Kill(pid, 0); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			_ = os.Remove(layout.pidPath)
+			_ = os.Remove(suspendedMarkerPath(layout))
 			return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
 		}
 		return model.RuntimeState{}, err
+	}
+	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
+		return model.RuntimeState{}, err
+	}
+	if err := touchFile(suspendedMarkerPath(layout)); err != nil {
+		return model.RuntimeState{}, err
+	}
+	return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusSuspended, Running: false, Pid: pid}, nil
+}
+
+func (r *Runtime) Resume(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
+	layout := layoutForSandbox(sandbox)
+	pid, err := readPID(layout.pidPath)
+	if errors.Is(err, os.ErrNotExist) {
+		_ = os.Remove(suspendedMarkerPath(layout))
+		return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
+	}
+	if err != nil {
+		return model.RuntimeState{}, err
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			_ = os.Remove(layout.pidPath)
+			_ = os.Remove(suspendedMarkerPath(layout))
+			return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
+		}
+		return model.RuntimeState{}, err
+	}
+	if err := syscall.Kill(pid, syscall.SIGCONT); err != nil {
+		return model.RuntimeState{}, err
+	}
+	_ = os.Remove(suspendedMarkerPath(layout))
+	target := r.sshTarget(sandbox, layout)
+	if err := r.waitForReady(ctx, target, layout.serialLogPath); err != nil {
+		return model.RuntimeState{}, err
+	}
+	return r.Inspect(ctx, sandbox)
+}
+
+func (r *Runtime) Destroy(ctx context.Context, sandbox model.Sandbox) error {
+	_, _ = r.Stop(ctx, sandbox, true)
+	return os.RemoveAll(layoutForSandbox(sandbox).baseDir)
+}
+
+func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
+	layout := layoutForSandbox(sandbox)
+	pid, err := readPID(layout.pidPath)
+	if errors.Is(err, os.ErrNotExist) {
+		_ = os.Remove(suspendedMarkerPath(layout))
+		return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
+	}
+	if err != nil {
+		return model.RuntimeState{}, err
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			_ = os.Remove(layout.pidPath)
+			_ = os.Remove(suspendedMarkerPath(layout))
+			return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
+		}
+		return model.RuntimeState{}, err
+	}
+	if isSuspended(layout) {
+		return model.RuntimeState{
+			RuntimeID: sandbox.RuntimeID,
+			Status:    model.SandboxStatusSuspended,
+			Running:   false,
+			Pid:       pid,
+		}, nil
 	}
 	target := r.sshTarget(sandbox, layout)
 	probeCtx, cancel := context.WithTimeout(ctx, readyProbeTimeout)
@@ -670,6 +731,15 @@ func touchFile(path string) error {
 		return err
 	}
 	return file.Close()
+}
+
+func suspendedMarkerPath(layout sandboxLayout) string {
+	return filepath.Join(layout.runtimeDir, "suspended")
+}
+
+func isSuspended(layout sandboxLayout) bool {
+	_, err := os.Stat(suspendedMarkerPath(layout))
+	return err == nil
 }
 
 func readPID(path string) (int, error) {

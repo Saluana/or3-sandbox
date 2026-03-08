@@ -103,7 +103,16 @@ go run ./cmd/sandboxctl inspect <sandbox-id>
 
 This shows the saved state and limits.
 
-## Step 8: Stop the sandbox
+## Step 8: Create a snapshot
+
+```bash
+go run ./cmd/sandboxctl snapshot-create --name first-checkpoint <sandbox-id>
+go run ./cmd/sandboxctl snapshot-list <sandbox-id>
+```
+
+This gives you a saved checkpoint before cleanup.
+
+## Step 9: Stop the sandbox
 
 ```bash
 go run ./cmd/sandboxctl stop <sandbox-id>
@@ -111,7 +120,7 @@ go run ./cmd/sandboxctl stop <sandbox-id>
 
 Then inspect it again if you want.
 
-## Step 9: Delete the sandbox
+## Step 10: Delete the sandbox
 
 ```bash
 go run ./cmd/sandboxctl delete <sandbox-id>

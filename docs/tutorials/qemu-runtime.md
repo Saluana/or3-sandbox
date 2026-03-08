@@ -21,7 +21,7 @@ That means:
 - setup is less beginner-friendly
 - you need a prepared guest image
 - you need SSH access set up correctly
-- suspend and resume are intentionally not supported in the first pass
+- you should still expect a little more operational roughness than the Docker path
 
 ## Step 1: Prepare a guest image
 
@@ -113,16 +113,16 @@ go run ./cmd/sandboxctl runtime-health
 
 This is especially useful on QEMU because it helps show whether the guest is reachable and healthy.
 
-## Step 8: Know the current limit
+## Step 8: Try suspend and resume
 
-These commands are expected to return a clear error with the current first-pass backend:
+These commands now work with the first-pass backend:
 
 ```bash
 go run ./cmd/sandboxctl suspend <sandbox-id>
 go run ./cmd/sandboxctl resume <sandbox-id>
 ```
 
-That is normal for the current QEMU implementation.
+After `resume`, the daemon waits for the guest to become reachable again before reporting it as running.
 
 ## Final advice
 

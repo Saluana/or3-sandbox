@@ -212,21 +212,29 @@ func (rt *Router) handleSandboxRoutes(w http.ResponseWriter, r *http.Request) {
 		}
 		rt.handleTunnels(w, r, tenantCtx.Tenant.ID, sandboxID)
 	case "snapshots":
-		if r.Method != http.MethodPost {
+		switch r.Method {
+		case http.MethodPost:
+			var req model.CreateSnapshotRequest
+			if err := decodeJSON(r, &req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			snapshot, err := rt.service.CreateSnapshot(r.Context(), tenantCtx.Tenant.ID, sandboxID, req)
+			if err != nil {
+				handleError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusCreated, snapshot)
+		case http.MethodGet:
+			snapshots, err := rt.service.ListSnapshots(r.Context(), tenantCtx.Tenant.ID, sandboxID)
+			if err != nil {
+				handleError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, snapshots)
+		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
 		}
-		var req model.CreateSnapshotRequest
-		if err := decodeJSON(r, &req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		snapshot, err := rt.service.CreateSnapshot(r.Context(), tenantCtx.Tenant.ID, sandboxID, req)
-		if err != nil {
-			handleError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusCreated, snapshot)
 	default:
 		http.NotFound(w, r)
 	}
@@ -430,6 +438,23 @@ func (rt *Router) handleSnapshotRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/v1/snapshots/")
 	parts := strings.Split(path, "/")
+	if len(parts) == 0 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if len(parts) == 1 {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		snapshot, err := rt.service.GetSnapshot(r.Context(), tenantCtx.Tenant.ID, parts[0])
+		if err != nil {
+			handleError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, snapshot)
+		return
+	}
 	if len(parts) < 2 || parts[1] != "restore" || r.Method != http.MethodPost {
 		http.NotFound(w, r)
 		return

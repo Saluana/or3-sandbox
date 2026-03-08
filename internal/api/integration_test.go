@@ -61,6 +61,16 @@ func TestAPILifecycleOwnershipFilesAndSnapshots(t *testing.T) {
 	h.expectStatus(t, "token-a", http.MethodGet, "/v1/sandboxes/"+sandbox.ID+"/files/%2e%2e/%2e%2e/etc/passwd", nil, http.StatusBadRequest)
 
 	snapshot := h.createSnapshot(t, "token-a", sandbox.ID)
+	listed := h.listSnapshots(t, "token-a", sandbox.ID)
+	if len(listed) != 1 || listed[0].ID != snapshot.ID {
+		t.Fatalf("unexpected snapshot list: %+v", listed)
+	}
+	inspectedSnapshot := h.inspectSnapshot(t, "token-a", snapshot.ID)
+	if inspectedSnapshot.ID != snapshot.ID {
+		t.Fatalf("unexpected snapshot inspect result: %+v", inspectedSnapshot)
+	}
+	h.expectStatus(t, "token-b", http.MethodGet, "/v1/sandboxes/"+sandbox.ID+"/snapshots", nil, http.StatusNotFound)
+	h.expectStatus(t, "token-b", http.MethodGet, "/v1/snapshots/"+snapshot.ID, nil, http.StatusNotFound)
 	h.writeFile(t, "token-a", sandbox.ID, "hello.txt", "changed")
 	restored := h.restoreSnapshot(t, "token-a", snapshot.ID, sandbox.ID)
 	if restored.Status != model.SandboxStatusStopped {
@@ -622,6 +632,20 @@ func (h *harness) createSnapshot(t *testing.T, token, sandboxID string) model.Sn
 	t.Helper()
 	var snapshot model.Snapshot
 	h.mustDoJSON(t, token, http.MethodPost, "/v1/sandboxes/"+sandboxID+"/snapshots", model.CreateSnapshotRequest{Name: "test-snap"}, &snapshot, http.StatusCreated)
+	return snapshot
+}
+
+func (h *harness) listSnapshots(t *testing.T, token, sandboxID string) []model.Snapshot {
+	t.Helper()
+	var snapshots []model.Snapshot
+	h.mustDoJSON(t, token, http.MethodGet, "/v1/sandboxes/"+sandboxID+"/snapshots", nil, &snapshots, http.StatusOK)
+	return snapshots
+}
+
+func (h *harness) inspectSnapshot(t *testing.T, token, snapshotID string) model.Snapshot {
+	t.Helper()
+	var snapshot model.Snapshot
+	h.mustDoJSON(t, token, http.MethodGet, "/v1/snapshots/"+snapshotID, nil, &snapshot, http.StatusOK)
 	return snapshot
 }
 

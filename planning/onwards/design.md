@@ -240,16 +240,11 @@ Helper responsibilities should stay local to the package:
 
 Keep this area intentionally narrow.
 
-Recommended first-pass behavior:
-
-- implement `Suspend` and `Resume` only if QEMU monitor support can be added without destabilizing core flows
-- otherwise return a clear runtime error such as `suspend not yet supported by qemu backend` and document that limitation in operator-facing docs
-
-That is preferable to a fragile partial implementation.
-
 Current first-pass implementation choice:
 
-- the `qemu` backend returns an explicit unsupported error for `Suspend` and `Resume`
+- the `qemu` backend implements `Suspend` and `Resume` with a small process-level approach using suspend or continue signals plus runtime-state markers
+- `Inspect`, `Stop`, and reconciliation treat suspended guests as a distinct observable state
+- the implementation avoids adding a larger guest agent or monitor protocol dependency for this lifecycle step
 - operator-facing guest-image notes live under `images/guest/README.md`
 - the first durable-guest boot path uses guest `systemd` plus `or3-bootstrap.service` to create `/workspace` and the readiness marker
 

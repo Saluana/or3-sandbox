@@ -130,11 +130,13 @@ The current codebase includes support for:
 - creating and revoking tunnels
 - checking quotas
 - checking runtime health
-- creating snapshots through the HTTP API
+- creating, listing, inspecting, and restoring snapshots through the API and CLI
 
 ## Important limitation to know
 
-The CLI does **not** currently expose every server feature. For example, the daemon has snapshot API routes, but `sandboxctl` does not yet include snapshot commands.
+The first-pass QEMU backend now supports the full main lifecycle, including `suspend` and `resume`.
+
+The bigger remaining differences are about hardening and polish, not about missing core lifecycle commands.
 
 ## When to use this project
 

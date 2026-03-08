@@ -205,14 +205,99 @@ func TestInspectReportsErrorWhenGuestIsAliveButNotReady(t *testing.T) {
 	}
 }
 
-func TestSuspendAndResumeReturnExplicitUnsupportedErrors(t *testing.T) {
-	r := &Runtime{}
-	sandbox := model.Sandbox{ID: "sbx-1"}
-	if _, err := r.Suspend(context.Background(), sandbox); err == nil || !strings.Contains(err.Error(), "not supported") {
-		t.Fatalf("expected suspend unsupported error, got %v", err)
+func TestSuspendResumeAndInspectRoundTrip(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
 	}
-	if _, err := r.Resume(context.Background(), sandbox); err == nil || !strings.Contains(err.Error(), "not supported") {
-		t.Fatalf("expected resume unsupported error, got %v", err)
+	defer cmd.Process.Kill()
+
+	base := t.TempDir()
+	sandbox := model.Sandbox{
+		ID:            "sbx-suspend",
+		RuntimeID:     "qemu-sbx-suspend@2222",
+		StorageRoot:   filepath.Join(base, "rootfs"),
+		WorkspaceRoot: filepath.Join(base, "workspace"),
+		CacheRoot:     filepath.Join(base, "cache"),
+	}
+	layout := layoutForSandbox(sandbox)
+	if err := ensureLayout(layout); err != nil {
+		t.Fatalf("ensure layout: %v", err)
+	}
+	if err := os.WriteFile(layout.pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+	r := &Runtime{
+		bootTimeout:  time.Second,
+		pollInterval: 10 * time.Millisecond,
+		sshReady:     func(context.Context, sshTarget) error { return nil },
+	}
+
+	state, err := r.Suspend(context.Background(), sandbox)
+	if err != nil {
+		t.Fatalf("suspend failed: %v", err)
+	}
+	if state.Status != model.SandboxStatusSuspended {
+		t.Fatalf("unexpected suspend status: %s", state.Status)
+	}
+	inspected, err := r.Inspect(context.Background(), sandbox)
+	if err != nil {
+		t.Fatalf("inspect after suspend failed: %v", err)
+	}
+	if inspected.Status != model.SandboxStatusSuspended {
+		t.Fatalf("unexpected inspect status while suspended: %s", inspected.Status)
+	}
+	if !isSuspended(layout) {
+		t.Fatal("expected suspended marker to exist")
+	}
+
+	state, err = r.Resume(context.Background(), sandbox)
+	if err != nil {
+		t.Fatalf("resume failed: %v", err)
+	}
+	if state.Status != model.SandboxStatusRunning {
+		t.Fatalf("unexpected resume status: %s", state.Status)
+	}
+	if isSuspended(layout) {
+		t.Fatal("expected suspended marker to be removed")
+	}
+}
+
+func TestStopClearsSuspendedMarker(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	defer cmd.Process.Kill()
+
+	base := t.TempDir()
+	sandbox := model.Sandbox{
+		ID:            "sbx-stop-suspended",
+		RuntimeID:     "qemu-sbx-stop-suspended@2222",
+		StorageRoot:   filepath.Join(base, "rootfs"),
+		WorkspaceRoot: filepath.Join(base, "workspace"),
+		CacheRoot:     filepath.Join(base, "cache"),
+	}
+	layout := layoutForSandbox(sandbox)
+	if err := ensureLayout(layout); err != nil {
+		t.Fatalf("ensure layout: %v", err)
+	}
+	if err := os.WriteFile(layout.pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+	if err := touchFile(suspendedMarkerPath(layout)); err != nil {
+		t.Fatalf("touch suspended marker: %v", err)
+	}
+	r := &Runtime{}
+	state, err := r.Stop(context.Background(), sandbox, true)
+	if err != nil {
+		t.Fatalf("stop failed: %v", err)
+	}
+	if state.Status != model.SandboxStatusStopped {
+		t.Fatalf("unexpected stop status: %s", state.Status)
+	}
+	if _, err := os.Stat(suspendedMarkerPath(layout)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected suspended marker removed, got %v", err)
 	}
 }
 

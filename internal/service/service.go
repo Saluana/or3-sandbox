@@ -750,6 +750,17 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 	return snapshot, nil
 }
 
+func (s *Service) ListSnapshots(ctx context.Context, tenantID, sandboxID string) ([]model.Snapshot, error) {
+	if _, err := s.store.GetSandbox(ctx, tenantID, sandboxID); err != nil {
+		return nil, err
+	}
+	return s.store.ListSnapshots(ctx, tenantID, sandboxID)
+}
+
+func (s *Service) GetSnapshot(ctx context.Context, tenantID, snapshotID string) (model.Snapshot, error) {
+	return s.store.GetSnapshot(ctx, tenantID, snapshotID)
+}
+
 func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID string, req model.RestoreSnapshotRequest) (model.Sandbox, error) {
 	snapshot, err := s.store.GetSnapshot(ctx, tenantID, snapshotID)
 	if err != nil {

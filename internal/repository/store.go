@@ -469,6 +469,28 @@ func (s *Store) GetSnapshot(ctx context.Context, tenantID, snapshotID string) (m
 	return scanSnapshot(row)
 }
 
+func (s *Store) ListSnapshots(ctx context.Context, tenantID, sandboxID string) ([]model.Snapshot, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, workspace_tar, export_location, created_at, completed_at
+		FROM snapshots
+		WHERE tenant_id=? AND sandbox_id=?
+		ORDER BY created_at DESC
+	`, tenantID, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var snapshots []model.Snapshot
+	for rows.Next() {
+		snapshot, err := scanSnapshot(rows)
+		if err != nil {
+			return nil, err
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots, rows.Err()
+}
+
 func (s *Store) AddAuditEvent(ctx context.Context, event model.AuditEvent) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO audit_events(audit_event_id, tenant_id, sandbox_id, action, resource_id, outcome, message, created_at)

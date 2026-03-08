@@ -39,6 +39,10 @@ The CLI supports these top-level commands:
 - `tunnel-revoke`
 - `quota`
 - `runtime-health`
+- `snapshot-create`
+- `snapshot-list`
+- `snapshot-inspect`
+- `snapshot-restore`
 
 ## 1. Create a sandbox
 
@@ -98,6 +102,12 @@ Stop:
 
 ```bash
 go run ./cmd/sandboxctl stop <sandbox-id>
+```
+
+Force stop:
+
+```bash
+go run ./cmd/sandboxctl stop --force <sandbox-id>
 ```
 
 Delete:
@@ -209,6 +219,34 @@ go run ./cmd/sandboxctl runtime-health
 
 These are good first commands when something seems wrong.
 
+## 10. Work with snapshots
+
+Create a snapshot:
+
+```bash
+go run ./cmd/sandboxctl snapshot-create --name before-change <sandbox-id>
+```
+
+List snapshots for a sandbox:
+
+```bash
+go run ./cmd/sandboxctl snapshot-list <sandbox-id>
+```
+
+Inspect one snapshot:
+
+```bash
+go run ./cmd/sandboxctl snapshot-inspect <snapshot-id>
+```
+
+Restore a snapshot into a target sandbox:
+
+```bash
+go run ./cmd/sandboxctl snapshot-restore <snapshot-id> <sandbox-id>
+```
+
+This is useful when you want to save a known-good state before making changes.
+
 ## API basics
 
 You do not have to use the CLI. You can also call the HTTP API directly.
@@ -254,13 +292,9 @@ If you leave out `timeout`, the server uses its normal default.
 
 ## Snapshot note
 
-The server has snapshot API routes, but the CLI does not currently include snapshot commands.
+Snapshots are now available from both the API and `sandboxctl`.
 
-That means:
-
-- snapshots are part of the backend design
-- you may need direct API calls for snapshot work
-- Docker and QEMU store snapshot data differently under the hood
+Docker and QEMU still store snapshot data differently under the hood, but the user-facing create, list, inspect, and restore workflow is the same.
 
 ## Good habits
 

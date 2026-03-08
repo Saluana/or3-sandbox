@@ -46,7 +46,9 @@ Authorization: Bearer <token>
 
 ## Snapshots
 
+- `GET /v1/sandboxes/{id}/snapshots` — list snapshots for a sandbox
 - `POST /v1/sandboxes/{id}/snapshots` — create snapshot
+- `GET /v1/snapshots/{id}` — inspect one snapshot
 - `POST /v1/snapshots/{id}/restore` — restore snapshot
 
 ## Simple create example

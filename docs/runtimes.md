@@ -82,14 +82,13 @@ The QEMU backend:
 
 ### Current limitations
 
-Right now, the first-pass QEMU backend has some intentional limits.
+Right now, the first-pass QEMU backend still has some practical limits.
 
-Most importantly:
+The main ones are:
 
-- `Suspend` is not supported
-- `Resume` is not supported
 - setup is more involved than Docker
 - operator-owned guest image prep matters a lot
+- the guest-backed path still needs more long-term hardening than the trusted Docker path
 
 If you are new to the project, do **not** start here.
 

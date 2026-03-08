@@ -175,7 +175,7 @@ It:
 - copies files over the guest boundary
 - stores VM artifacts in a predictable layout on disk
 
-Right now, this path is more limited than Docker. For example, suspend and resume intentionally return a clear "not supported" error in the first pass.
+Right now, this path is still a little more operationally rough than Docker, but it now supports the full main lifecycle, including suspend and resume.
 
 ## 8. Repository and database layer
 
