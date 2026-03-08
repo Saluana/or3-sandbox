@@ -197,8 +197,10 @@ Only use these when `SANDBOX_RUNTIME=qemu`.
 | `SANDBOX_QEMU_BINARY` | auto | qemu system binary name |
 | `SANDBOX_QEMU_ACCEL` | `auto` | accelerator selection |
 | `SANDBOX_QEMU_BASE_IMAGE_PATH` | empty | guest base image path |
+| `SANDBOX_QEMU_ALLOWED_BASE_IMAGE_PATHS` | empty | comma-separated guest image paths tenants may request; default image is always allowed |
 | `SANDBOX_QEMU_SSH_USER` | empty | guest SSH user |
 | `SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH` | empty | SSH private key path |
+| `SANDBOX_QEMU_SSH_HOST_KEY_PATH` | empty | guest SSH host public key path used for pinning |
 | `SANDBOX_QEMU_BOOT_TIMEOUT` | `2m` | max guest boot wait |
 
 The daemon validates these at startup.
@@ -219,9 +221,9 @@ The daemon now exposes two operator-facing views for production monitoring:
 
 Important truth:
 
-- the stronger runtime boundary is `qemu`, but capacity cost is higher because each guest carries its own memory overhead
+- `qemu` is the higher-isolation runtime, but capacity cost is higher because each guest carries its own memory overhead
 - Docker remains the cheaper path for trusted work, but resource boundaries there are still more best-effort because it shares the host kernel
-- QEMU gives the clearer production boundary, while Docker stays the cost-saving trusted mode
+- QEMU gives the clearer isolation boundary, while Docker stays the cost-saving trusted mode; either one still needs host-specific verification before you call it production-ready
 
 ## CPU values
 
@@ -273,8 +275,10 @@ export SANDBOX_POLICY_MAX_IDLE_TIMEOUT=2h
 export SANDBOX_QEMU_BINARY=qemu-system-aarch64
 export SANDBOX_QEMU_ACCEL=hvf
 export SANDBOX_QEMU_BASE_IMAGE_PATH=$PWD/images/guest/base.qcow2
+export SANDBOX_QEMU_ALLOWED_BASE_IMAGE_PATHS=$PWD/images/guest/base.qcow2
 export SANDBOX_QEMU_SSH_USER=or3
 export SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH=$HOME/.ssh/or3-sandbox
+export SANDBOX_QEMU_SSH_HOST_KEY_PATH=$PWD/images/guest/base.qcow2.ssh-host-key.pub
 ```
 
 Pick the binary and accelerator that match your host.

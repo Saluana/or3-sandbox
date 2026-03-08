@@ -49,6 +49,7 @@ export SANDBOX_QEMU_ACCEL=hvf
 export SANDBOX_QEMU_BASE_IMAGE_PATH=$PWD/images/guest/base.qcow2
 export SANDBOX_QEMU_SSH_USER=or3
 export SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH=$HOME/.ssh/or3-sandbox
+export SANDBOX_QEMU_SSH_HOST_KEY_PATH=$PWD/images/guest/base.qcow2.ssh-host-key.pub
 ```
 
 Example for Linux may use:
@@ -76,6 +77,7 @@ Common causes are:
 - bad QEMU binary name
 - missing base image file
 - unreadable SSH key
+- unreadable SSH host key
 - unavailable accelerator
 
 ## Step 4: Set client variables
@@ -123,6 +125,10 @@ go run ./cmd/sandboxctl resume <sandbox-id>
 ```
 
 After `resume`, the daemon waits for the guest to become reachable again before reporting it as running.
+
+QEMU snapshot note:
+
+- stop the sandbox before creating a snapshot, because this path currently does offline disk copies rather than coordinated live VM snapshots
 
 ## Final advice
 

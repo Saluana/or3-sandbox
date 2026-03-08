@@ -580,14 +580,22 @@ func (r presetRunner) downloadArtifacts(sandboxID string) error {
 
 func resolvePresetRuntimeAdapter(client clientConfig, manifest presets.Manifest, req model.CreateSandboxRequest) (presetRuntimeAdapter, error) {
 	adapter := presetRuntimeAdapter{name: "docker", profile: strings.TrimSpace(manifest.Runtime.Profile)}
-	var health model.RuntimeHealth
-	if err := doJSON(client, http.MethodGet, "/v1/runtime/health", nil, &health); err == nil {
-		backend := strings.ToLower(strings.TrimSpace(health.Backend))
+	var info model.RuntimeInfo
+	if err := doJSON(client, http.MethodGet, "/v1/runtime/info", nil, &info); err == nil {
+		backend := strings.ToLower(strings.TrimSpace(info.Backend))
 		if backend != "" {
 			adapter.name = backend
 		}
-	} else if len(manifest.Runtime.Allowed) == 1 {
-		adapter.name = strings.ToLower(strings.TrimSpace(manifest.Runtime.Allowed[0]))
+	} else {
+		var health model.RuntimeHealth
+		if err := doJSON(client, http.MethodGet, "/v1/runtime/health", nil, &health); err == nil {
+			backend := strings.ToLower(strings.TrimSpace(health.Backend))
+			if backend != "" {
+				adapter.name = backend
+			}
+		} else if len(manifest.Runtime.Allowed) == 1 {
+			adapter.name = strings.ToLower(strings.TrimSpace(manifest.Runtime.Allowed[0]))
+		}
 	}
 	if !manifest.AllowsRuntime(adapter.name) {
 		return presetRuntimeAdapter{}, fmt.Errorf("preset %q does not allow the %s runtime", manifest.Name, adapter.name)

@@ -5,12 +5,12 @@ Single-node sandbox control plane for durable tenant environments.
 Current status:
 
 - shipped today: trusted Docker-backed control plane for development or internal trusted use
-- shipped today: guest-backed `qemu` runtime for the stronger production isolation path
+- shipped today: guest-backed `qemu` runtime for the intended higher-isolation path, with real host validation still required before calling a deployment production-ready
 
 Runtime rule of thumb:
 
 - use `docker` when cost and density matter more than isolation and the workload is trusted
-- use `qemu` when isolation strength matters more than density and the workload is untrusted or security-sensitive
+- use `qemu` when isolation strength matters more than density and you have validated the guest image, suspend/resume behavior, and recovery drills on your hosts
 
 The current Docker backend is not the hostile multi-tenant production boundary described by the architecture docs.
 
@@ -19,8 +19,8 @@ The repository ships:
 - `sandboxd`: Go HTTP daemon with SQLite metadata, static-token or JWT tenancy, quotas, lifecycle orchestration, file APIs, exec streaming, PTY attach, tunnels, snapshots, and restart reconciliation
 - `sandboxctl`: CLI for lifecycle, exec, TTY, file transfer, and tunnel management
 - Docker-backed runtime implementation for durable per-sandbox environments with isolated networks and persistent workspace mounts in trusted or development mode
-- QEMU-backed runtime implementation with booting, suspended, degraded, and failed guest visibility for the stronger production boundary
-- integration tests that exercise lifecycle, ownership, snapshots, tunnels, detached workloads, and quota enforcement
+- QEMU-backed runtime implementation with booting, suspended, degraded, and failed guest visibility, plus opt-in host-prepared guest verification
+- integration tests that exercise the main control-plane flows, with opt-in host-prepared QEMU verification for the real guest path
 
 See also:
 

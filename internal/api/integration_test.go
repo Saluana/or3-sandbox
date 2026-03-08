@@ -310,7 +310,7 @@ func TestDetachedExecDoesNotConsumeExecQuotaForever(t *testing.T) {
 		Timeout:  10 * time.Second,
 		Detached: true,
 	})
-	if first.Status != model.ExecutionStatusSucceeded {
+	if first.Status != model.ExecutionStatusDetached {
 		t.Fatalf("unexpected detached exec status: %+v", first)
 	}
 	second := h.exec(t, "token-a", sandbox.ID, model.ExecRequest{
@@ -320,6 +320,17 @@ func TestDetachedExecDoesNotConsumeExecQuotaForever(t *testing.T) {
 	})
 	if second.Status != model.ExecutionStatusSucceeded {
 		t.Fatalf("unexpected second exec status: %+v", second)
+	}
+}
+
+func TestRuntimeInfoIsTenantReadable(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	var info model.RuntimeInfo
+	h.mustDoJSON(t, "token-a", http.MethodGet, "/v1/runtime/info", nil, &info, http.StatusOK)
+	if info.Backend != "qemu" {
+		t.Fatalf("unexpected runtime info %+v", info)
 	}
 }
 
@@ -1031,6 +1042,10 @@ func newHarness(t *testing.T) *harness {
 func newStubHarness(t *testing.T) *harness {
 	t.Helper()
 	root := t.TempDir()
+	qemuImage := filepath.Join(root, "guest-base.qcow2")
+	if err := os.WriteFile(qemuImage, []byte("qcow2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	cfg := config.Config{
 		DeploymentMode:       "development",
 		ListenAddress:        "127.0.0.1:0",
@@ -1039,6 +1054,8 @@ func newStubHarness(t *testing.T) *harness {
 		SnapshotRoot:         filepath.Join(root, "snapshots"),
 		BaseImageRef:         "guest-base.qcow2",
 		RuntimeBackend:       "qemu",
+		QEMUBaseImagePath:    qemuImage,
+		QEMUAllowedBaseImagePaths: []string{qemuImage},
 		AuthMode:             "static",
 		DefaultCPULimit:      model.CPUCores(1),
 		DefaultMemoryLimitMB: 256,

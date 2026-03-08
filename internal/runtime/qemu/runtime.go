@@ -46,31 +46,36 @@ type commandRunner func(ctx context.Context, binary string, args ...string) ([]b
 
 type sshProbe func(ctx context.Context, target sshTarget) error
 
+type processArgsReader func(pid int) (string, error)
+
 type Options struct {
-	Binary        string
-	Accel         string
-	BaseImagePath string
-	SSHUser       string
-	SSHKeyPath    string
-	BootTimeout   time.Duration
-	SSHBinary     string
-	SCPBinary     string
+	Binary         string
+	Accel          string
+	BaseImagePath  string
+	SSHUser        string
+	SSHKeyPath     string
+	SSHHostKeyPath string
+	BootTimeout    time.Duration
+	SSHBinary      string
+	SCPBinary      string
 }
 
 type Runtime struct {
-	qemuBinary    string
-	qemuImgBinary string
-	sshBinary     string
-	scpBinary     string
-	accelerator   string
-	baseImagePath string
-	sshUser       string
-	sshKeyPath    string
-	bootTimeout   time.Duration
-	pollInterval  time.Duration
+	qemuBinary      string
+	qemuImgBinary   string
+	sshBinary       string
+	scpBinary       string
+	accelerator     string
+	baseImagePath   string
+	sshUser         string
+	sshKeyPath      string
+	sshHostKeyPath  string
+	bootTimeout     time.Duration
+	pollInterval    time.Duration
 
-	runCommand commandRunner
-	sshReady   sshProbe
+	runCommand  commandRunner
+	sshReady    sshProbe
+	processArgs processArgsReader
 }
 
 type hostProbe struct {
@@ -98,6 +103,7 @@ type sandboxLayout struct {
 type sshTarget struct {
 	port           int
 	knownHostsPath string
+	hostKeyAlias   string
 }
 
 func New(opts Options) (*Runtime, error) {
@@ -116,19 +122,21 @@ func New(opts Options) (*Runtime, error) {
 		return nil, err
 	}
 	runtime := &Runtime{
-		qemuBinary:    opts.Binary,
-		qemuImgBinary: qemuImgBinary,
-		sshBinary:     opts.SSHBinary,
-		scpBinary:     opts.SCPBinary,
-		accelerator:   accel,
-		baseImagePath: opts.BaseImagePath,
-		sshUser:       opts.SSHUser,
-		sshKeyPath:    opts.SSHKeyPath,
-		bootTimeout:   opts.BootTimeout,
-		pollInterval:  defaultPollInterval,
+		qemuBinary:     opts.Binary,
+		qemuImgBinary:  qemuImgBinary,
+		sshBinary:      opts.SSHBinary,
+		scpBinary:      opts.SCPBinary,
+		accelerator:    accel,
+		baseImagePath:  opts.BaseImagePath,
+		sshUser:        opts.SSHUser,
+		sshKeyPath:     opts.SSHKeyPath,
+		sshHostKeyPath: opts.SSHHostKeyPath,
+		bootTimeout:    opts.BootTimeout,
+		pollInterval:   defaultPollInterval,
 	}
 	runtime.runCommand = runtime.defaultRunCommand
 	runtime.sshReady = runtime.defaultSSHProbe
+	runtime.processArgs = defaultProcessArgsReader
 	return runtime, nil
 }
 
@@ -140,7 +148,10 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 	if err := os.Remove(layout.pidPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return model.RuntimeState{}, err
 	}
-	baseImagePath := r.guestBaseImage(spec.BaseImageRef)
+	baseImagePath, err := r.guestBaseImage(spec.BaseImageRef)
+	if err != nil {
+		return model.RuntimeState{}, err
+	}
 	rootBytes, workspaceBytes := splitDiskBytes(spec.DiskLimitMB)
 	if err := r.createRootDisk(ctx, baseImagePath, layout.rootDiskPath, rootBytes); err != nil {
 		return model.RuntimeState{}, err
@@ -148,7 +159,7 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 	if err := r.createWorkspaceDisk(ctx, layout.workspaceDiskPath, workspaceBytes); err != nil {
 		return model.RuntimeState{}, err
 	}
-	if err := touchFile(layout.knownHostsPath); err != nil {
+	if err := r.seedKnownHosts(layout.knownHostsPath, sandboxHostKeyAlias(spec.SandboxID)); err != nil {
 		return model.RuntimeState{}, err
 	}
 	if err := touchFile(layout.serialLogPath); err != nil {
@@ -190,7 +201,7 @@ func (r *Runtime) Start(ctx context.Context, sandbox model.Sandbox) (model.Runti
 func (r *Runtime) Stop(ctx context.Context, sandbox model.Sandbox, force bool) (model.RuntimeState, error) {
 	_ = ctx
 	layout := layoutForSandbox(sandbox)
-	pid, err := readPID(layout.pidPath)
+	pid, err := r.liveSandboxPID(layout)
 	if errors.Is(err, os.ErrNotExist) {
 		_ = os.Remove(suspendedMarkerPath(layout))
 		return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
@@ -214,19 +225,11 @@ func (r *Runtime) Stop(ctx context.Context, sandbox model.Sandbox, force bool) (
 func (r *Runtime) Suspend(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
 	_ = ctx
 	layout := layoutForSandbox(sandbox)
-	pid, err := readPID(layout.pidPath)
+	pid, err := r.liveSandboxPID(layout)
 	if errors.Is(err, os.ErrNotExist) {
 		return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
 	}
 	if err != nil {
-		return model.RuntimeState{}, err
-	}
-	if err := syscall.Kill(pid, 0); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
-			_ = os.Remove(layout.pidPath)
-			_ = os.Remove(suspendedMarkerPath(layout))
-			return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
-		}
 		return model.RuntimeState{}, err
 	}
 	if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
@@ -240,20 +243,12 @@ func (r *Runtime) Suspend(ctx context.Context, sandbox model.Sandbox) (model.Run
 
 func (r *Runtime) Resume(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
 	layout := layoutForSandbox(sandbox)
-	pid, err := readPID(layout.pidPath)
+	pid, err := r.liveSandboxPID(layout)
 	if errors.Is(err, os.ErrNotExist) {
 		_ = os.Remove(suspendedMarkerPath(layout))
 		return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
 	}
 	if err != nil {
-		return model.RuntimeState{}, err
-	}
-	if err := syscall.Kill(pid, 0); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
-			_ = os.Remove(layout.pidPath)
-			_ = os.Remove(suspendedMarkerPath(layout))
-			return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
-		}
 		return model.RuntimeState{}, err
 	}
 	if err := syscall.Kill(pid, syscall.SIGCONT); err != nil {
@@ -274,20 +269,12 @@ func (r *Runtime) Destroy(ctx context.Context, sandbox model.Sandbox) error {
 
 func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
 	layout := layoutForSandbox(sandbox)
-	pid, err := readPID(layout.pidPath)
+	pid, err := r.liveSandboxPID(layout)
 	if errors.Is(err, os.ErrNotExist) {
 		_ = os.Remove(suspendedMarkerPath(layout))
 		return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
 	}
 	if err != nil {
-		return model.RuntimeState{}, err
-	}
-	if err := syscall.Kill(pid, 0); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
-			_ = os.Remove(layout.pidPath)
-			_ = os.Remove(suspendedMarkerPath(layout))
-			return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
-		}
 		return model.RuntimeState{}, err
 	}
 	if isSuspended(layout) {
@@ -338,7 +325,13 @@ func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.Run
 }
 
 func (r *Runtime) CreateSnapshot(ctx context.Context, sandbox model.Sandbox, snapshotID string) (model.SnapshotInfo, error) {
-	_ = ctx
+	state, err := r.Inspect(ctx, sandbox)
+	if err != nil {
+		return model.SnapshotInfo{}, err
+	}
+	if state.Status != model.SandboxStatusStopped {
+		return model.SnapshotInfo{}, fmt.Errorf("qemu snapshots require the sandbox to be stopped")
+	}
 	layout := layoutForSandbox(sandbox)
 	snapshotDir := filepath.Join(sandbox.StorageRoot, ".snapshots", snapshotID)
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
@@ -457,6 +450,7 @@ func (r *Runtime) sshTarget(sandbox model.Sandbox, layout sandboxLayout) sshTarg
 	return sshTarget{
 		port:           port,
 		knownHostsPath: layout.knownHostsPath,
+		hostKeyAlias:   sandboxHostKeyAlias(sandbox.ID),
 	}
 }
 
@@ -473,6 +467,7 @@ func (r *Runtime) startTarget(sandbox model.Sandbox, layout sandboxLayout) (sshT
 	return sshTarget{
 		port:           port,
 		knownHostsPath: layout.knownHostsPath,
+		hostKeyAlias:   sandboxHostKeyAlias(sandbox.ID),
 	}, runtimeID, nil
 }
 
@@ -480,8 +475,9 @@ func (r *Runtime) baseSSHArgs(target sshTarget, tty bool) []string {
 	args := []string{
 		"-o", "BatchMode=yes",
 		"-o", "IdentitiesOnly=yes",
-		"-o", "StrictHostKeyChecking=no",
+		"-o", "StrictHostKeyChecking=yes",
 		"-o", "UserKnownHostsFile=" + target.knownHostsPath,
+		"-o", "HostKeyAlias=" + target.hostKeyAlias,
 		"-o", "ConnectTimeout=5",
 		"-i", r.sshKeyPath,
 		"-p", strconv.Itoa(target.port),
@@ -521,12 +517,9 @@ func bootFailureReason(serialLogPath string) (string, bool) {
 	if strings.TrimSpace(serialLogPath) == "" {
 		return "", false
 	}
-	data, err := os.ReadFile(serialLogPath)
+	data, err := readFileTail(serialLogPath, serialTailLimit)
 	if err != nil || len(data) == 0 {
 		return "", false
-	}
-	if len(data) > serialTailLimit {
-		data = data[len(data)-serialTailLimit:]
 	}
 	logTail := strings.ToLower(string(data))
 	for _, marker := range bootFailureMarkers {
@@ -535,6 +528,30 @@ func bootFailureReason(serialLogPath string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func readFileTail(path string, limit int64) ([]byte, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	size := info.Size()
+	offset := int64(0)
+	if size > limit {
+		offset = size - limit
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return nil, err
+	}
+	return io.ReadAll(file)
 }
 
 func (r *Runtime) defaultRunCommand(ctx context.Context, binary string, args ...string) ([]byte, error) {
@@ -550,8 +567,9 @@ func (r *Runtime) defaultSSHProbe(ctx context.Context, target sshTarget) error {
 	args := []string{
 		"-o", "BatchMode=yes",
 		"-o", "IdentitiesOnly=yes",
-		"-o", "StrictHostKeyChecking=no",
+		"-o", "StrictHostKeyChecking=yes",
 		"-o", "UserKnownHostsFile=" + target.knownHostsPath,
+		"-o", "HostKeyAlias=" + target.hostKeyAlias,
 		"-o", "ConnectTimeout=2",
 		"-i", r.sshKeyPath,
 		"-p", strconv.Itoa(target.port),
@@ -562,11 +580,15 @@ func (r *Runtime) defaultSSHProbe(ctx context.Context, target sshTarget) error {
 	return err
 }
 
-func (r *Runtime) guestBaseImage(specBaseImageRef string) string {
-	if isReadableFile(specBaseImageRef) {
-		return specBaseImageRef
+func (r *Runtime) guestBaseImage(specBaseImageRef string) (string, error) {
+	path := strings.TrimSpace(specBaseImageRef)
+	if path == "" {
+		path = r.baseImagePath
 	}
-	return r.baseImagePath
+	if !isReadableFile(path) {
+		return "", fmt.Errorf("qemu base image path %q is not readable", path)
+	}
+	return filepath.Clean(path), nil
 }
 
 func (r *Runtime) effectiveBootTimeout() time.Duration {
@@ -632,15 +654,18 @@ func validateHost(opts Options, qemuImgBinary, accel string, probe hostProbe) er
 	if strings.TrimSpace(opts.SSHKeyPath) == "" {
 		return errors.New("qemu ssh key path is required")
 	}
+	if strings.TrimSpace(opts.SSHHostKeyPath) == "" {
+		return errors.New("qemu ssh host key path is required")
+	}
 	if opts.BootTimeout <= 0 {
 		return errors.New("qemu boot timeout must be positive")
 	}
-	for _, command := range []string{opts.Binary, qemuImgBinary, opts.SSHBinary, opts.SCPBinary} {
+	for _, command := range []string{opts.Binary, qemuImgBinary, opts.SSHBinary, opts.SCPBinary, "ps"} {
 		if err := probe.commandExists(command); err != nil {
 			return fmt.Errorf("required host command %q is unavailable: %w", command, err)
 		}
 	}
-	for _, path := range []string{opts.BaseImagePath, opts.SSHKeyPath} {
+	for _, path := range []string{opts.BaseImagePath, opts.SSHKeyPath, opts.SSHHostKeyPath} {
 		if err := probe.fileReadable(path); err != nil {
 			return fmt.Errorf("required file %q is unavailable: %w", path, err)
 		}
@@ -656,6 +681,41 @@ func validateHost(opts Options, qemuImgBinary, accel string, probe hostProbe) er
 		}
 	}
 	return nil
+}
+
+func sandboxHostKeyAlias(sandboxID string) string {
+	return "or3-qemu-" + sandboxID
+}
+
+func (r *Runtime) seedKnownHosts(path, alias string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("known hosts path is required")
+	}
+	keyData, err := os.ReadFile(r.sshHostKeyPath)
+	if err != nil {
+		return err
+	}
+	entry, err := knownHostEntry(alias, string(keyData))
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(entry+"\n"), 0o600)
+}
+
+func knownHostEntry(alias, key string) (string, error) {
+	trimmedAlias := strings.TrimSpace(alias)
+	if trimmedAlias == "" {
+		return "", errors.New("known hosts alias is required")
+	}
+	fields := strings.Fields(strings.TrimSpace(key))
+	if len(fields) < 2 || !strings.HasPrefix(fields[0], "ssh-") {
+		return "", fmt.Errorf("invalid ssh host public key format")
+	}
+	entry := trimmedAlias + " " + fields[0] + " " + fields[1]
+	if len(fields) > 2 {
+		entry += " " + strings.Join(fields[2:], " ")
+	}
+	return entry, nil
 }
 
 func deriveQEMUImgBinary(qemuBinary string) string {
@@ -763,6 +823,58 @@ func readPID(path string) (int, error) {
 	return pid, nil
 }
 
+func (r *Runtime) liveSandboxPID(layout sandboxLayout) (int, error) {
+	pid, err := readPID(layout.pidPath)
+	if err != nil {
+		return 0, err
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			_ = os.Remove(layout.pidPath)
+			_ = os.Remove(suspendedMarkerPath(layout))
+			return 0, os.ErrNotExist
+		}
+		return 0, err
+	}
+	match, err := r.processMatchesSandbox(pid, layout)
+	if err != nil {
+		return 0, err
+	}
+	if !match {
+		_ = os.Remove(layout.pidPath)
+		_ = os.Remove(suspendedMarkerPath(layout))
+		return 0, os.ErrNotExist
+	}
+	return pid, nil
+}
+
+func (r *Runtime) processMatchesSandbox(pid int, layout sandboxLayout) (bool, error) {
+	if pid <= 0 {
+		return false, nil
+	}
+	if strings.TrimSpace(r.qemuBinary) == "" || r.processArgs == nil {
+		return true, nil
+	}
+	args, err := r.processArgs(pid)
+	if err != nil {
+		return false, err
+	}
+	expected := []string{
+		filepath.Base(r.qemuBinary),
+		layout.rootDiskPath,
+		layout.monitorPath,
+	}
+	for _, needle := range expected {
+		if strings.TrimSpace(needle) == "" {
+			continue
+		}
+		if !strings.Contains(args, needle) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func withinBootWindow(pidPath string, bootTimeout time.Duration) bool {
 	if bootTimeout <= 0 {
 		return false
@@ -811,6 +923,14 @@ func waitForPID(path string, timeout time.Duration) (int, error) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return 0, fmt.Errorf("qemu pidfile %s did not appear before timeout", path)
+}
+
+func defaultProcessArgsReader(pid int) (string, error) {
+	output, err := exec.Command("ps", "-ww", "-o", "args=", "-p", strconv.Itoa(pid)).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("inspect process %d: %w: %s", pid, err, strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 func sshPortForSandbox(id string) int {

@@ -12,6 +12,6 @@ Read them in this order:
 
 Important truth:
 
-- the supported production isolation path is `qemu`
+- `qemu` is the intended higher-isolation path once the documented verification drills pass on your hosts
 - `docker` stays a trusted or development runtime
 - production claims should be tied to passing tests and documented drills, not aspirational wording

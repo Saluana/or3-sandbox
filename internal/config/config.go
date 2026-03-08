@@ -63,8 +63,10 @@ type Config struct {
 	QEMUBinary               string
 	QEMUAccel                string
 	QEMUBaseImagePath        string
+	QEMUAllowedBaseImagePaths []string
 	QEMUSSHUser              string
 	QEMUSSHPrivateKeyPath    string
+	QEMUSSHHostKeyPath       string
 	QEMUBootTimeout          time.Duration
 }
 
@@ -94,8 +96,11 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.QEMUBinary, "qemu-binary", env("SANDBOX_QEMU_BINARY", defaultQEMUBinary()), "qemu system binary")
 	fs.StringVar(&cfg.QEMUAccel, "qemu-accel", env("SANDBOX_QEMU_ACCEL", "auto"), "qemu accelerator selection")
 	fs.StringVar(&cfg.QEMUBaseImagePath, "qemu-base-image-path", env("SANDBOX_QEMU_BASE_IMAGE_PATH", ""), "qemu base guest image path")
+	qemuAllowedBaseImagePaths := env("SANDBOX_QEMU_ALLOWED_BASE_IMAGE_PATHS", "")
+	fs.StringVar(&qemuAllowedBaseImagePaths, "qemu-allowed-base-image-paths", qemuAllowedBaseImagePaths, "comma-separated qemu guest image paths tenants may request")
 	fs.StringVar(&cfg.QEMUSSHUser, "qemu-ssh-user", env("SANDBOX_QEMU_SSH_USER", ""), "qemu guest ssh user")
 	fs.StringVar(&cfg.QEMUSSHPrivateKeyPath, "qemu-ssh-private-key", env("SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH", ""), "qemu guest ssh private key path")
+	fs.StringVar(&cfg.QEMUSSHHostKeyPath, "qemu-ssh-host-key", env("SANDBOX_QEMU_SSH_HOST_KEY_PATH", ""), "qemu guest ssh host public key path")
 	trustedDockerRuntime := env("SANDBOX_TRUSTED_DOCKER_RUNTIME", "false")
 	trustedProxyHeaders := strings.EqualFold(env("SANDBOX_TRUST_PROXY_HEADERS", "false"), "true")
 	fs.BoolVar(&trustedProxyHeaders, "trust-proxy-headers", trustedProxyHeaders, "trust reverse-proxy tls headers")
@@ -135,6 +140,7 @@ func Load(args []string) (Config, error) {
 	cfg.PolicyAllowedImages = parseCommaSeparated(policyAllowedImages)
 	cfg.PolicyAllowPublicTunnels = policyAllowPublicTunnels
 	cfg.OptionalSnapshotExport = env("SANDBOX_S3_EXPORT_URI", "")
+	cfg.QEMUAllowedBaseImagePaths = parseCommaSeparated(qemuAllowedBaseImagePaths)
 	cfg.DefaultQuota = model.TenantQuota{
 		MaxSandboxes:            envInt("SANDBOX_QUOTA_MAX_SANDBOXES", 10),
 		MaxRunningSandboxes:     envInt("SANDBOX_QUOTA_MAX_RUNNING", 5),
@@ -336,6 +342,9 @@ func validateQEMUConfig(c Config, probe runtimeValidationProbe) error {
 	if strings.TrimSpace(c.QEMUSSHPrivateKeyPath) == "" {
 		return errors.New("qemu runtime requires SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH")
 	}
+	if strings.TrimSpace(c.QEMUSSHHostKeyPath) == "" {
+		return errors.New("qemu runtime requires SANDBOX_QEMU_SSH_HOST_KEY_PATH")
+	}
 	if err := probe.commandExists(c.QEMUBinary); err != nil {
 		return fmt.Errorf("qemu runtime requires a working QEMU binary: %w", err)
 	}
@@ -344,6 +353,14 @@ func validateQEMUConfig(c Config, probe runtimeValidationProbe) error {
 	}
 	if err := probe.fileReadable(c.QEMUSSHPrivateKeyPath); err != nil {
 		return fmt.Errorf("qemu runtime ssh private key is not readable: %w", err)
+	}
+	if err := probe.fileReadable(c.QEMUSSHHostKeyPath); err != nil {
+		return fmt.Errorf("qemu runtime ssh host public key is not readable: %w", err)
+	}
+	for _, path := range c.EffectiveQEMUAllowedBaseImagePaths() {
+		if err := probe.fileReadable(path); err != nil {
+			return fmt.Errorf("qemu allowed base image path is not readable: %w", err)
+		}
 	}
 	switch accel {
 	case "kvm":
@@ -356,6 +373,35 @@ func validateQEMUConfig(c Config, probe runtimeValidationProbe) error {
 		}
 	}
 	return nil
+}
+
+func (c Config) EffectiveQEMUAllowedBaseImagePaths() []string {
+	return appendDefaultQEMUBaseImagePath(c.QEMUAllowedBaseImagePaths, c.QEMUBaseImagePath)
+}
+
+func appendDefaultQEMUBaseImagePath(paths []string, defaultPath string) []string {
+	seen := make(map[string]struct{}, len(paths)+1)
+	var result []string
+	for _, raw := range append(paths, defaultPath) {
+		normalized := NormalizeQEMUBaseImagePath(raw)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		result = append(result, normalized)
+	}
+	return result
+}
+
+func NormalizeQEMUBaseImagePath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	return filepath.Clean(trimmed)
 }
 
 func resolveQEMUAccel(value, goos string) (string, error) {

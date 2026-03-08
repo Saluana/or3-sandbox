@@ -16,12 +16,13 @@ func TestHostDiskFullAndWorkspacePersistence(t *testing.T) {
 	ctx := context.Background()
 
 	runtime, err := New(Options{
-		Binary:        cfg.binary,
-		Accel:         cfg.accel,
-		BaseImagePath: cfg.baseImagePath,
-		SSHUser:       cfg.sshUser,
-		SSHKeyPath:    cfg.sshKeyPath,
-		BootTimeout:   2 * time.Minute,
+		Binary:         cfg.binary,
+		Accel:          cfg.accel,
+		BaseImagePath:  cfg.baseImagePath,
+		SSHUser:        cfg.sshUser,
+		SSHKeyPath:     cfg.sshKeyPath,
+		SSHHostKeyPath: cfg.sshHostKeyPath,
+		BootTimeout:    2 * time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
@@ -104,12 +105,13 @@ func TestHostWorkloadClaimsAndRestartDurability(t *testing.T) {
 	ctx := context.Background()
 
 	runtime, err := New(Options{
-		Binary:        cfg.binary,
-		Accel:         cfg.accel,
-		BaseImagePath: cfg.baseImagePath,
-		SSHUser:       cfg.sshUser,
-		SSHKeyPath:    cfg.sshKeyPath,
-		BootTimeout:   2 * time.Minute,
+		Binary:         cfg.binary,
+		Accel:          cfg.accel,
+		BaseImagePath:  cfg.baseImagePath,
+		SSHUser:        cfg.sshUser,
+		SSHKeyPath:     cfg.sshKeyPath,
+		SSHHostKeyPath: cfg.sshHostKeyPath,
+		BootTimeout:    2 * time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
@@ -266,6 +268,7 @@ type hostIntegrationConfig struct {
 	baseImagePath string
 	sshUser       string
 	sshKeyPath    string
+	sshHostKeyPath string
 }
 
 func requireHostIntegrationConfig(t *testing.T) hostIntegrationConfig {
@@ -276,9 +279,10 @@ func requireHostIntegrationConfig(t *testing.T) hostIntegrationConfig {
 		baseImagePath: firstEnv("SANDBOX_QEMU_BASE_IMAGE_PATH", "OR3_QEMU_BASE_IMAGE_PATH"),
 		sshUser:       firstEnv("SANDBOX_QEMU_SSH_USER", "OR3_QEMU_SSH_USER"),
 		sshKeyPath:    firstEnv("SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH", "OR3_QEMU_SSH_PRIVATE_KEY_PATH"),
+		sshHostKeyPath: firstEnv("SANDBOX_QEMU_SSH_HOST_KEY_PATH", "OR3_QEMU_SSH_HOST_KEY_PATH"),
 	}
-	if cfg.binary == "" || cfg.baseImagePath == "" || cfg.sshUser == "" || cfg.sshKeyPath == "" {
-		t.Skip("host QEMU coverage requires SANDBOX_QEMU_BINARY, SANDBOX_QEMU_BASE_IMAGE_PATH, SANDBOX_QEMU_SSH_USER, and SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH")
+	if cfg.binary == "" || cfg.baseImagePath == "" || cfg.sshUser == "" || cfg.sshKeyPath == "" || cfg.sshHostKeyPath == "" {
+		t.Skip("host QEMU coverage requires SANDBOX_QEMU_BINARY, SANDBOX_QEMU_BASE_IMAGE_PATH, SANDBOX_QEMU_SSH_USER, SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH, and SANDBOX_QEMU_SSH_HOST_KEY_PATH")
 	}
 	if cfg.accel == "" {
 		cfg.accel = "auto"

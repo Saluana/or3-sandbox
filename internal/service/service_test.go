@@ -183,6 +183,12 @@ func TestLifecycleRefreshStorageUsesRuntimeMeasurement(t *testing.T) {
 	}
 	assertActualStorage(t, store, tenantA.ID, 325)
 
+	runtime.storageUsage = model.StorageUsage{RootfsBytes: 95, WorkspaceBytes: 200, CacheBytes: 30, SnapshotBytes: 0}
+	if _, err := svc.StopSandbox(ctx, tenantA.ID, sandbox.ID, false); err != nil {
+		t.Fatalf("stop sandbox before snapshot: %v", err)
+	}
+	assertActualStorage(t, store, tenantA.ID, 325)
+
 	runtime.storageUsage = model.StorageUsage{RootfsBytes: 95, WorkspaceBytes: 200, CacheBytes: 30, SnapshotBytes: 75}
 	snapshot, err := svc.CreateSnapshot(ctx, tenantA.ID, sandbox.ID, model.CreateSnapshotRequest{Name: "snap"})
 	if err != nil {
@@ -193,6 +199,13 @@ func TestLifecycleRefreshStorageUsesRuntimeMeasurement(t *testing.T) {
 	runtime.storageUsage = model.StorageUsage{RootfsBytes: 110, WorkspaceBytes: 210, CacheBytes: 30, SnapshotBytes: 75}
 	if _, err := svc.RestoreSnapshot(ctx, tenantA.ID, snapshot.ID, model.RestoreSnapshotRequest{TargetSandboxID: sandbox.ID}); err != nil {
 		t.Fatalf("restore snapshot: %v", err)
+	}
+	restored, err := svc.GetSandbox(ctx, tenantA.ID, sandbox.ID)
+	if err != nil {
+		t.Fatalf("get restored sandbox: %v", err)
+	}
+	if restored.BaseImageRef != svc.cfg.QEMUBaseImagePath {
+		t.Fatalf("expected restored qemu sandbox to keep canonical base image ref, got %q", restored.BaseImageRef)
 	}
 	assertActualStorage(t, store, tenantA.ID, 425)
 
@@ -305,6 +318,93 @@ func TestCreateSnapshotMarksErrorOnPartialFailure(t *testing.T) {
 	}
 	if stored.Status != model.SnapshotStatusError {
 		t.Fatalf("expected snapshot error status, got %#v", stored)
+	}
+}
+
+func TestQEMUCreateRejectsUnallowedGuestImagePath(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	rogueImage := filepath.Join(t.TempDir(), "rogue.qcow2")
+	if err := os.WriteFile(rogueImage, []byte("qcow2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  rogueImage,
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err == nil || !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("expected qemu image allowlist rejection, got %v", err)
+	}
+}
+
+func TestFailedQEMUCreateRollsBackSandboxAndStorage(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	runtime.createErr = errors.New("guest image broken")
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err == nil {
+		t.Fatal("expected create to fail")
+	}
+	usage, err := store.TenantUsage(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("tenant usage: %v", err)
+	}
+	if usage.Sandboxes != 0 || usage.RequestedStorage != 0 {
+		t.Fatalf("expected failed create rollback to release quota usage, got %+v", usage)
+	}
+	entries, err := svc.ListSandboxes(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list sandboxes: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Status != model.SandboxStatusDeleted {
+		t.Fatalf("expected rolled back sandbox to be recorded as deleted, got %+v", entries)
+	}
+	if _, err := os.Stat(filepath.Join(svc.cfg.StorageRoot, entries[0].ID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected rolled back storage to be removed, got %v", err)
+	}
+}
+
+func TestQEMUSnapshotRequiresStoppedSandbox(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	runtime.startState = model.RuntimeState{RuntimeID: "rt-running", Status: model.SandboxStatusRunning, Running: true}
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	if _, err := svc.CreateSnapshot(ctx, tenantA.ID, sandbox.ID, model.CreateSnapshotRequest{Name: "live"}); err == nil || !strings.Contains(err.Error(), "stopped") {
+		t.Fatalf("expected qemu stopped-snapshot guard, got %v", err)
 	}
 }
 
@@ -524,7 +624,7 @@ func TestStartSandboxPolicyDenialPreservesStoppedState(t *testing.T) {
 func TestCreateSandboxPolicyAllowsAndDeniesImages(t *testing.T) {
 	ctx := context.Background()
 	runtime := newStubRuntime()
-	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
 	svc.cfg.PolicyAllowedImages = []string{"ghcr.io/acme/*", "guest-base.qcow2"}
 
 	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
@@ -557,6 +657,41 @@ func TestCreateSandboxPolicyAllowsAndDeniesImages(t *testing.T) {
 	}
 	if len(events) == 0 || events[len(events)-1].Action != "policy.create" || events[len(events)-1].Outcome != "denied" {
 		t.Fatalf("expected policy denial audit event, got %+v", events)
+	}
+}
+
+func TestQEMULifecyclePolicyAllowsLegacyDefaultImageAlias(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	runtime.startState = model.RuntimeState{RuntimeID: "rt-start", Status: model.SandboxStatusRunning, Running: true}
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	sandbox.BaseImageRef = svc.cfg.BaseImageRef
+	sandbox.UpdatedAt = time.Now().UTC()
+	if err := store.UpdateSandboxState(ctx, sandbox); err != nil {
+		t.Fatalf("persist legacy image ref: %v", err)
+	}
+
+	started, err := svc.StartSandbox(ctx, tenantA.ID, sandbox.ID, quota)
+	if err != nil {
+		t.Fatalf("start sandbox with legacy qemu image alias: %v", err)
+	}
+	if started.Status != model.SandboxStatusRunning {
+		t.Fatalf("unexpected sandbox after start: %+v", started)
 	}
 }
 
@@ -1065,6 +1200,15 @@ func newServiceHarness(t *testing.T, runtime model.RuntimeManager, backend strin
 		DefaultNetworkMode:   model.NetworkModeInternetDisabled,
 		DefaultAllowTunnels:  false,
 		OperatorHost:         "http://operator.invalid",
+	}
+	if backend == "qemu" {
+		qemuImage := filepath.Join(root, "guest-base.qcow2")
+		if err := os.WriteFile(qemuImage, []byte("qcow2"), 0o644); err != nil {
+			t.Fatalf("write qemu guest image fixture: %v", err)
+		}
+		cfg.BaseImageRef = "guest-base.qcow2"
+		cfg.QEMUBaseImagePath = qemuImage
+		cfg.QEMUAllowedBaseImagePaths = []string{qemuImage}
 	}
 	sqlDB, err := db.Open(context.Background(), cfg.DatabasePath)
 	if err != nil {

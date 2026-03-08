@@ -57,6 +57,7 @@ func New(log *slog.Logger, svc *service.Service, cfg config.Config) http.Handler
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", router.health)
 	mux.HandleFunc("/metrics", router.handleMetrics)
+	mux.HandleFunc("/v1/runtime/info", router.handleRuntimeInfo)
 	mux.HandleFunc("/v1/runtime/health", router.handleRuntimeHealth)
 	mux.HandleFunc("/v1/runtime/capacity", router.handleRuntimeCapacity)
 	mux.HandleFunc("/v1/quotas/me", router.handleQuota)
@@ -117,6 +118,20 @@ func (rt *Router) handleRuntimeHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, health)
+}
+
+func (rt *Router) handleRuntimeInfo(w http.ResponseWriter, r *http.Request) {
+	tenantCtx, ok := auth.FromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	_ = tenantCtx
+	writeJSON(w, http.StatusOK, model.RuntimeInfo{Backend: rt.service.RuntimeBackend()})
 }
 
 func (rt *Router) handleRuntimeCapacity(w http.ResponseWriter, r *http.Request) {

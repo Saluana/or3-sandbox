@@ -119,18 +119,44 @@ func TestWaitForReadyTimesOut(t *testing.T) {
 	}
 }
 
+func TestValidateHostRequiresPSCommand(t *testing.T) {
+	opts := Options{
+		Binary:         "qemu-system-x86_64",
+		BaseImagePath:  "/images/guest.qcow2",
+		SSHUser:        "sandbox",
+		SSHKeyPath:     "/keys/id_ed25519",
+		SSHHostKeyPath: "/keys/guest_host_ed25519.pub",
+		SSHBinary:      "ssh",
+		SCPBinary:      "scp",
+		BootTimeout:    time.Minute,
+	}
+	err := validateHost(opts, "qemu-img", "", hostProbe{
+		commandExists: func(name string) error {
+			if name == "ps" {
+				return errors.New("missing")
+			}
+			return nil
+		},
+		fileReadable: func(string) error { return nil },
+	})
+	if err == nil || !strings.Contains(err.Error(), `"ps"`) {
+		t.Fatalf("expected ps validation failure, got %v", err)
+	}
+}
+
 func TestCreateAndSnapshotArtifacts(t *testing.T) {
 	base := t.TempDir()
 	rootfs := filepath.Join(base, "rootfs")
 	workspace := filepath.Join(base, "workspace")
 	spec := model.SandboxSpec{
 		SandboxID:     "sbx-test",
+		BaseImageRef:  writeTestQEMUBaseImage(t),
 		StorageRoot:   rootfs,
 		WorkspaceRoot: workspace,
 		CacheRoot:     filepath.Join(base, "cache"),
 		DiskLimitMB:   16,
 	}
-	r := &Runtime{}
+	r := &Runtime{sshHostKeyPath: writeTestQEMUHostKey(t)}
 	state, err := r.Create(context.Background(), spec)
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
@@ -449,13 +475,15 @@ func TestBaseSSHArgsIncludeTTYAndIdentityOptions(t *testing.T) {
 		sshUser:    "ubuntu",
 		sshKeyPath: "/tmp/id_ed25519",
 	}
-	target := sshTarget{port: 2222, knownHostsPath: "/tmp/known_hosts"}
+	target := sshTarget{port: 2222, knownHostsPath: "/tmp/known_hosts", hostKeyAlias: "or3-qemu-sbx-test"}
 
 	nonTTY := strings.Join(r.baseSSHArgs(target, false), " ")
 	for _, snippet := range []string{
 		"-o BatchMode=yes",
 		"-o IdentitiesOnly=yes",
+		"-o StrictHostKeyChecking=yes",
 		"-o UserKnownHostsFile=/tmp/known_hosts",
+		"-o HostKeyAlias=or3-qemu-sbx-test",
 		"-i /tmp/id_ed25519",
 		"-p 2222",
 		"-T",
@@ -488,6 +516,37 @@ func TestSplitDiskBytesUsesEvenFirstPassPolicy(t *testing.T) {
 	if delta > 1024*1024 {
 		t.Fatalf("expected near-even split, delta=%d", delta)
 	}
+}
+
+func TestWorkspaceGuestPathRejectsEscapes(t *testing.T) {
+	if _, err := workspaceGuestPath("../../etc/passwd"); err == nil {
+		t.Fatal("expected workspace escape rejection")
+	}
+	target, err := workspaceGuestPath("nested/file.txt")
+	if err != nil {
+		t.Fatalf("unexpected workspace guest path error: %v", err)
+	}
+	if target != "/workspace/nested/file.txt" {
+		t.Fatalf("unexpected workspace guest path %q", target)
+	}
+}
+
+func writeTestQEMUBaseImage(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "base.qcow2")
+	if err := os.WriteFile(path, []byte("qcow2"), 0o644); err != nil {
+		t.Fatalf("write test qemu base image: %v", err)
+	}
+	return path
+}
+
+func writeTestQEMUHostKey(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "guest_host_ed25519.pub")
+	if err := os.WriteFile(path, []byte("ssh-ed25519 AAAATESTHOSTKEY or3-test"), 0o644); err != nil {
+		t.Fatalf("write test qemu host key: %v", err)
+	}
+	return path
 }
 
 func TestQemuSizePreservesExactBytes(t *testing.T) {

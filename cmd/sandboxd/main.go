@@ -91,12 +91,13 @@ func buildRuntime(cfg config.Config) (model.RuntimeManager, error) {
 		return runtimedocker.New(), nil
 	case "qemu":
 		return runtimeqemu.New(runtimeqemu.Options{
-			Binary:        cfg.QEMUBinary,
-			Accel:         cfg.QEMUAccel,
-			BaseImagePath: cfg.QEMUBaseImagePath,
-			SSHUser:       cfg.QEMUSSHUser,
-			SSHKeyPath:    cfg.QEMUSSHPrivateKeyPath,
-			BootTimeout:   cfg.QEMUBootTimeout,
+			Binary:         cfg.QEMUBinary,
+			Accel:          cfg.QEMUAccel,
+			BaseImagePath:  cfg.QEMUBaseImagePath,
+			SSHUser:        cfg.QEMUSSHUser,
+			SSHKeyPath:     cfg.QEMUSSHPrivateKeyPath,
+			SSHHostKeyPath: cfg.QEMUSSHHostKeyPath,
+			BootTimeout:    cfg.QEMUBootTimeout,
 		})
 	default:
 		return nil, errors.New("unsupported runtime backend")

@@ -11,6 +11,7 @@ Authorization: Bearer <token>
 ## Health and status
 
 - `GET /healthz` — basic health check
+- `GET /v1/runtime/info` — authenticated runtime backend summary
 - `GET /v1/runtime/health` — runtime and sandbox health view
 - `GET /v1/runtime/capacity` — operator capacity summary with quota pressure
 - `GET /v1/quotas/me` — current tenant quota and usage

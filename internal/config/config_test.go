@@ -25,13 +25,15 @@ func TestValidateRuntimeConfigDockerRequiresTrustedFlag(t *testing.T) {
 
 func TestValidateRuntimeConfigQEMUOnLinux(t *testing.T) {
 	cfg := Config{
-		RuntimeBackend:        "qemu",
-		QEMUBinary:            "qemu-system-x86_64",
-		QEMUAccel:             "auto",
-		QEMUBaseImagePath:     "/images/base.qcow2",
-		QEMUSSHUser:           "sandbox",
-		QEMUSSHPrivateKeyPath: "/keys/id_ed25519",
-		QEMUBootTimeout:       90 * time.Second,
+		RuntimeBackend:          "qemu",
+		QEMUBinary:              "qemu-system-x86_64",
+		QEMUAccel:               "auto",
+		QEMUBaseImagePath:       "/images/base.qcow2",
+		QEMUSSHUser:             "sandbox",
+		QEMUSSHPrivateKeyPath:   "/keys/id_ed25519",
+		QEMUSSHHostKeyPath:      "/keys/guest_host_ed25519.pub",
+		QEMUBootTimeout:         90 * time.Second,
+		QEMUAllowedBaseImagePaths: []string{"/images/extra.qcow2"},
 	}
 	probe := runtimeValidationProbe{
 		goos:          "linux",
@@ -53,6 +55,7 @@ func TestValidateRuntimeConfigQEMUOnDarwin(t *testing.T) {
 		QEMUBaseImagePath:     "/images/base.qcow2",
 		QEMUSSHUser:           "sandbox",
 		QEMUSSHPrivateKeyPath: "/keys/id_ed25519",
+		QEMUSSHHostKeyPath:    "/keys/guest_host_ed25519.pub",
 		QEMUBootTimeout:       time.Minute,
 	}
 	probe := runtimeValidationProbe{
@@ -75,6 +78,7 @@ func TestValidateRuntimeConfigQEMUMissingPrerequisites(t *testing.T) {
 		QEMUBaseImagePath:     "/images/base.qcow2",
 		QEMUSSHUser:           "sandbox",
 		QEMUSSHPrivateKeyPath: "/keys/id_ed25519",
+		QEMUSSHHostKeyPath:    "/keys/guest_host_ed25519.pub",
 		QEMUBootTimeout:       time.Minute,
 	}
 	probe := runtimeValidationProbe{
@@ -242,6 +246,7 @@ func TestValidateRejectsFractionalQEMUDefaultCPU(t *testing.T) {
 		QEMUBaseImagePath:     "/images/base.qcow2",
 		QEMUSSHUser:           "sandbox",
 		QEMUSSHPrivateKeyPath: "/keys/id_ed25519",
+		QEMUSSHHostKeyPath:    "/keys/guest_host_ed25519.pub",
 		QEMUBootTimeout:       time.Minute,
 	}
 
@@ -258,6 +263,17 @@ func TestValidateRejectsFractionalQEMUDefaultCPU(t *testing.T) {
 	err = cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "whole-core default cpu") {
 		t.Fatalf("expected fractional qemu default rejection, got %v", err)
+	}
+}
+
+func TestEffectiveQEMUAllowedBaseImagePathsIncludesDefaultAndDeduplicates(t *testing.T) {
+	cfg := Config{
+		QEMUBaseImagePath:         "/images/base.qcow2",
+		QEMUAllowedBaseImagePaths: []string{"/images/extra.qcow2", "/images/base.qcow2", " /images/extra.qcow2 "},
+	}
+	got := cfg.EffectiveQEMUAllowedBaseImagePaths()
+	if len(got) != 2 || got[0] != "/images/extra.qcow2" || got[1] != "/images/base.qcow2" {
+		t.Fatalf("unexpected allowed qemu images %#v", got)
 	}
 }
 

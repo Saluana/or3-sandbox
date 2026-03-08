@@ -279,8 +279,10 @@ func newPresetQEMUHarness(t *testing.T) *presetQEMUHarness {
 		QEMUBinary:            qemuCfg.binary,
 		QEMUAccel:             qemuCfg.accel,
 		QEMUBaseImagePath:     qemuCfg.baseImagePath,
+		QEMUAllowedBaseImagePaths: []string{qemuCfg.baseImagePath},
 		QEMUSSHUser:           qemuCfg.sshUser,
 		QEMUSSHPrivateKeyPath: qemuCfg.sshKeyPath,
+		QEMUSSHHostKeyPath:    qemuCfg.sshHostKeyPath,
 		QEMUBootTimeout:       2 * time.Minute,
 		DefaultCPULimit:       model.CPUCores(1),
 		DefaultMemoryLimitMB:  1024,
@@ -308,7 +310,7 @@ func newPresetQEMUHarness(t *testing.T) *presetQEMUHarness {
 	if err := store.SeedTenants(context.Background(), cfg.Tenants, cfg.DefaultQuota); err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := runtimeqemu.New(runtimeqemu.Options{Binary: cfg.QEMUBinary, Accel: cfg.QEMUAccel, BaseImagePath: cfg.QEMUBaseImagePath, SSHUser: cfg.QEMUSSHUser, SSHKeyPath: cfg.QEMUSSHPrivateKeyPath, BootTimeout: cfg.QEMUBootTimeout})
+	runtime, err := runtimeqemu.New(runtimeqemu.Options{Binary: cfg.QEMUBinary, Accel: cfg.QEMUAccel, BaseImagePath: cfg.QEMUBaseImagePath, SSHUser: cfg.QEMUSSHUser, SSHKeyPath: cfg.QEMUSSHPrivateKeyPath, SSHHostKeyPath: cfg.QEMUSSHHostKeyPath, BootTimeout: cfg.QEMUBootTimeout})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,6 +333,7 @@ type presetQEMUConfig struct {
 	baseImagePath string
 	sshUser       string
 	sshKeyPath    string
+	sshHostKeyPath string
 }
 
 func requirePresetQEMUConfig(t *testing.T) presetQEMUConfig {
@@ -341,9 +344,10 @@ func requirePresetQEMUConfig(t *testing.T) presetQEMUConfig {
 		baseImagePath: firstPresetEnv("SANDBOX_QEMU_BASE_IMAGE_PATH", "OR3_QEMU_BASE_IMAGE_PATH"),
 		sshUser:       firstPresetEnv("SANDBOX_QEMU_SSH_USER", "OR3_QEMU_SSH_USER"),
 		sshKeyPath:    firstPresetEnv("SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH", "OR3_QEMU_SSH_PRIVATE_KEY_PATH"),
+		sshHostKeyPath: firstPresetEnv("SANDBOX_QEMU_SSH_HOST_KEY_PATH", "OR3_QEMU_SSH_HOST_KEY_PATH"),
 	}
-	if cfg.binary == "" || cfg.baseImagePath == "" || cfg.sshUser == "" || cfg.sshKeyPath == "" {
-		t.Skip("qemu preset integration requires SANDBOX_QEMU_BINARY, SANDBOX_QEMU_BASE_IMAGE_PATH, SANDBOX_QEMU_SSH_USER, and SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH")
+	if cfg.binary == "" || cfg.baseImagePath == "" || cfg.sshUser == "" || cfg.sshKeyPath == "" || cfg.sshHostKeyPath == "" {
+		t.Skip("qemu preset integration requires SANDBOX_QEMU_BINARY, SANDBOX_QEMU_BASE_IMAGE_PATH, SANDBOX_QEMU_SSH_USER, SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH, and SANDBOX_QEMU_SSH_HOST_KEY_PATH")
 	}
 	if cfg.accel == "" {
 		cfg.accel = "auto"

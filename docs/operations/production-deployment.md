@@ -19,6 +19,7 @@ The production host needs:
 - the QEMU system binary and `qemu-img`
 - the prepared guest base image referenced by `SANDBOX_QEMU_BASE_IMAGE_PATH`
 - an SSH private key that matches the guest image bootstrap user
+- the matching guest SSH host public key referenced by `SANDBOX_QEMU_SSH_HOST_KEY_PATH`
 - enough disk for the SQLite database, sandbox storage root, snapshot root, and optional export bundles
 - enough RAM for the daemon plus the guest memory assigned to each concurrent QEMU sandbox
 
@@ -46,6 +47,7 @@ Recommended layout:
   tls.crt         # if using in-process TLS
   tls.key         # if using in-process TLS
   qemu-ssh-key
+  qemu-ssh-host-key.pub
 ```
 
 Map those paths to:
@@ -62,6 +64,7 @@ Use file-backed secrets for production:
 - `SANDBOX_AUTH_JWT_SECRET_PATHS=/run/secrets/or3-sandbox/jwt-hmac`
 - `SANDBOX_TUNNEL_SIGNING_KEY_PATH=/run/secrets/or3-sandbox/tunnel-signing-key`
 - `SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH=/run/secrets/or3-sandbox/qemu-ssh-key`
+- `SANDBOX_QEMU_SSH_HOST_KEY_PATH=/run/secrets/or3-sandbox/qemu-ssh-host-key.pub`
 - `SANDBOX_TLS_CERT_PATH` and `SANDBOX_TLS_KEY_PATH` if TLS terminates inside `sandboxd`
 
 Do not place raw secrets in command lines, shell history, or ad hoc logs.
@@ -87,6 +90,7 @@ export SANDBOX_QEMU_ACCEL=auto
 export SANDBOX_QEMU_BASE_IMAGE_PATH=/var/lib/or3-images/base.qcow2
 export SANDBOX_QEMU_SSH_USER=or3
 export SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH=/run/secrets/or3-sandbox/qemu-ssh-key
+export SANDBOX_QEMU_SSH_HOST_KEY_PATH=/run/secrets/or3-sandbox/qemu-ssh-host-key.pub
 ```
 
 Transport options:
@@ -99,7 +103,7 @@ Transport options:
 Bring the system up in this order:
 
 1. Ensure the persistent directories exist with correct ownership.
-2. Ensure the QEMU binary, guest image, SSH key, and auth secrets are present on disk.
+2. Ensure the QEMU binary, guest image, guest SSH host key, SSH private key, and auth secrets are present on disk.
 3. Start `sandboxd`.
 4. Wait for `GET /healthz` to return `{"ok":true}`.
 5. Confirm runtime posture with `sandboxctl runtime-health` or `GET /v1/runtime/health`.

@@ -11,7 +11,7 @@ import (
 )
 
 func (s *Service) enforceCreatePolicy(ctx context.Context, tenantID string, req model.CreateSandboxRequest) error {
-	if !s.imageAllowed(req.BaseImageRef) {
+	if !s.runtimeImageAllowed(s.cfg.RuntimeBackend, req.BaseImageRef) {
 		message := fmt.Sprintf("image %q is not allowed by policy", req.BaseImageRef)
 		s.recordAudit(ctx, tenantID, "", "policy.create", req.BaseImageRef, "denied", message)
 		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
@@ -37,7 +37,7 @@ func (s *Service) enforceLifecyclePolicy(ctx context.Context, sandbox model.Sand
 			return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
 		}
 	}
-	if !s.imageAllowed(sandbox.BaseImageRef) {
+	if !s.runtimeImageAllowed(sandbox.RuntimeBackend, sandbox.BaseImageRef) {
 		message := fmt.Sprintf("sandbox image %q is no longer allowed by policy", sandbox.BaseImageRef)
 		s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.BaseImageRef, "denied", message)
 		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
@@ -83,4 +83,17 @@ func (s *Service) imageAllowed(imageRef string) bool {
 		}
 	}
 	return false
+}
+
+func (s *Service) runtimeImageAllowed(runtimeBackend, imageRef string) bool {
+	if runtimeBackend == "qemu" {
+		normalized := s.normalizeQEMUBaseImageRef(imageRef)
+		for _, allowed := range s.cfg.EffectiveQEMUAllowedBaseImagePaths() {
+			if normalized == allowed {
+				return true
+			}
+		}
+		return false
+	}
+	return s.imageAllowed(imageRef)
 }

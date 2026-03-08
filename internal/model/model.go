@@ -45,6 +45,7 @@ type ExecutionStatus string
 
 const (
 	ExecutionStatusRunning   ExecutionStatus = "running"
+	ExecutionStatusDetached  ExecutionStatus = "detached"
 	ExecutionStatusSucceeded ExecutionStatus = "succeeded"
 	ExecutionStatusFailed    ExecutionStatus = "failed"
 	ExecutionStatusTimedOut  ExecutionStatus = "timed_out"
@@ -212,6 +213,10 @@ type RuntimeHealth struct {
 	CheckedAt    time.Time              `json:"checked_at"`
 	StatusCounts map[string]int         `json:"status_counts,omitempty"`
 	Sandboxes    []RuntimeSandboxHealth `json:"sandboxes"`
+}
+
+type RuntimeInfo struct {
+	Backend string `json:"backend"`
 }
 
 type RuntimeSandboxHealth struct {

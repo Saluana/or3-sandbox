@@ -18,8 +18,9 @@ Instead it reads operator-provided paths:
 
 - `SANDBOX_QEMU_SSH_USER`
 - `SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH`
+- `SANDBOX_QEMU_SSH_HOST_KEY_PATH`
 
-The build and smoke scripts in this directory expect the matching public key path to be provided on the host as well.
+The build and smoke scripts in this directory expect the matching public key path to be provided on the host as well. `build-base-image.sh` now also captures the guest SSH host public key so `sandboxd` can pin the guest identity instead of trusting first contact on localhost.
 
 ## What the prepared image contains
 
@@ -71,6 +72,7 @@ The current `qemu` runtime assumes the operator-provided base image already supp
 
 - the configured SSH user
 - the configured authorized SSH key
+- a stable SSH host key whose public half is provided to `sandboxd`
 - successful boot to an SSH-reachable state
 - the readiness marker path created by guest bootstrap
 

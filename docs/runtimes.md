@@ -64,13 +64,13 @@ That setting is the project's way of saying:
 
 ### Why it exists
 
-The QEMU runtime is the production-oriented direction.
+The QEMU runtime is the production-oriented direction in this repo.
 
-It is the stronger isolation option when security matters more than density.
+It is the higher-isolation option when security matters more than density.
 
 Instead of a container, each sandbox becomes a guest machine.
 
-That gives a stronger isolation story than Docker's shared-kernel model.
+That gives a clearer isolation boundary than Docker's shared-kernel model, but it still needs host-specific verification before you call a deployment production-ready.
 
 ### How it works
 
@@ -79,7 +79,7 @@ The QEMU backend:
 - prepares a writable root disk
 - prepares a separate workspace disk
 - boots a guest image with QEMU
-- waits for SSH to become reachable
+- waits for SSH to become reachable using a pinned guest host key
 - checks for a readiness marker at `/var/lib/or3/bootstrap.ready`
 - runs commands through SSH
 - manages guest files through the guest boundary
@@ -135,7 +135,7 @@ Choose `qemu` if:
 
 - root filesystem lives in a writable disk image
 - workspace lives in a separate disk image
-- snapshots copy both disk artifacts
+- snapshots copy both disk artifacts, but the sandbox must be stopped first
 - restart reconciliation keeps incomplete snapshots conservative instead of pretending they finished cleanly
 
 ## Network behavior

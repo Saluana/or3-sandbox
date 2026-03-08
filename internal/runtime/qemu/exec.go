@@ -37,7 +37,7 @@ func (r *Runtime) Exec(ctx context.Context, sandbox model.Sandbox, req model.Exe
 		return &qemuExecHandle{
 			resultCh: closedResult(model.ExecResult{
 				ExitCode:    0,
-				Status:      model.ExecutionStatusRunning,
+				Status:      model.ExecutionStatusDetached,
 				StartedAt:   now,
 				CompletedAt: now,
 			}),

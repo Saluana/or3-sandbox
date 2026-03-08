@@ -14,6 +14,7 @@ require_cmd() {
 
 require_cmd cloud-localds
 require_cmd ssh
+require_cmd ssh-keyscan
 QEMU_BINARY="${QEMU_BINARY:-qemu-system-x86_64}"
 QEMU_IMG_BINARY="${QEMU_IMG_BINARY:-qemu-img}"
 QEMU_ACCEL="${QEMU_ACCEL:-kvm}"
@@ -25,6 +26,7 @@ require_cmd "$QEMU_IMG_BINARY"
 BASE_IMAGE_URL="${BASE_IMAGE_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
 DOWNLOAD_PATH="${DOWNLOAD_PATH:-$ROOT_DIR/.cache/base-cloudimg.qcow2}"
 OUTPUT_IMAGE="${OUTPUT_IMAGE:-$ROOT_DIR/or3-guest-base.qcow2}"
+SSH_HOST_PUBLIC_KEY_OUTPUT="${SSH_HOST_PUBLIC_KEY_OUTPUT:-$OUTPUT_IMAGE.ssh-host-key.pub}"
 SSH_USER="${SSH_USER:-sandbox}"
 SSH_PUBLIC_KEY_PATH="${SSH_PUBLIC_KEY_PATH:?set SSH_PUBLIC_KEY_PATH to the operator public key path}"
 WORK_DIR="$(mktemp -d)"
@@ -98,6 +100,11 @@ for _ in $(seq 1 90); do
     "$SSH_USER@127.0.0.1" \
     sh -lc 'test -f /var/lib/or3/bootstrap.ready'
   then
+    ssh-keyscan -p "$SSH_PORT" -T 5 127.0.0.1 2>/dev/null | awk 'NF >= 3 { print $2 " " $3; exit }' > "$SSH_HOST_PUBLIC_KEY_OUTPUT"
+    if [ ! -s "$SSH_HOST_PUBLIC_KEY_OUTPUT" ]; then
+      echo "failed to capture guest SSH host public key" >&2
+      exit 1
+    fi
     ssh \
       -o BatchMode=yes \
       -o IdentitiesOnly=yes \
@@ -126,8 +133,12 @@ cat <<EOF
 Prepared guest base image:
   $OUTPUT_IMAGE
 
+Guest SSH host public key:
+  $SSH_HOST_PUBLIC_KEY_OUTPUT
+
 The image has been bootstrapped once with cloud-init and the guest bootstrap service.
 
 Next step:
   Run images/guest/smoke-ssh.sh against this image before using it with SANDBOX_QEMU_BASE_IMAGE_PATH.
+  Then export SANDBOX_QEMU_SSH_HOST_KEY_PATH=$SSH_HOST_PUBLIC_KEY_OUTPUT for sandboxd.
 EOF

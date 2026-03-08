@@ -14,7 +14,10 @@ import (
 )
 
 func (r *Runtime) ReadWorkspaceFile(ctx context.Context, sandbox model.Sandbox, relativePath string) (model.FileReadResponse, error) {
-	target := workspaceGuestPath(relativePath)
+	target, err := workspaceGuestPath(relativePath)
+	if err != nil {
+		return model.FileReadResponse{}, err
+	}
 	args := append(r.baseSSHArgs(r.sshTarget(sandbox, layoutForSandbox(sandbox)), false), "sh", "-lc", "cat "+shellQuote(target))
 	output, err := r.runCommand(ctx, r.sshBinary, args...)
 	if err != nil {
@@ -29,7 +32,10 @@ func (r *Runtime) ReadWorkspaceFile(ctx context.Context, sandbox model.Sandbox, 
 }
 
 func (r *Runtime) ReadWorkspaceFileBytes(ctx context.Context, sandbox model.Sandbox, relativePath string) ([]byte, error) {
-	target := workspaceGuestPath(relativePath)
+	target, err := workspaceGuestPath(relativePath)
+	if err != nil {
+		return nil, err
+	}
 	args := append(r.baseSSHArgs(r.sshTarget(sandbox, layoutForSandbox(sandbox)), false), "sh", "-lc", "cat "+shellQuote(target))
 	return r.runCommand(ctx, r.sshBinary, args...)
 }
@@ -43,7 +49,10 @@ func (r *Runtime) WriteWorkspaceFileBytes(ctx context.Context, sandbox model.San
 }
 
 func (r *Runtime) writeWorkspaceFileBytes(ctx context.Context, sandbox model.Sandbox, relativePath string, content io.Reader) error {
-	target := workspaceGuestPath(relativePath)
+	target, err := workspaceGuestPath(relativePath)
+	if err != nil {
+		return err
+	}
 	command := fmt.Sprintf("mkdir -p %s && cat > %s", shellQuote(path.Dir(target)), shellQuote(target))
 	args := append(r.baseSSHArgs(r.sshTarget(sandbox, layoutForSandbox(sandbox)), false), "sh", "-lc", command)
 	cmd := exec.CommandContext(ctx, r.sshBinary, args...)
@@ -56,16 +65,22 @@ func (r *Runtime) writeWorkspaceFileBytes(ctx context.Context, sandbox model.San
 }
 
 func (r *Runtime) DeleteWorkspacePath(ctx context.Context, sandbox model.Sandbox, relativePath string) error {
-	target := workspaceGuestPath(relativePath)
+	target, err := workspaceGuestPath(relativePath)
+	if err != nil {
+		return err
+	}
 	args := append(r.baseSSHArgs(r.sshTarget(sandbox, layoutForSandbox(sandbox)), false), "sh", "-lc", "rm -rf "+shellQuote(target))
-	_, err := r.runCommand(ctx, r.sshBinary, args...)
+	_, err = r.runCommand(ctx, r.sshBinary, args...)
 	return err
 }
 
 func (r *Runtime) MkdirWorkspace(ctx context.Context, sandbox model.Sandbox, relativePath string) error {
-	target := workspaceGuestPath(relativePath)
+	target, err := workspaceGuestPath(relativePath)
+	if err != nil {
+		return err
+	}
 	args := append(r.baseSSHArgs(r.sshTarget(sandbox, layoutForSandbox(sandbox)), false), "sh", "-lc", "mkdir -p "+shellQuote(target))
-	_, err := r.runCommand(ctx, r.sshBinary, args...)
+	_, err = r.runCommand(ctx, r.sshBinary, args...)
 	return err
 }
 
@@ -96,9 +111,13 @@ func (r *Runtime) MeasureStorage(ctx context.Context, sandbox model.Sandbox) (mo
 	}, nil
 }
 
-func workspaceGuestPath(relativePath string) string {
+func workspaceGuestPath(relativePath string) (string, error) {
 	if strings.TrimSpace(relativePath) == "" {
-		return "/workspace"
+		return "/workspace", nil
 	}
-	return path.Join("/workspace", filepath.ToSlash(relativePath))
+	clean := path.Clean("/workspace/" + filepath.ToSlash(relativePath))
+	if clean != "/workspace" && !strings.HasPrefix(clean, "/workspace/") {
+		return "", fmt.Errorf("path escapes workspace")
+	}
+	return clean, nil
 }

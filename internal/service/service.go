@@ -63,10 +63,12 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 	if err := validateCreate(req); err != nil {
 		return model.Sandbox{}, err
 	}
-	if err := s.enforceCreatePolicy(ctx, tenant.ID, req); err != nil {
+	var err error
+	req, err = s.validateRuntimeCreate(req)
+	if err != nil {
 		return model.Sandbox{}, err
 	}
-	if err := s.validateRuntimeCreate(req); err != nil {
+	if err := s.enforceCreatePolicy(ctx, tenant.ID, req); err != nil {
 		return model.Sandbox{}, err
 	}
 	if err := s.checkQuota(ctx, tenant.ID, quota, req); err != nil {
@@ -109,6 +111,7 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		LastActiveAt:   now,
 	}
 	if err := s.store.CreateSandbox(ctx, sandbox); err != nil {
+		_ = os.RemoveAll(filepath.Join(s.cfg.StorageRoot, id))
 		return model.Sandbox{}, err
 	}
 	spec := model.SandboxSpec{
@@ -127,30 +130,12 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 	}
 	state, err := s.runtime.Create(ctx, spec)
 	if err != nil {
-		sandbox.Status = model.SandboxStatusError
-		sandbox.RuntimeStatus = string(model.SandboxStatusError)
-		sandbox.LastRuntimeError = err.Error()
-		sandbox.UpdatedAt = time.Now().UTC()
-		_ = s.store.UpdateSandboxState(ctx, sandbox)
-		s.recordAudit(ctx, tenant.ID, sandbox.ID, "sandbox.create", sandbox.ID, "error", auditDetail(
-			auditKV("stage", "runtime_create"),
-			auditKV("start_requested", req.Start),
-		), "error", err)
-		return sandbox, err
+		return model.Sandbox{}, s.rollbackFailedCreate(ctx, tenant.ID, sandbox, "runtime_create", req.Start, err)
 	}
 	if req.Start {
 		state, err = s.runtime.Start(ctx, sandbox)
 		if err != nil {
-			sandbox.Status = model.SandboxStatusError
-			sandbox.RuntimeStatus = string(model.SandboxStatusError)
-			sandbox.LastRuntimeError = err.Error()
-			sandbox.UpdatedAt = time.Now().UTC()
-			_ = s.store.UpdateSandboxState(ctx, sandbox)
-			s.recordAudit(ctx, tenant.ID, sandbox.ID, "sandbox.create", sandbox.ID, "error", auditDetail(
-				auditKV("stage", "runtime_start"),
-				auditKV("start_requested", true),
-			), "error", err)
-			return sandbox, err
+			return model.Sandbox{}, s.rollbackFailedCreate(ctx, tenant.ID, sandbox, "runtime_start", true, err)
 		}
 		sandbox.Status = model.SandboxStatusRunning
 	} else {
@@ -177,8 +162,42 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 	return s.store.GetSandbox(ctx, tenant.ID, sandbox.ID)
 }
 
+func (s *Service) rollbackFailedCreate(ctx context.Context, tenantID string, sandbox model.Sandbox, stage string, startRequested bool, cause error) error {
+	persistCtx := context.WithoutCancel(ctx)
+	cleanupErr := s.runtime.Destroy(persistCtx, sandbox)
+	if cleanupErr == nil {
+		cleanupErr = os.RemoveAll(filepath.Join(s.cfg.StorageRoot, sandbox.ID))
+	}
+	now := time.Now().UTC()
+	sandbox.LastRuntimeError = cause.Error()
+	sandbox.UpdatedAt = now
+	sandbox.LastActiveAt = now
+	if cleanupErr == nil {
+		sandbox.Status = model.SandboxStatusDeleted
+		sandbox.RuntimeStatus = string(model.SandboxStatusDeleted)
+		sandbox.DeletedAt = &now
+	} else {
+		sandbox.Status = model.SandboxStatusError
+		sandbox.RuntimeStatus = string(model.SandboxStatusError)
+	}
+	_ = s.store.UpdateSandboxState(persistCtx, sandbox)
+	s.recordAudit(persistCtx, tenantID, sandbox.ID, "sandbox.create", sandbox.ID, "error", auditDetail(
+		auditKV("stage", stage),
+		auditKV("start_requested", startRequested),
+		auditKV("rollback", cleanupErr == nil),
+	), "error", cause)
+	if cleanupErr != nil {
+		s.log.Error("failed create cleanup", "event", "sandbox.create.rollback", "sandbox_id", sandbox.ID, "stage", stage, "error", cleanupErr)
+	}
+	return cause
+}
+
 func (s *Service) GetSandbox(ctx context.Context, tenantID, sandboxID string) (model.Sandbox, error) {
 	return s.store.GetSandbox(ctx, tenantID, sandboxID)
+}
+
+func (s *Service) RuntimeBackend() string {
+	return s.cfg.RuntimeBackend
 }
 
 func (s *Service) ListSandboxes(ctx context.Context, tenantID string) ([]model.Sandbox, error) {
@@ -459,10 +478,8 @@ func (s *Service) ExecSandbox(ctx context.Context, tenant model.Tenant, quota mo
 	persistCtx := context.WithoutCancel(ctx)
 	if req.Detached {
 		now := time.Now().UTC()
-		exitCode := 0
 		durationMS := now.Sub(started).Milliseconds()
-		execution.Status = model.ExecutionStatusSucceeded
-		execution.ExitCode = &exitCode
+		execution.Status = model.ExecutionStatusDetached
 		execution.CompletedAt = &now
 		execution.DurationMS = &durationMS
 		if err := s.store.UpdateExecution(persistCtx, execution); err != nil {
@@ -806,6 +823,9 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 	if err != nil {
 		return model.Snapshot{}, err
 	}
+	if sandbox.RuntimeBackend == "qemu" && sandbox.Status != model.SandboxStatusStopped {
+		return model.Snapshot{}, fmt.Errorf("qemu snapshots require the sandbox to be stopped")
+	}
 	snapshot := model.Snapshot{
 		ID:        newID("snap-"),
 		SandboxID: sandbox.ID,
@@ -820,9 +840,11 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 	if err := s.store.CreateSnapshot(ctx, snapshot); err != nil {
 		return model.Snapshot{}, err
 	}
+	snapshotDir := filepath.Join(s.cfg.SnapshotRoot, sandbox.ID, snapshot.ID)
 	stage := "persist"
 	failSnapshot := func(cause error) (model.Snapshot, error) {
 		snapshot.Status = model.SnapshotStatusError
+		_ = os.RemoveAll(snapshotDir)
 		_ = s.store.UpdateSnapshot(ctx, snapshot)
 		s.recordAudit(ctx, tenantID, sandboxID, "snapshot.create", snapshot.ID, "error", auditDetail(
 			auditKV("stage", stage),
@@ -835,7 +857,6 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 	if err != nil {
 		return failSnapshot(err)
 	}
-	snapshotDir := filepath.Join(s.cfg.SnapshotRoot, sandbox.ID, snapshot.ID)
 	stage = "mkdir_snapshot_dir"
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		return failSnapshot(err)
@@ -953,7 +974,9 @@ func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID stri
 	}
 	sandbox.Status = model.SandboxStatusStopped
 	sandbox.RuntimeStatus = string(state.Status)
-	sandbox.BaseImageRef = snapshot.ImageRef
+	if sandbox.RuntimeBackend != "qemu" {
+		sandbox.BaseImageRef = snapshot.ImageRef
+	}
 	sandbox.UpdatedAt = time.Now().UTC()
 	if err := s.store.UpdateSandboxState(ctx, sandbox); err != nil {
 		return model.Sandbox{}, err
@@ -1127,7 +1150,11 @@ func (s *Service) reconcileStorageRefreshInterval() time.Duration {
 
 func (s *Service) applyCreateDefaults(req model.CreateSandboxRequest) model.CreateSandboxRequest {
 	if req.BaseImageRef == "" {
-		req.BaseImageRef = s.cfg.BaseImageRef
+		if s.cfg.RuntimeBackend == "qemu" {
+			req.BaseImageRef = s.cfg.QEMUBaseImagePath
+		} else {
+			req.BaseImageRef = s.cfg.BaseImageRef
+		}
 	}
 	if req.CPULimit == 0 {
 		req.CPULimit = s.cfg.DefaultCPULimit
@@ -1164,11 +1191,46 @@ func validateCreate(req model.CreateSandboxRequest) error {
 	return nil
 }
 
-func (s *Service) validateRuntimeCreate(req model.CreateSandboxRequest) error {
+func (s *Service) validateRuntimeCreate(req model.CreateSandboxRequest) (model.CreateSandboxRequest, error) {
 	if s.cfg.RuntimeBackend == "qemu" && req.CPULimit.MilliValue()%1000 != 0 {
-		return fmt.Errorf("qemu runtime requires whole CPU cores until fractional throttling is implemented")
+		return model.CreateSandboxRequest{}, fmt.Errorf("qemu runtime requires whole CPU cores until fractional throttling is implemented")
 	}
-	return nil
+	if s.cfg.RuntimeBackend != "qemu" {
+		return req, nil
+	}
+	resolved, err := s.resolveQEMUBaseImageRef(req.BaseImageRef)
+	if err != nil {
+		return model.CreateSandboxRequest{}, err
+	}
+	req.BaseImageRef = resolved
+	return req, nil
+}
+
+func (s *Service) resolveQEMUBaseImageRef(value string) (string, error) {
+	normalized := s.normalizeQEMUBaseImageRef(value)
+	if normalized == "" {
+		return "", fmt.Errorf("qemu runtime requires a guest image path")
+	}
+	if !isReadableFile(normalized) {
+		return "", fmt.Errorf("qemu guest image path %q is not readable", normalized)
+	}
+	for _, allowed := range s.cfg.EffectiveQEMUAllowedBaseImagePaths() {
+		if normalized == allowed {
+			return normalized, nil
+		}
+	}
+	return "", fmt.Errorf("qemu guest image path %q is not allowed", normalized)
+}
+
+func (s *Service) normalizeQEMUBaseImageRef(value string) string {
+	normalized := config.NormalizeQEMUBaseImagePath(value)
+	if normalized == "" {
+		return ""
+	}
+	if normalized == config.NormalizeQEMUBaseImagePath(s.cfg.BaseImageRef) {
+		return config.NormalizeQEMUBaseImagePath(s.cfg.QEMUBaseImagePath)
+	}
+	return normalized
 }
 
 func (s *Service) checkQuota(ctx context.Context, tenantID string, quota model.TenantQuota, req model.CreateSandboxRequest) error {
