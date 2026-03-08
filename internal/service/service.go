@@ -21,7 +21,10 @@ import (
 	"or3-sandbox/internal/repository"
 )
 
-const previewLimit = 64 * 1024
+const (
+	previewLimit                           = 64 * 1024
+	defaultReconcileStorageRefreshInterval = 5 * time.Minute
+)
 
 type Service struct {
 	cfg     config.Config
@@ -185,14 +188,17 @@ func (s *Service) RuntimeHealth(ctx context.Context, tenantID string) (model.Run
 		CheckedAt:    time.Now().UTC(),
 		StatusCounts: make(map[string]int),
 	}
-	sandboxes, err := s.store.ListNonDeletedSandboxes(ctx)
+	var sandboxes []model.Sandbox
+	var err error
+	if tenantID != "" {
+		sandboxes, err = s.store.ListNonDeletedSandboxesByTenant(ctx, tenantID)
+	} else {
+		sandboxes, err = s.store.ListNonDeletedSandboxes(ctx)
+	}
 	if err != nil {
 		return health, err
 	}
 	for _, sandbox := range sandboxes {
-		if tenantID != "" && sandbox.TenantID != tenantID {
-			continue
-		}
 		entry := model.RuntimeSandboxHealth{
 			SandboxID:       sandbox.ID,
 			TenantID:        sandbox.TenantID,
@@ -895,6 +901,7 @@ func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID stri
 }
 
 func (s *Service) Reconcile(ctx context.Context) error {
+	var reconcileErr error
 	if err := s.reconcileOrphanedExecutions(ctx); err != nil {
 		return err
 	}
@@ -906,13 +913,19 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		return err
 	}
 	for _, sandbox := range sandboxes {
+		previousStatus := sandbox.Status
+		previousRuntimeStatus := sandbox.RuntimeStatus
+		previousRuntimeID := sandbox.RuntimeID
+		previousRuntimeError := sandbox.LastRuntimeError
 		state, err := s.runtime.Inspect(ctx, sandbox)
 		if err != nil {
 			sandbox.Status = model.SandboxStatusDegraded
 			sandbox.RuntimeStatus = string(model.SandboxStatusDegraded)
 			sandbox.LastRuntimeError = err.Error()
 			sandbox.UpdatedAt = time.Now().UTC()
-			_ = s.store.UpdateSandboxState(ctx, sandbox)
+			if updateErr := s.store.UpdateSandboxState(ctx, sandbox); updateErr != nil {
+				reconcileErr = errors.Join(reconcileErr, updateErr)
+			}
 			continue
 		}
 		switch {
@@ -930,13 +943,21 @@ func (s *Service) Reconcile(ctx context.Context) error {
 			sandbox.Status = state.Status
 		}
 		sandbox.RuntimeStatus = string(state.Status)
+		sandbox.RuntimeID = state.RuntimeID
 		sandbox.LastRuntimeError = state.Error
 		sandbox.UpdatedAt = time.Now().UTC()
-		_ = s.store.UpdateSandboxState(ctx, sandbox)
-		_ = s.store.UpdateRuntimeState(ctx, sandbox.ID, state)
-		_ = s.refreshStorage(ctx, sandbox)
+		if updateErr := s.store.UpdateSandboxState(ctx, sandbox); updateErr != nil {
+			reconcileErr = errors.Join(reconcileErr, updateErr)
+		}
+		if updateErr := s.store.UpdateRuntimeState(ctx, sandbox.ID, state); updateErr != nil {
+			reconcileErr = errors.Join(reconcileErr, updateErr)
+		}
+		stateChanged := sandbox.Status != previousStatus || sandbox.RuntimeStatus != previousRuntimeStatus || sandbox.RuntimeID != previousRuntimeID || sandbox.LastRuntimeError != previousRuntimeError
+		if updateErr := s.refreshStorageIfStale(ctx, sandbox, stateChanged); updateErr != nil {
+			reconcileErr = errors.Join(reconcileErr, updateErr)
+		}
 	}
-	return nil
+	return reconcileErr
 }
 
 func (s *Service) reconcileOrphanedExecutions(ctx context.Context) error {
@@ -998,6 +1019,26 @@ func (s *Service) refreshStorage(ctx context.Context, sandbox model.Sandbox) err
 	cacheBytes, _ := dirSize(sandbox.CacheRoot)
 	snapshotBytes, _ := dirSize(filepath.Join(s.cfg.SnapshotRoot, sandbox.ID))
 	return s.store.UpdateStorageUsage(ctx, sandbox.ID, rootfsBytes, workspaceBytes, cacheBytes, snapshotBytes)
+}
+
+func (s *Service) refreshStorageIfStale(ctx context.Context, sandbox model.Sandbox, force bool) error {
+	if !force {
+		updatedAt, err := s.store.StorageUsageUpdatedAt(ctx, sandbox.ID)
+		switch {
+		case err == nil && time.Since(updatedAt) < s.reconcileStorageRefreshInterval():
+			return nil
+		case err != nil && !errors.Is(err, repository.ErrNotFound):
+			return err
+		}
+	}
+	return s.refreshStorage(ctx, sandbox)
+}
+
+func (s *Service) reconcileStorageRefreshInterval() time.Duration {
+	if s.cfg.CleanupInterval > 0 {
+		return s.cfg.CleanupInterval
+	}
+	return defaultReconcileStorageRefreshInterval
 }
 
 func (s *Service) applyCreateDefaults(req model.CreateSandboxRequest) model.CreateSandboxRequest {
@@ -1287,6 +1328,7 @@ func extractTarGz(source, destination string) error {
 	}
 	defer gr.Close()
 	tr := tar.NewReader(gr)
+	cleanDestination := filepath.Clean(destination)
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
@@ -1295,7 +1337,14 @@ func extractTarGz(source, destination string) error {
 		if err != nil {
 			return err
 		}
-		target := filepath.Join(destination, header.Name)
+		target := filepath.Join(cleanDestination, filepath.Clean(header.Name))
+		if target != cleanDestination && !strings.HasPrefix(target, cleanDestination+string(os.PathSeparator)) {
+			return fmt.Errorf("tar entry escapes destination: %s", header.Name)
+		}
+		switch header.Typeflag {
+		case tar.TypeSymlink, tar.TypeLink:
+			return fmt.Errorf("unsupported tar entry type for %s", header.Name)
+		}
 		if header.FileInfo().IsDir() {
 			if err := os.MkdirAll(target, header.FileInfo().Mode()); err != nil {
 				return err

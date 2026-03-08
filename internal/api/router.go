@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
 	"sort"
@@ -50,9 +51,7 @@ func New(log *slog.Logger, svc *service.Service, cfg config.Config) http.Handler
 		service:          svc,
 		operatorHost:     strings.TrimRight(cfg.OperatorHost, "/"),
 		tunnelSigningKey: newTunnelSigningKey(cfg),
-		upgrader: websocket.Upgrader{
-			CheckOrigin: func(r *http.Request) bool { return true },
-		},
+		upgrader:         websocket.Upgrader{},
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", router.health)
@@ -772,93 +771,57 @@ func (rt *Router) handleTunnelProxy(w http.ResponseWriter, r *http.Request, tunn
 		rt.handleTunnelWebSocket(w, r, tunnel, sandbox, queryAccessToken)
 		return
 	}
-	target := fmt.Sprintf("http://127.0.0.1:%d%s", tunnel.TargetPort, strings.TrimPrefix(r.URL.Path, "/v1/tunnels/"+tunnel.ID+"/proxy"))
-	if raw := tunnelUpstreamQuery(r.URL.Query(), queryAccessToken).Encode(); raw != "" {
-		target += "?" + raw
-	}
-	rt.handleTunnelHTTPRequest(w, r, tunnel, sandbox, target)
+	rt.handleTunnelHTTPRequest(w, r, tunnel, sandbox, queryAccessToken)
 }
 
-func (rt *Router) handleTunnelHTTPRequest(w http.ResponseWriter, r *http.Request, tunnel model.Tunnel, sandbox model.Sandbox, target string) {
-	script := `
-if command -v curl >/dev/null 2>&1; then
-	exec curl -sS -i -X "$METHOD" "$URL"
-fi
-if [ "$METHOD" = "GET" ] && command -v wget >/dev/null 2>&1; then
-	exec wget -qO- "$URL"
-fi
-if [ "$METHOD" = "GET" ] && command -v busybox >/dev/null 2>&1; then
-	exec busybox wget -qO- "$URL"
-fi
-if [ "$METHOD" = "GET" ] && command -v python3 >/dev/null 2>&1; then
-	exec python3 -c 'import sys, urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1]).read().decode())' "$URL"
-fi
-echo "no supported http client in sandbox" >&2
-exit 127
-`
-	req := model.ExecRequest{
-		Command: []string{"sh", "-lc", script},
-		Env: map[string]string{
-			"METHOD": r.Method,
-			"URL":    target,
+func (rt *Router) handleTunnelHTTPRequest(w http.ResponseWriter, r *http.Request, tunnel model.Tunnel, sandbox model.Sandbox, queryAccessToken string) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	bridgeConn, err := rt.service.OpenSandboxLocalConn(ctx, sandbox, tunnel.TargetPort)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	conn := bridgeConn
+	defer func() {
+		if conn != nil {
+			_ = conn.Close()
+		}
+	}()
+	proxyReq := r.Clone(ctx)
+	proxyReq.URL.Path = strings.TrimPrefix(r.URL.Path, "/v1/tunnels/"+tunnel.ID+"/proxy")
+	proxyReq.URL.RawQuery = tunnelUpstreamQuery(r.URL.Query(), queryAccessToken).Encode()
+	proxyReq.RequestURI = ""
+	target := &url.URL{Scheme: "http", Host: fmt.Sprintf("sandbox-local:%d", tunnel.TargetPort)}
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(target)
+			pr.Out = pr.Out.WithContext(ctx)
+			pr.Out.URL.Path = proxyReq.URL.Path
+			pr.Out.URL.RawPath = proxyReq.URL.RawPath
+			pr.Out.URL.RawQuery = proxyReq.URL.RawQuery
+			pr.Out.Host = ""
+			pr.SetXForwarded()
+			sanitizeTunnelProxyRequest(pr.Out.Header)
 		},
-		Cwd:     "/workspace",
-		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(context.Context, string, string) (net.Conn, error) {
+				if conn == nil {
+					return nil, fmt.Errorf("sandbox tunnel bridge already used")
+				}
+				used := conn
+				conn = nil
+				return used, nil
+			},
+			DisableKeepAlives:     true,
+			ForceAttemptHTTP2:     false,
+			ResponseHeaderTimeout: 30 * time.Second,
+		},
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+		},
 	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		body, _ := io.ReadAll(r.Body)
-		req.Env["BODY"] = string(body)
-		req.Command = []string{"sh", "-lc", `
-if ! command -v curl >/dev/null 2>&1; then
-	echo "curl required for non-GET tunnel proxy requests" >&2
-	exit 127
-fi
-exec curl -sS -i -X "$METHOD" --data-binary "$BODY" "$URL"
-`}
-	}
-	var stdout strings.Builder
-	var stderr strings.Builder
-	quotaView, err := rt.service.GetTenantQuotaView(r.Context(), tunnel.TenantID)
-	if err != nil {
-		handleError(w, err)
-		return
-	}
-	execution, err := rt.service.ExecSandbox(r.Context(), model.Tenant{ID: tunnel.TenantID}, quotaView.Quota, sandbox.ID, req, &stdout, &stderr)
-	if err != nil {
-		handleError(w, err)
-		return
-	}
-	if execution.Status != model.ExecutionStatusSucceeded {
-		message := strings.TrimSpace(stderr.String())
-		if message == "" {
-			message = strings.TrimSpace(execution.StderrPreview)
-		}
-		if message == "" {
-			message = fmt.Sprintf("tunnel upstream request failed with status %s", execution.Status)
-		}
-		status := http.StatusBadGateway
-		if execution.Status == model.ExecutionStatusTimedOut {
-			status = http.StatusGatewayTimeout
-		}
-		http.Error(w, message, status)
-		return
-	}
-	payload := stdout.String()
-	parts := strings.SplitN(payload, "\r\n\r\n", 2)
-	if len(parts) == 2 {
-		for _, line := range strings.Split(parts[0], "\r\n") {
-			if strings.HasPrefix(strings.ToLower(line), "http/") {
-				continue
-			}
-			header := strings.SplitN(line, ": ", 2)
-			if len(header) == 2 {
-				w.Header().Add(header[0], header[1])
-			}
-		}
-		_, _ = io.WriteString(w, parts[1])
-		return
-	}
-	_, _ = io.WriteString(w, payload)
+	proxy.ServeHTTP(w, proxyReq)
 }
 
 func (rt *Router) handleTunnelWebSocket(w http.ResponseWriter, r *http.Request, tunnel model.Tunnel, sandbox model.Sandbox, queryAccessToken string) {
@@ -1094,6 +1057,32 @@ func tunnelUpstreamQuery(query url.Values, queryAccessToken string) url.Values {
 		}
 	}
 	return filtered
+}
+
+func sanitizeTunnelProxyRequest(header http.Header) {
+	header.Del("Authorization")
+	header.Del("X-Tunnel-Token")
+	if cookies := header.Values("Cookie"); len(cookies) > 0 {
+		filteredCookies := make([]string, 0, len(cookies))
+		for _, cookieHeader := range cookies {
+			parts := strings.Split(cookieHeader, ";")
+			kept := make([]string, 0, len(parts))
+			for _, part := range parts {
+				trimmed := strings.TrimSpace(part)
+				if trimmed == "" || strings.HasPrefix(trimmed, tunnelAuthCookieName+"=") {
+					continue
+				}
+				kept = append(kept, trimmed)
+			}
+			if len(kept) > 0 {
+				filteredCookies = append(filteredCookies, strings.Join(kept, "; "))
+			}
+		}
+		header.Del("Cookie")
+		for _, cookieHeader := range filteredCookies {
+			header.Add("Cookie", cookieHeader)
+		}
+	}
 }
 
 func tunnelAuthCookieValue(expiry, sig string) string {

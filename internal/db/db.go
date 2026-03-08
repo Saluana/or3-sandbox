@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -12,11 +14,16 @@ import (
 const schemaVersion = 2
 
 func Open(ctx context.Context, path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+	dsn, err := sqliteDSN(path)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(8)
 	db.SetConnMaxLifetime(0)
 	if err := db.PingContext(ctx); err != nil {
 		return nil, err
@@ -27,9 +34,21 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 	return db, nil
 }
 
+func sqliteDSN(path string) (string, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	values := url.Values{}
+	values.Add("_pragma", "foreign_keys(1)")
+	values.Add("_pragma", "journal_mode(WAL)")
+	values.Add("_pragma", "synchronous(NORMAL)")
+	values.Add("_pragma", "busy_timeout(5000)")
+	return (&url.URL{Scheme: "file", Path: absPath, RawQuery: values.Encode()}).String(), nil
+}
+
 func migrate(ctx context.Context, db *sql.DB) error {
 	statements := []string{
-		`PRAGMA foreign_keys = ON;`,
 		`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);`,
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (0, CURRENT_TIMESTAMP);`,
 		`CREATE TABLE IF NOT EXISTS tenants (
@@ -152,6 +171,12 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			message TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		);`,
+		`CREATE INDEX IF NOT EXISTS idx_sandboxes_tenant_status_created ON sandboxes(tenant_id, status, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_sandboxes_status ON sandboxes(status);`,
+		`CREATE INDEX IF NOT EXISTS idx_executions_tenant_status ON executions(tenant_id, status);`,
+		`CREATE INDEX IF NOT EXISTS idx_tunnels_tenant_sandbox_revoked ON tunnels(tenant_id, sandbox_id, revoked_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_snapshots_tenant_status ON snapshots(tenant_id, status);`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_created ON audit_events(tenant_id, created_at);`,
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {

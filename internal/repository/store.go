@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"time"
 
 	"or3-sandbox/internal/config"
@@ -129,7 +128,11 @@ func (s *Store) AuthenticateTenant(ctx context.Context, tokenHash string) (model
 		}
 		return model.Tenant{}, model.TenantQuota{}, err
 	}
-	tenant.CreatedAt = mustTime(created)
+	parsedCreatedAt, err := parseTime(created)
+	if err != nil {
+		return model.Tenant{}, model.TenantQuota{}, err
+	}
+	tenant.CreatedAt = parsedCreatedAt
 	quota.TenantID = tenant.ID
 	quota.MaxCPUCores = model.CPUQuantity(maxCPUMillis)
 	quota.AllowTunnels = allowTunnels == 1
@@ -283,7 +286,15 @@ func (s *Store) ListSandboxes(ctx context.Context, tenantID string) ([]model.San
 }
 
 func (s *Store) ListNonDeletedSandboxes(ctx context.Context) ([]model.Sandbox, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	return s.listNonDeletedSandboxes(ctx, "")
+}
+
+func (s *Store) ListNonDeletedSandboxesByTenant(ctx context.Context, tenantID string) ([]model.Sandbox, error) {
+	return s.listNonDeletedSandboxes(ctx, tenantID)
+}
+
+func (s *Store) listNonDeletedSandboxes(ctx context.Context, tenantID string) ([]model.Sandbox, error) {
+	query := `
 		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.cpu_limit_millis,
 		       s.memory_limit_mb, s.pids_limit, s.disk_limit_mb, s.network_mode, s.allow_tunnels,
 		       s.storage_root, s.workspace_root, s.cache_root,
@@ -291,8 +302,13 @@ func (s *Store) ListNonDeletedSandboxes(ctx context.Context) ([]model.Sandbox, e
 		       r.runtime_id, r.runtime_status, r.last_runtime_error
 		FROM sandboxes s
 		JOIN sandbox_runtime_state r ON r.sandbox_id = s.sandbox_id
-		WHERE s.status != ?
-	`, string(model.SandboxStatusDeleted))
+		WHERE s.status != ?`
+	args := []any{string(model.SandboxStatusDeleted)}
+	if tenantID != "" {
+		query += ` AND s.tenant_id = ?`
+		args = append(args, tenantID)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -306,6 +322,22 @@ func (s *Store) ListNonDeletedSandboxes(ctx context.Context) ([]model.Sandbox, e
 		sandboxes = append(sandboxes, sandbox)
 	}
 	return sandboxes, rows.Err()
+}
+
+func (s *Store) StorageUsageUpdatedAt(ctx context.Context, sandboxID string) (time.Time, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT updated_at
+		FROM sandbox_storage
+		WHERE sandbox_id = ?
+	`, sandboxID)
+	var updated string
+	if err := row.Scan(&updated); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return time.Time{}, ErrNotFound
+		}
+		return time.Time{}, err
+	}
+	return parseTime(updated)
 }
 
 func (s *Store) UpdateStorageUsage(ctx context.Context, sandboxID string, rootfsBytes, workspaceBytes, cacheBytes, snapshotBytes int64) error {
@@ -336,14 +368,16 @@ func (s *Store) TenantUsage(ctx context.Context, tenantID string) (TenantUsage, 
 			SUM(s.cpu_limit_millis) AS cpu_total,
 			SUM(s.memory_limit_mb) AS memory_total,
 			SUM(s.disk_limit_mb) AS storage_total,
-			SUM(COALESCE(ss.rootfs_bytes, 0) + COALESCE(ss.workspace_bytes, 0) + COALESCE(ss.cache_bytes, 0) + COALESCE(ss.snapshot_bytes, 0)) AS actual_storage_bytes
+			SUM(COALESCE(ss.rootfs_bytes, 0) + COALESCE(ss.workspace_bytes, 0) + COALESCE(ss.cache_bytes, 0) + COALESCE(ss.snapshot_bytes, 0)) AS actual_storage_bytes,
+			COALESCE((SELECT COUNT(*) FROM executions e WHERE e.tenant_id = ? AND e.status = ?), 0) AS concurrent_execs,
+			COALESCE((SELECT COUNT(*) FROM tunnels t WHERE t.tenant_id = ? AND t.revoked_at IS NULL), 0) AS active_tunnels
 		FROM sandboxes s
 		LEFT JOIN sandbox_storage ss ON ss.sandbox_id = s.sandbox_id
 		WHERE s.tenant_id = ? AND s.status != ?
-	`, string(model.SandboxStatusRunning), tenantID, string(model.SandboxStatusDeleted))
+	`, string(model.SandboxStatusRunning), tenantID, string(model.ExecutionStatusRunning), tenantID, tenantID, string(model.SandboxStatusDeleted))
 	var usage TenantUsage
 	var running, cpuTotal, memTotal, storageTotal, actualStorageBytes sql.NullInt64
-	if err := row.Scan(&usage.Sandboxes, &running, &cpuTotal, &memTotal, &storageTotal, &actualStorageBytes); err != nil {
+	if err := row.Scan(&usage.Sandboxes, &running, &cpuTotal, &memTotal, &storageTotal, &actualStorageBytes, &usage.ConcurrentExecs, &usage.ActiveTunnels); err != nil {
 		return usage, err
 	}
 	usage.RunningSandboxes = int(running.Int64)
@@ -351,16 +385,6 @@ func (s *Store) TenantUsage(ctx context.Context, tenantID string) (TenantUsage, 
 	usage.RequestedMemory = int(memTotal.Int64)
 	usage.RequestedStorage = int(storageTotal.Int64)
 	usage.ActualStorageBytes = actualStorageBytes.Int64
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM executions WHERE tenant_id = ? AND status = ?
-	`, tenantID, string(model.ExecutionStatusRunning)).Scan(&usage.ConcurrentExecs); err != nil {
-		return usage, err
-	}
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM tunnels WHERE tenant_id = ? AND revoked_at IS NULL
-	`, tenantID).Scan(&usage.ActiveTunnels); err != nil {
-		return usage, err
-	}
 	return usage, nil
 }
 
@@ -549,7 +573,10 @@ func (s *Store) ListRunningExecutions(ctx context.Context) ([]model.Execution, e
 		if err := rows.Scan(&execution.ID, &execution.SandboxID, &execution.TenantID, &execution.Command, &execution.Cwd, &execution.TimeoutSeconds, &execution.Status, &started); err != nil {
 			return nil, err
 		}
-		execution.StartedAt = mustTime(started)
+		execution.StartedAt, err = parseTime(started)
+		if err != nil {
+			return nil, err
+		}
 		executions = append(executions, execution)
 	}
 	return executions, rows.Err()
@@ -645,7 +672,10 @@ func (s *Store) ListAuditEvents(ctx context.Context, tenantID string) ([]model.A
 		if err := rows.Scan(&event.ID, &event.TenantID, &event.SandboxID, &event.Action, &event.ResourceID, &event.Outcome, &event.Message, &created); err != nil {
 			return nil, err
 		}
-		event.CreatedAt = mustTime(created)
+		event.CreatedAt, err = parseTime(created)
+		if err != nil {
+			return nil, err
+		}
 		events = append(events, event)
 	}
 	return events, rows.Err()
@@ -671,11 +701,26 @@ func scanSandbox(scanner interface{ Scan(...any) error }) (model.Sandbox, error)
 	}
 	sandbox.CPULimit = model.CPUQuantity(cpuLimitMillis)
 	sandbox.AllowTunnels = allowTunnels == 1
-	sandbox.CreatedAt = mustTime(created)
-	sandbox.UpdatedAt = mustTime(updated)
-	sandbox.LastActiveAt = mustTime(lastActive)
+	createdAt, err := parseTime(created)
+	if err != nil {
+		return model.Sandbox{}, err
+	}
+	updatedAt, err := parseTime(updated)
+	if err != nil {
+		return model.Sandbox{}, err
+	}
+	lastActiveAt, err := parseTime(lastActive)
+	if err != nil {
+		return model.Sandbox{}, err
+	}
+	sandbox.CreatedAt = createdAt
+	sandbox.UpdatedAt = updatedAt
+	sandbox.LastActiveAt = lastActiveAt
 	if deleted.Valid {
-		t := mustTime(deleted.String)
+		t, err := parseTime(deleted.String)
+		if err != nil {
+			return model.Sandbox{}, err
+		}
 		sandbox.DeletedAt = &t
 	}
 	return sandbox, nil
@@ -691,9 +736,16 @@ func scanTunnel(scanner interface{ Scan(...any) error }) (model.Tunnel, error) {
 		}
 		return model.Tunnel{}, err
 	}
-	tunnel.CreatedAt = mustTime(created)
+	createdAt, err := parseTime(created)
+	if err != nil {
+		return model.Tunnel{}, err
+	}
+	tunnel.CreatedAt = createdAt
 	if revoked.Valid {
-		t := mustTime(revoked.String)
+		t, err := parseTime(revoked.String)
+		if err != nil {
+			return model.Tunnel{}, err
+		}
 		tunnel.RevokedAt = &t
 	}
 	return tunnel, nil
@@ -709,20 +761,27 @@ func scanSnapshot(scanner interface{ Scan(...any) error }) (model.Snapshot, erro
 		}
 		return model.Snapshot{}, err
 	}
-	snapshot.CreatedAt = mustTime(created)
+	createdAt, err := parseTime(created)
+	if err != nil {
+		return model.Snapshot{}, err
+	}
+	snapshot.CreatedAt = createdAt
 	if completed.Valid {
-		t := mustTime(completed.String)
+		t, err := parseTime(completed.String)
+		if err != nil {
+			return model.Snapshot{}, err
+		}
 		snapshot.CompletedAt = &t
 	}
 	return snapshot, nil
 }
 
-func mustTime(value string) time.Time {
+func parseTime(value string) (time.Time, error) {
 	t, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil {
-		panic(fmt.Sprintf("invalid time %q: %v", value, err))
+		return time.Time{}, err
 	}
-	return t
+	return t, nil
 }
 
 func boolToInt(value bool) int {

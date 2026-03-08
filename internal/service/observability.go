@@ -115,7 +115,7 @@ func (s *Service) MetricsReport(ctx context.Context, tenantID string) (string, e
 	if err != nil {
 		return "", err
 	}
-	health, err := s.RuntimeHealth(ctx, tenantID)
+	health, err := s.persistedRuntimeHealth(ctx, tenantID)
 	if err != nil {
 		return "", err
 	}
@@ -141,6 +141,46 @@ func (s *Service) MetricsReport(ctx context.Context, tenantID string) (string, e
 		lines = append(lines, fmt.Sprintf("or3_sandbox_executions_count{status=%q} %d", status, report.ExecutionCounts[status]))
 	}
 	return strings.Join(lines, "\n") + "\n", nil
+}
+
+func (s *Service) persistedRuntimeHealth(ctx context.Context, tenantID string) (model.RuntimeHealth, error) {
+	health := model.RuntimeHealth{
+		Backend:      s.cfg.RuntimeBackend,
+		Healthy:      true,
+		CheckedAt:    time.Now().UTC(),
+		StatusCounts: make(map[string]int),
+	}
+	var sandboxes []model.Sandbox
+	var err error
+	if tenantID != "" {
+		sandboxes, err = s.store.ListNonDeletedSandboxesByTenant(ctx, tenantID)
+	} else {
+		sandboxes, err = s.store.ListNonDeletedSandboxes(ctx)
+	}
+	if err != nil {
+		return health, err
+	}
+	for _, sandbox := range sandboxes {
+		observedStatus := sandbox.Status
+		if sandbox.RuntimeStatus != "" {
+			observedStatus = model.SandboxStatus(sandbox.RuntimeStatus)
+		}
+		entry := model.RuntimeSandboxHealth{
+			SandboxID:       sandbox.ID,
+			TenantID:        sandbox.TenantID,
+			PersistedStatus: sandbox.Status,
+			ObservedStatus:  observedStatus,
+			RuntimeID:       sandbox.RuntimeID,
+			RuntimeStatus:   sandbox.RuntimeStatus,
+			Error:           sandbox.LastRuntimeError,
+		}
+		health.StatusCounts[string(entry.ObservedStatus)]++
+		health.Sandboxes = append(health.Sandboxes, entry)
+		if entry.ObservedStatus == model.SandboxStatusError || entry.ObservedStatus == model.SandboxStatusDegraded {
+			health.Healthy = false
+		}
+	}
+	return health, nil
 }
 
 func boolMetric(value bool) int {

@@ -26,7 +26,8 @@ type jwtAuthenticator struct {
 	store        *repository.Store
 	issuer       string
 	audience     string
-	secretPaths  []string
+	secrets      []string
+	loadErr      error
 	defaultQuota model.TenantQuota
 }
 
@@ -40,11 +41,13 @@ type jwtClaims struct {
 func newAuthenticator(store *repository.Store, cfg config.Config) Authenticator {
 	switch cfg.AuthMode {
 	case "jwt-hs256":
+		secrets, err := loadSecretValues(cfg.AuthJWTSecretPaths)
 		return &jwtAuthenticator{
 			store:        store,
 			issuer:       cfg.AuthJWTIssuer,
 			audience:     cfg.AuthJWTAudience,
-			secretPaths:  append([]string(nil), cfg.AuthJWTSecretPaths...),
+			secrets:      secrets,
+			loadErr:      err,
 			defaultQuota: cfg.DefaultQuota,
 		}
 	default:
@@ -66,9 +69,13 @@ func (a *staticAuthenticator) Authenticate(ctx context.Context, token string) (I
 }
 
 func (a *jwtAuthenticator) Authenticate(ctx context.Context, token string) (Identity, model.Tenant, model.TenantQuota, error) {
-	secrets, err := loadSecretValues(a.secretPaths)
-	if err != nil {
-		return Identity{}, model.Tenant{}, model.TenantQuota{}, err
+	if a.loadErr != nil {
+		return Identity{}, model.Tenant{}, model.TenantQuota{}, a.loadErr
+	}
+	var err error
+	secrets := a.secrets
+	if len(secrets) == 0 {
+		return Identity{}, model.Tenant{}, model.TenantQuota{}, fmt.Errorf("no jwt secrets loaded")
 	}
 	var claims jwtClaims
 	var parseErr error

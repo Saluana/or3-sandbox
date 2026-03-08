@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -18,8 +19,14 @@ type Middleware struct {
 	store         *repository.Store
 	authenticator Authenticator
 	limiters      sync.Map
+	lastPruneUnix atomic.Int64
 	rate          rate.Limit
 	burst         int
+}
+
+type tenantLimiter struct {
+	limiter  *rate.Limiter
+	lastSeen atomic.Int64
 }
 
 func New(store *repository.Store, cfg config.Config) *Middleware {
@@ -82,15 +89,43 @@ func bearerToken(header string) (string, error) {
 }
 
 func (m *Middleware) limiterFor(tenantID string) *rate.Limiter {
+	now := time.Now().UnixNano()
 	if value, ok := m.limiters.Load(tenantID); ok {
-		return value.(*rate.Limiter)
+		entry := value.(*tenantLimiter)
+		entry.lastSeen.Store(now)
+		m.maybePrune(now)
+		return entry.limiter
 	}
-	limiter := rate.NewLimiter(m.rate, m.burst)
-	actual, _ := m.limiters.LoadOrStore(tenantID, limiter)
-	return actual.(*rate.Limiter)
+	entry := &tenantLimiter{limiter: rate.NewLimiter(m.rate, m.burst)}
+	entry.lastSeen.Store(now)
+	actual, _ := m.limiters.LoadOrStore(tenantID, entry)
+	stored := actual.(*tenantLimiter)
+	stored.lastSeen.Store(now)
+	m.maybePrune(now)
+	return stored.limiter
 }
 
 func Prune(limiters *sync.Map, olderThan time.Duration) {
-	_ = olderThan
-	_ = limiters
+	if limiters == nil || olderThan <= 0 {
+		return
+	}
+	cutoff := time.Now().Add(-olderThan).UnixNano()
+	limiters.Range(func(key, value any) bool {
+		entry, ok := value.(*tenantLimiter)
+		if !ok || entry.lastSeen.Load() < cutoff {
+			limiters.Delete(key)
+		}
+		return true
+	})
+}
+
+func (m *Middleware) maybePrune(nowUnixNano int64) {
+	last := m.lastPruneUnix.Load()
+	if last != 0 && nowUnixNano-last < int64(5*time.Minute) {
+		return
+	}
+	if !m.lastPruneUnix.CompareAndSwap(last, nowUnixNano) {
+		return
+	}
+	Prune(&m.limiters, 15*time.Minute)
 }

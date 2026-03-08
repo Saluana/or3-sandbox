@@ -259,23 +259,7 @@ func (r presetRunner) Run() error {
 }
 
 func (r presetRunner) resolveInputs() (map[string]string, error) {
-	resolved := make(map[string]string, len(r.manifest.Inputs)+len(r.inputOverrides)+len(r.dotEnvValues))
-	for key, value := range r.dotEnvValues {
-		if strings.TrimSpace(value) != "" {
-			resolved[key] = value
-		}
-	}
-	for _, entry := range os.Environ() {
-		key, value, ok := strings.Cut(entry, "=")
-		if ok && strings.TrimSpace(key) != "" && strings.TrimSpace(value) != "" {
-			resolved[key] = value
-		}
-	}
-	for key, value := range r.inputOverrides {
-		if strings.TrimSpace(value) != "" {
-			resolved[key] = value
-		}
-	}
+	resolved := make(map[string]string, len(r.manifest.Inputs))
 	for _, input := range r.manifest.Inputs {
 		value, ok := r.inputOverrides[input.Name]
 		if !ok {

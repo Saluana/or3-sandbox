@@ -1,6 +1,8 @@
 package service
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
@@ -364,6 +366,41 @@ func TestRestoreSnapshotFetchesExportBundleWhenLocalArtifactsAreMissing(t *testi
 	}
 }
 
+func TestExtractTarGzRejectsEscapingEntries(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "escape.tar.gz")
+	file, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(file)
+	tw := tar.NewWriter(gz)
+	payload := []byte("owned")
+	header := &tar.Header{Name: "../escape.txt", Mode: 0o644, Size: int64(len(payload))}
+	if err := tw.WriteHeader(header); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	destination := t.TempDir()
+	if err := extractTarGz(archivePath, destination); err == nil || !strings.Contains(err.Error(), "escapes destination") {
+		t.Fatalf("expected escape rejection, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(destination), "escape.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no file outside destination, got %v", err)
+	}
+}
+
 func TestRuntimeHealthReportsBootingState(t *testing.T) {
 	ctx := context.Background()
 	runtime := newStubRuntime()
@@ -643,6 +680,76 @@ func TestCapacityReportAndMetricsShowQuotaPressure(t *testing.T) {
 	}
 }
 
+func TestMetricsReportUsesPersistedRuntimeHealth(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+
+	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	}); err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	runtime.inspectCalls = 0
+	runtime.inspectState = model.RuntimeState{RuntimeID: "rt-degraded", Status: model.SandboxStatusDegraded, Error: "should not be used"}
+
+	metrics, err := svc.MetricsReport(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("metrics report: %v", err)
+	}
+	if runtime.inspectCalls != 0 {
+		t.Fatalf("expected metrics to avoid live runtime inspect, got %d calls", runtime.inspectCalls)
+	}
+	if !strings.Contains(metrics, `or3_sandbox_runtime_status_count{status="creating"} 1`) && !strings.Contains(metrics, `or3_sandbox_runtime_status_count{status="stopped"} 1`) {
+		t.Fatalf("expected persisted runtime status in metrics, got %s", metrics)
+	}
+}
+
+func TestReconcileSkipsFreshStorageRefreshWhenStateIsUnchanged(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.CleanupInterval = time.Hour
+
+	runtime.startState = model.RuntimeState{RuntimeID: "rt-start", Status: model.SandboxStatusRunning, Running: true}
+	runtime.inspectState = model.RuntimeState{RuntimeID: "rt-start", Status: model.SandboxStatusRunning, Running: true}
+	runtime.storageUsage = model.StorageUsage{RootfsBytes: 100, WorkspaceBytes: 200, CacheBytes: 30}
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	assertActualStorage(t, store, tenantA.ID, 330)
+
+	runtime.storageUsage = model.StorageUsage{RootfsBytes: 999, WorkspaceBytes: 999, CacheBytes: 999}
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	reconciled, err := svc.GetSandbox(ctx, tenantA.ID, sandbox.ID)
+	if err != nil {
+		t.Fatalf("get sandbox: %v", err)
+	}
+	if reconciled.Status != model.SandboxStatusRunning {
+		t.Fatalf("expected sandbox to stay running, got %+v", reconciled)
+	}
+	assertActualStorage(t, store, tenantA.ID, 330)
+}
+
 func TestExecSandboxCancellationRecordsCanceledResult(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	runtime := newStubRuntime()
@@ -849,6 +956,7 @@ type stubRuntime struct {
 	snapshotInfo      model.SnapshotInfo
 	storageUsage      model.StorageUsage
 	inspectErr        error
+	inspectCalls      int
 	execHandleFactory func(context.Context, model.ExecRequest) model.ExecHandle
 	createdSpec       model.SandboxSpec
 
@@ -920,6 +1028,7 @@ func (r *stubRuntime) Destroy(context.Context, model.Sandbox) error {
 }
 
 func (r *stubRuntime) Inspect(context.Context, model.Sandbox) (model.RuntimeState, error) {
+	r.inspectCalls++
 	if r.inspectErr != nil {
 		return model.RuntimeState{}, r.inspectErr
 	}

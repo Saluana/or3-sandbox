@@ -4,10 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	jwt "github.com/golang-jwt/jwt/v5"
+	"golang.org/x/time/rate"
 
 	"or3-sandbox/internal/config"
 	"or3-sandbox/internal/db"
@@ -120,6 +122,53 @@ func TestJWTAuthenticatorRejectsInvalidToken(t *testing.T) {
 	})
 	if _, _, _, err := authenticator.Authenticate(context.Background(), "not-a-jwt"); err == nil {
 		t.Fatal("expected invalid token rejection")
+	}
+}
+
+func TestJWTAuthenticatorCachesSecretsAtConstruction(t *testing.T) {
+	store := newAuthTestStore(t)
+	secretPath := filepath.Join(t.TempDir(), "jwt.secret")
+	if err := os.WriteFile(secretPath, []byte("super-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	authenticator := newAuthenticator(store, config.Config{
+		AuthMode:           "jwt-hs256",
+		AuthJWTIssuer:      "issuer.example",
+		AuthJWTAudience:    "sandbox-api",
+		AuthJWTSecretPaths: []string{secretPath},
+	}).(*jwtAuthenticator)
+	if err := os.Remove(secretPath); err != nil {
+		t.Fatal(err)
+	}
+	token := signedTestJWT(t, "super-secret", jwt.MapClaims{
+		"iss":       "issuer.example",
+		"aud":       "sandbox-api",
+		"sub":       "svc-buildkite",
+		"tenant_id": "tenant-a",
+		"service":   true,
+		"exp":       time.Now().Add(time.Hour).Unix(),
+	})
+	if _, _, _, err := authenticator.Authenticate(context.Background(), token); err != nil {
+		t.Fatalf("authenticate with cached secret: %v", err)
+	}
+}
+
+func TestPruneRemovesStaleLimiterEntries(t *testing.T) {
+	var limiters sync.Map
+	stale := &tenantLimiter{limiter: rate.NewLimiter(rate.Limit(1), 1)}
+	stale.lastSeen.Store(time.Now().Add(-time.Hour).UnixNano())
+	fresh := &tenantLimiter{limiter: rate.NewLimiter(rate.Limit(1), 1)}
+	fresh.lastSeen.Store(time.Now().UnixNano())
+	limiters.Store("stale", stale)
+	limiters.Store("fresh", fresh)
+
+	Prune(&limiters, 15*time.Minute)
+
+	if _, ok := limiters.Load("stale"); ok {
+		t.Fatal("expected stale limiter to be pruned")
+	}
+	if _, ok := limiters.Load("fresh"); !ok {
+		t.Fatal("expected fresh limiter to be kept")
 	}
 }
 

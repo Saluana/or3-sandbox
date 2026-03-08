@@ -149,6 +149,49 @@ func TestRunPresetRunRequiresInputs(t *testing.T) {
 	}
 }
 
+func TestRunPresetRunDoesNotExposeUndeclaredHostEnv(t *testing.T) {
+	examplesDir := t.TempDir()
+	t.Setenv("UNDECLARED_SECRET", "host-secret")
+	writePresetFixture(t, examplesDir, "scoped", `
+name: scoped
+runtime:
+  allowed: [docker]
+sandbox:
+  image: alpine:3.20
+files:
+  - path: note.txt
+    content: "declared=${DECLARED_SECRET}; undeclared=${UNDECLARED_SECRET}"
+cleanup: always
+`)
+
+	var writeReq model.FileWriteRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtime/health":
+			_ = json.NewEncoder(w).Encode(model.RuntimeHealth{Backend: "docker"})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+			_ = json.NewEncoder(w).Encode(model.Sandbox{ID: "sbx-scoped", RuntimeBackend: "docker", Status: model.SandboxStatusRunning})
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/sandboxes/sbx-scoped/files/note.txt":
+			if err := json.NewDecoder(r.Body).Decode(&writeReq); err != nil {
+				t.Fatalf("decode write: %v", err)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sbx-scoped":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	if err := runPresetRun(clientConfig{baseURL: server.URL, token: "dev-token"}, []string{"--examples-dir", examplesDir, "scoped"}); err != nil {
+		t.Fatalf("runPresetRun: %v", err)
+	}
+	if writeReq.Content != "declared=; undeclared=" {
+		t.Fatalf("expected undeclared host env to be hidden, got %+v", writeReq)
+	}
+}
+
 func TestRunPresetRunAcceptsFlagsAfterPresetName(t *testing.T) {
 	examplesDir := t.TempDir()
 	writePresetFixture(t, examplesDir, "ordered", `
