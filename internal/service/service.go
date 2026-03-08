@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +31,7 @@ type Service struct {
 	cfg     config.Config
 	store   *repository.Store
 	runtime model.RuntimeManager
+	log     *slog.Logger
 }
 
 type workspaceFileRuntime interface {
@@ -48,8 +50,12 @@ type storageMeasurer interface {
 	MeasureStorage(ctx context.Context, sandbox model.Sandbox) (model.StorageUsage, error)
 }
 
-func New(cfg config.Config, store *repository.Store, runtime model.RuntimeManager) *Service {
-	return &Service{cfg: cfg, store: store, runtime: runtime}
+func New(cfg config.Config, store *repository.Store, runtime model.RuntimeManager, logs ...*slog.Logger) *Service {
+	log := slog.Default()
+	if len(logs) > 0 && logs[0] != nil {
+		log = logs[0]
+	}
+	return &Service{cfg: cfg, store: store, runtime: runtime, log: log}
 }
 
 func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota model.TenantQuota, req model.CreateSandboxRequest) (model.Sandbox, error) {
@@ -126,6 +132,10 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		sandbox.LastRuntimeError = err.Error()
 		sandbox.UpdatedAt = time.Now().UTC()
 		_ = s.store.UpdateSandboxState(ctx, sandbox)
+		s.recordAudit(ctx, tenant.ID, sandbox.ID, "sandbox.create", sandbox.ID, "error", auditDetail(
+			auditKV("stage", "runtime_create"),
+			auditKV("start_requested", req.Start),
+		), "error", err)
 		return sandbox, err
 	}
 	if req.Start {
@@ -136,6 +146,10 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 			sandbox.LastRuntimeError = err.Error()
 			sandbox.UpdatedAt = time.Now().UTC()
 			_ = s.store.UpdateSandboxState(ctx, sandbox)
+			s.recordAudit(ctx, tenant.ID, sandbox.ID, "sandbox.create", sandbox.ID, "error", auditDetail(
+				auditKV("stage", "runtime_start"),
+				auditKV("start_requested", true),
+			), "error", err)
 			return sandbox, err
 		}
 		sandbox.Status = model.SandboxStatusRunning
@@ -154,7 +168,12 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 	if err := s.refreshStorage(ctx, sandbox); err != nil {
 		return model.Sandbox{}, err
 	}
-	s.recordAudit(ctx, tenant.ID, sandbox.ID, "sandbox.create", sandbox.ID, "ok", "sandbox created")
+	s.recordAudit(ctx, tenant.ID, sandbox.ID, "sandbox.create", sandbox.ID, "ok", auditDetail(
+		auditKV("runtime", sandbox.RuntimeBackend),
+		auditKV("base_image_ref", sandbox.BaseImageRef),
+		auditKV("start_requested", req.Start),
+		auditKV("allow_tunnels", sandbox.AllowTunnels),
+	))
 	return s.store.GetSandbox(ctx, tenant.ID, sandbox.ID)
 }
 
@@ -242,7 +261,7 @@ func (s *Service) StartSandbox(ctx context.Context, tenantID, sandboxID string, 
 	if err := s.checkRunningQuota(ctx, tenantID, quota); err != nil {
 		return model.Sandbox{}, err
 	}
-	return s.transitionSandbox(ctx, tenantID, sandboxID, model.SandboxStatusStarting, func(sandbox model.Sandbox) (model.RuntimeState, model.SandboxStatus, error) {
+	return s.transitionSandbox(ctx, tenantID, sandboxID, "sandbox.start", model.SandboxStatusStarting, func(sandbox model.Sandbox) (model.RuntimeState, model.SandboxStatus, error) {
 		state, err := s.runtime.Start(ctx, sandbox)
 		return state, model.SandboxStatusRunning, err
 	}, model.SandboxStatusRunning)
@@ -266,6 +285,10 @@ func (s *Service) StopSandbox(ctx context.Context, tenantID, sandboxID string, f
 		sandbox.LastRuntimeError = err.Error()
 		sandbox.UpdatedAt = time.Now().UTC()
 		_ = s.store.UpdateSandboxState(ctx, sandbox)
+		s.recordAudit(ctx, tenantID, sandbox.ID, "sandbox.stop", sandbox.ID, "error", auditDetail(
+			auditKV("force", force),
+			auditKV("requested_status", model.SandboxStatusStopped),
+		), "error", err)
 		return model.Sandbox{}, err
 	}
 	sandbox.Status = model.SandboxStatusStopped
@@ -281,12 +304,15 @@ func (s *Service) StopSandbox(ctx context.Context, tenantID, sandboxID string, f
 	if err := s.refreshStorage(ctx, sandbox); err != nil {
 		return model.Sandbox{}, err
 	}
-	s.recordAudit(ctx, tenantID, sandbox.ID, "sandbox.stop", sandbox.ID, "ok", "sandbox stopped")
+	s.recordAudit(ctx, tenantID, sandbox.ID, "sandbox.stop", sandbox.ID, "ok", auditDetail(
+		auditKV("force", force),
+		auditKV("result_status", sandbox.Status),
+	))
 	return s.store.GetSandbox(ctx, tenantID, sandbox.ID)
 }
 
 func (s *Service) SuspendSandbox(ctx context.Context, tenantID, sandboxID string) (model.Sandbox, error) {
-	return s.transitionSandbox(ctx, tenantID, sandboxID, model.SandboxStatusSuspending, func(sandbox model.Sandbox) (model.RuntimeState, model.SandboxStatus, error) {
+	return s.transitionSandbox(ctx, tenantID, sandboxID, "sandbox.suspend", model.SandboxStatusSuspending, func(sandbox model.Sandbox) (model.RuntimeState, model.SandboxStatus, error) {
 		state, err := s.runtime.Suspend(ctx, sandbox)
 		return state, model.SandboxStatusSuspended, err
 	}, model.SandboxStatusSuspended)
@@ -303,7 +329,7 @@ func (s *Service) ResumeSandbox(ctx context.Context, tenantID, sandboxID string,
 	if err := s.checkRunningQuota(ctx, tenantID, quota); err != nil {
 		return model.Sandbox{}, err
 	}
-	return s.transitionSandbox(ctx, tenantID, sandboxID, model.SandboxStatusStarting, func(sandbox model.Sandbox) (model.RuntimeState, model.SandboxStatus, error) {
+	return s.transitionSandbox(ctx, tenantID, sandboxID, "sandbox.resume", model.SandboxStatusStarting, func(sandbox model.Sandbox) (model.RuntimeState, model.SandboxStatus, error) {
 		state, err := s.runtime.Resume(ctx, sandbox)
 		return state, model.SandboxStatusRunning, err
 	}, model.SandboxStatusRunning)
@@ -323,6 +349,10 @@ func (s *Service) DeleteSandbox(ctx context.Context, tenantID, sandboxID string,
 			if err := s.store.RevokeTunnel(ctx, tenantID, tunnel.ID); err != nil {
 				return err
 			}
+			s.recordAudit(ctx, tenantID, sandbox.ID, "tunnel.revoke", tunnel.ID, "ok", auditDetail(
+				auditKV("reason", "sandbox_delete"),
+				tunnelAuditDetail(tunnel),
+			))
 		}
 	}
 	if sandbox.Status == model.SandboxStatusRunning || sandbox.Status == model.SandboxStatusSuspended {
@@ -343,6 +373,9 @@ func (s *Service) DeleteSandbox(ctx context.Context, tenantID, sandboxID string,
 		sandbox.LastRuntimeError = err.Error()
 		sandbox.UpdatedAt = time.Now().UTC()
 		_ = s.store.UpdateSandboxState(ctx, sandbox)
+		s.recordAudit(ctx, tenantID, sandbox.ID, "sandbox.delete", sandbox.ID, "error", auditDetail(
+			auditKV("preserve_snapshots", preserveSnapshots),
+		), "error", err)
 		return err
 	}
 	if err := os.RemoveAll(filepath.Join(s.cfg.StorageRoot, sandbox.ID)); err != nil {
@@ -360,7 +393,9 @@ func (s *Service) DeleteSandbox(ctx context.Context, tenantID, sandboxID string,
 	if err := s.store.UpdateSandboxState(ctx, sandbox); err != nil {
 		return err
 	}
-	s.recordAudit(ctx, tenantID, sandbox.ID, "sandbox.delete", sandbox.ID, "ok", "sandbox deleted")
+	s.recordAudit(ctx, tenantID, sandbox.ID, "sandbox.delete", sandbox.ID, "ok", auditDetail(
+		auditKV("preserve_snapshots", preserveSnapshots),
+	))
 	return nil
 }
 
@@ -418,6 +453,7 @@ func (s *Service) ExecSandbox(ctx context.Context, tenant model.Tenant, quota mo
 		execution.CompletedAt = &now
 		execution.DurationMS = &durationMS
 		_ = s.store.UpdateExecution(persistCtx, execution)
+		s.recordAudit(persistCtx, tenant.ID, sandbox.ID, "sandbox.exec", execution.ID, "error", execAuditDetail(req), "error", err)
 		return model.Execution{}, err
 	}
 	persistCtx := context.WithoutCancel(ctx)
@@ -432,7 +468,7 @@ func (s *Service) ExecSandbox(ctx context.Context, tenant model.Tenant, quota mo
 		if err := s.store.UpdateExecution(persistCtx, execution); err != nil {
 			return model.Execution{}, err
 		}
-		s.recordAudit(persistCtx, tenant.ID, sandbox.ID, "sandbox.exec.detached", execution.ID, "ok", execution.Command)
+		s.recordAudit(persistCtx, tenant.ID, sandbox.ID, "sandbox.exec.detached", execution.ID, "ok", execAuditDetail(req))
 		return execution, nil
 	}
 	result := handle.Wait()
@@ -451,7 +487,7 @@ func (s *Service) ExecSandbox(ctx context.Context, tenant model.Tenant, quota mo
 		return model.Execution{}, err
 	}
 	_ = s.touchSandboxActivity(persistCtx, sandbox)
-	s.recordAudit(persistCtx, tenant.ID, sandbox.ID, "sandbox.exec", execution.ID, string(execution.Status), execution.Command)
+	s.recordAudit(persistCtx, tenant.ID, sandbox.ID, "sandbox.exec", execution.ID, string(execution.Status), execAuditDetail(req))
 	return execution, nil
 }
 
@@ -653,7 +689,7 @@ func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, 
 		return model.Tunnel{}, err
 	}
 	if !sandbox.AllowTunnels {
-		s.recordAudit(ctx, tenantID, sandboxID, "tunnel.create", sandboxID, "denied", "sandbox tunnel policy denied")
+		s.recordAudit(ctx, tenantID, sandboxID, "tunnel.create", sandboxID, "denied", auditKV("reason", "sandbox_tunnel_policy_denied"))
 		return model.Tunnel{}, fmt.Errorf("sandbox does not allow tunnels")
 	}
 	usage, err := s.store.TenantUsage(ctx, tenantID)
@@ -662,10 +698,11 @@ func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, 
 	}
 	quota, err := s.store.GetQuota(ctx, tenantID)
 	if err == nil && !quota.AllowTunnels {
-		s.recordAudit(ctx, tenantID, sandboxID, "tunnel.create", sandboxID, "denied", "tenant tunnel policy denied")
+		s.recordAudit(ctx, tenantID, sandboxID, "tunnel.create", sandboxID, "denied", auditKV("reason", "tenant_tunnel_policy_denied"))
 		return model.Tunnel{}, fmt.Errorf("tenant tunnel policy denied")
 	}
 	if err == nil && usage.ActiveTunnels >= quota.MaxTunnels {
+		s.recordAudit(ctx, tenantID, sandboxID, "tunnel.create", sandboxID, "denied", auditKV("reason", "tunnel_quota_exceeded"))
 		return model.Tunnel{}, fmt.Errorf("tunnel quota exceeded")
 	}
 	id := newID("tun-")
@@ -720,7 +757,7 @@ func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, 
 		return model.Tunnel{}, err
 	}
 	_ = s.touchSandboxActivity(ctx, sandbox)
-	s.recordAudit(ctx, tenantID, sandboxID, "tunnel.create", tunnel.ID, "ok", tunnel.Endpoint)
+	s.recordAudit(ctx, tenantID, sandboxID, "tunnel.create", tunnel.ID, "ok", tunnelAuditDetail(tunnel))
 	return tunnel, nil
 }
 
@@ -729,13 +766,14 @@ func (s *Service) ListTunnels(ctx context.Context, tenantID, sandboxID string) (
 }
 
 func (s *Service) RevokeTunnel(ctx context.Context, tenantID, tunnelID string) error {
-	if _, err := s.store.GetTunnel(ctx, tenantID, tunnelID); err != nil {
+	tunnel, err := s.store.GetTunnel(ctx, tenantID, tunnelID)
+	if err != nil {
 		return err
 	}
 	if err := s.store.RevokeTunnel(ctx, tenantID, tunnelID); err != nil {
 		return err
 	}
-	s.recordAudit(ctx, tenantID, "", "tunnel.revoke", tunnelID, "ok", "tunnel revoked")
+	s.recordAudit(ctx, tenantID, tunnel.SandboxID, "tunnel.revoke", tunnelID, "ok", tunnelAuditDetail(tunnel))
 	return nil
 }
 
@@ -782,26 +820,35 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 	if err := s.store.CreateSnapshot(ctx, snapshot); err != nil {
 		return model.Snapshot{}, err
 	}
+	stage := "persist"
 	failSnapshot := func(cause error) (model.Snapshot, error) {
 		snapshot.Status = model.SnapshotStatusError
 		_ = s.store.UpdateSnapshot(ctx, snapshot)
+		s.recordAudit(ctx, tenantID, sandboxID, "snapshot.create", snapshot.ID, "error", auditDetail(
+			auditKV("stage", stage),
+			auditKV("name", snapshot.Name),
+		), "error", cause)
 		return snapshot, cause
 	}
+	stage = "runtime_create"
 	info, err := s.runtime.CreateSnapshot(ctx, sandbox, snapshot.ID)
 	if err != nil {
 		return failSnapshot(err)
 	}
 	snapshotDir := filepath.Join(s.cfg.SnapshotRoot, sandbox.ID, snapshot.ID)
+	stage = "mkdir_snapshot_dir"
 	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
 		return failSnapshot(err)
 	}
 	if info.ImageRef != "" {
 		if looksLikeFilesystemPath(info.ImageRef) {
+			stage = "validate_rootfs_artifact"
 			if !isReadableFile(info.ImageRef) {
 				return failSnapshot(fmt.Errorf("snapshot image artifact is not readable: %s", info.ImageRef))
 			}
 			targetImage := filepath.Join(snapshotDir, "rootfs.img")
 			if info.ImageRef != targetImage {
+				stage = "copy_rootfs_artifact"
 				if err := copyFile(targetImage, info.ImageRef); err != nil {
 					return failSnapshot(err)
 				}
@@ -819,6 +866,7 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 	if info.WorkspaceTar != "" {
 		targetTar := filepath.Join(snapshotDir, "workspace.img")
 		if info.WorkspaceTar != targetTar {
+			stage = "copy_workspace_artifact"
 			if err := copyFile(targetTar, info.WorkspaceTar); err != nil {
 				return failSnapshot(err)
 			}
@@ -834,19 +882,22 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 	completed := time.Now().UTC()
 	snapshot.CompletedAt = &completed
 	if s.cfg.OptionalSnapshotExport != "" {
+		stage = "export_bundle"
 		exportLocation, err := s.exportSnapshotBundle(ctx, sandbox, snapshot)
 		if err != nil {
 			return failSnapshot(err)
 		}
 		snapshot.ExportLocation = exportLocation
 	}
+	stage = "persist_ready"
 	if err := s.store.UpdateSnapshot(ctx, snapshot); err != nil {
 		return failSnapshot(err)
 	}
+	stage = "refresh_storage"
 	if err := s.refreshStorage(ctx, sandbox); err != nil {
 		return failSnapshot(err)
 	}
-	s.recordAudit(ctx, tenantID, sandboxID, "snapshot.create", snapshot.ID, "ok", snapshot.Name)
+	s.recordAudit(ctx, tenantID, sandboxID, "snapshot.create", snapshot.ID, "ok", snapshotAuditDetail(snapshot))
 	return snapshot, nil
 }
 
@@ -870,17 +921,34 @@ func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID stri
 	if err != nil {
 		return model.Sandbox{}, err
 	}
+	forcedStop := false
 	if sandbox.Status == model.SandboxStatusRunning || sandbox.Status == model.SandboxStatusSuspended {
+		forcedStop = true
 		if _, err := s.StopSandbox(ctx, tenantID, sandbox.ID, true); err != nil {
+			s.recordAudit(ctx, tenantID, sandbox.ID, "snapshot.restore", snapshot.ID, "error", auditDetail(
+				auditKV("stage", "stop_target"),
+				auditKV("target_sandbox_id", sandbox.ID),
+				auditKV("forced_stop", true),
+			), "error", err)
 			return model.Sandbox{}, err
 		}
 		sandbox, _ = s.store.GetSandbox(ctx, tenantID, sandbox.ID)
 	}
 	if err := s.ensureSnapshotArtifacts(ctx, sandbox, snapshot); err != nil {
+		s.recordAudit(ctx, tenantID, sandbox.ID, "snapshot.restore", snapshot.ID, "error", auditDetail(
+			auditKV("stage", "ensure_artifacts"),
+			auditKV("target_sandbox_id", sandbox.ID),
+			auditKV("forced_stop", forcedStop),
+		), "error", err)
 		return model.Sandbox{}, err
 	}
 	state, err := s.runtime.RestoreSnapshot(ctx, sandbox, snapshot)
 	if err != nil {
+		s.recordAudit(ctx, tenantID, sandbox.ID, "snapshot.restore", snapshot.ID, "error", auditDetail(
+			auditKV("stage", "runtime_restore"),
+			auditKV("target_sandbox_id", sandbox.ID),
+			auditKV("forced_stop", forcedStop),
+		), "error", err)
 		return model.Sandbox{}, err
 	}
 	sandbox.Status = model.SandboxStatusStopped
@@ -896,7 +964,11 @@ func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID stri
 	if err := s.refreshStorage(ctx, sandbox); err != nil {
 		return model.Sandbox{}, err
 	}
-	s.recordAudit(ctx, tenantID, sandbox.ID, "snapshot.restore", snapshot.ID, "ok", snapshot.Name)
+	s.recordAudit(ctx, tenantID, sandbox.ID, "snapshot.restore", snapshot.ID, "ok", auditDetail(
+		auditKV("target_sandbox_id", sandbox.ID),
+		auditKV("forced_stop", forcedStop),
+		snapshotAuditDetail(snapshot),
+	))
 	return s.store.GetSandbox(ctx, tenantID, sandbox.ID)
 }
 
@@ -926,6 +998,11 @@ func (s *Service) Reconcile(ctx context.Context) error {
 			if updateErr := s.store.UpdateSandboxState(ctx, sandbox); updateErr != nil {
 				reconcileErr = errors.Join(reconcileErr, updateErr)
 			}
+			s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "sandbox.reconcile", sandbox.ID, "error", auditDetail(
+				auditKV("previous_status", previousStatus),
+				auditKV("result_status", sandbox.Status),
+				auditKV("reason", "inspect_failed"),
+			), "error", err)
 			continue
 		}
 		switch {
@@ -953,6 +1030,13 @@ func (s *Service) Reconcile(ctx context.Context) error {
 			reconcileErr = errors.Join(reconcileErr, updateErr)
 		}
 		stateChanged := sandbox.Status != previousStatus || sandbox.RuntimeStatus != previousRuntimeStatus || sandbox.RuntimeID != previousRuntimeID || sandbox.LastRuntimeError != previousRuntimeError
+		if stateChanged {
+			s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "sandbox.reconcile", sandbox.ID, "ok", auditDetail(
+				auditKV("previous_status", previousStatus),
+				auditKV("result_status", sandbox.Status),
+				auditKV("runtime_status", sandbox.RuntimeStatus),
+			))
+		}
 		if updateErr := s.refreshStorageIfStale(ctx, sandbox, stateChanged); updateErr != nil {
 			reconcileErr = errors.Join(reconcileErr, updateErr)
 		}
@@ -977,7 +1061,7 @@ func (s *Service) reconcileOrphanedExecutions(ctx context.Context) error {
 		if err := s.store.UpdateExecution(ctx, execution); err != nil {
 			return err
 		}
-		s.recordAudit(ctx, execution.TenantID, execution.SandboxID, "sandbox.exec.reconcile", execution.ID, "canceled", execution.Command)
+		s.recordAudit(ctx, execution.TenantID, execution.SandboxID, "sandbox.exec.reconcile", execution.ID, "canceled", executionAuditDetail(execution))
 	}
 	return nil
 }
@@ -1118,7 +1202,7 @@ func (s *Service) checkRunningQuota(ctx context.Context, tenantID string, quota 
 	return nil
 }
 
-func (s *Service) transitionSandbox(ctx context.Context, tenantID, sandboxID string, transitional model.SandboxStatus, action func(model.Sandbox) (model.RuntimeState, model.SandboxStatus, error), finalStatus model.SandboxStatus) (model.Sandbox, error) {
+func (s *Service) transitionSandbox(ctx context.Context, tenantID, sandboxID, auditAction string, transitional model.SandboxStatus, action func(model.Sandbox) (model.RuntimeState, model.SandboxStatus, error), finalStatus model.SandboxStatus) (model.Sandbox, error) {
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {
 		return model.Sandbox{}, err
@@ -1136,6 +1220,10 @@ func (s *Service) transitionSandbox(ctx context.Context, tenantID, sandboxID str
 		sandbox.LastRuntimeError = err.Error()
 		sandbox.UpdatedAt = time.Now().UTC()
 		_ = s.store.UpdateSandboxState(ctx, sandbox)
+		s.recordAudit(ctx, tenantID, sandbox.ID, auditAction, sandbox.ID, "error", auditDetail(
+			auditKV("transitional_status", transitional),
+			auditKV("requested_status", finalStatus),
+		), "error", err)
 		return model.Sandbox{}, err
 	}
 	sandbox.Status = nextStatus
@@ -1151,21 +1239,11 @@ func (s *Service) transitionSandbox(ctx context.Context, tenantID, sandboxID str
 	if err := s.refreshStorage(ctx, sandbox); err != nil {
 		return model.Sandbox{}, err
 	}
-	s.recordAudit(ctx, tenantID, sandbox.ID, "sandbox.transition", sandbox.ID, "ok", fmt.Sprintf("%s->%s", transitional, finalStatus))
+	s.recordAudit(ctx, tenantID, sandbox.ID, auditAction, sandbox.ID, "ok", auditDetail(
+		auditKV("transitional_status", transitional),
+		auditKV("result_status", finalStatus),
+	))
 	return s.store.GetSandbox(ctx, tenantID, sandbox.ID)
-}
-
-func (s *Service) recordAudit(ctx context.Context, tenantID, sandboxID, action, resourceID, outcome, message string) {
-	_ = s.store.AddAuditEvent(ctx, model.AuditEvent{
-		ID:         newID("audit-"),
-		TenantID:   tenantID,
-		SandboxID:  sandboxID,
-		Action:     action,
-		ResourceID: resourceID,
-		Outcome:    outcome,
-		Message:    message,
-		CreatedAt:  time.Now().UTC(),
-	})
 }
 
 func dirSize(root string) (int64, error) {

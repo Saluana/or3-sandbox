@@ -52,29 +52,29 @@
 - [x] Add operator guidance for capacity planning so runtime choice reflects both memory cost and security needs.
 - [x] Extend quota and health views to expose enough operator-facing storage, runtime, and capacity data for production operations.
 - [x] Add metric-friendly counters or a scrape endpoint for sandbox counts, running state, exec failures, snapshots, and capacity pressure.
-- [ ] Verify disk-full and quota-pressure behavior with regression coverage.
+- [x] Verify disk-full and quota-pressure behavior with regression coverage.
 - [x] Document capacity monitoring and quota interpretation in `docs/`.
 
 ## 8. Improve audit, logging, and incident response posture [R7]
 
-- [ ] Review audit event coverage in `internal/service/service.go` and ensure all privileged state transitions are recorded.
-- [ ] Standardize structured log fields across daemon, API, and service flows.
-- [ ] Add operator docs describing what to inspect during runtime, auth, storage, and snapshot incidents.
-- [ ] Ensure tunnel, snapshot, and auth-sensitive events include enough context without leaking secrets.
+- [x] Review audit event coverage in `internal/service/service.go` and ensure all privileged state transitions are recorded.
+- [x] Standardize structured log fields across daemon, API, and service flows.
+- [x] Add operator docs describing what to inspect during runtime, auth, storage, and snapshot incidents.
+- [x] Ensure tunnel, snapshot, and auth-sensitive events include enough context without leaking secrets.
 
 ## 9. Ship enterprise operations runbooks [R8]
 
-- [ ] Add production deployment documentation covering host prerequisites, runtime setup, secrets, storage roots, and startup ordering.
-- [ ] Add backup and restore documentation covering SQLite, snapshot roots, and optional export bundles.
-- [ ] Add upgrade guidance covering database, snapshot, and guest image compatibility expectations.
-- [ ] Add incident runbooks for daemon crash, guest boot failure, disk exhaustion, expired credentials, and snapshot corruption.
+- [x] Add production deployment documentation covering host prerequisites, runtime setup, secrets, storage roots, and startup ordering.
+- [x] Add backup and restore documentation covering SQLite, snapshot roots, and optional export bundles.
+- [x] Add upgrade guidance covering database, snapshot, and guest image compatibility expectations.
+- [x] Add incident runbooks for daemon crash, guest boot failure, disk exhaustion, expired credentials, and snapshot corruption.
 
 ## 10. Raise production test confidence [R9]
 
-- [ ] Ensure `go test` coverage for production-critical packages is stable and green in supported development environments.
-- [ ] Add a CI-friendly production smoke path for the most important non-host-specific flows.
-- [ ] Keep host integration coverage for QEMU workload claims and recovery drills, but document its prerequisites and intended environments.
-- [ ] Gate any future “enterprise-ready” docs language on passing tests and documented operator drills.
+- [x] Ensure `go test` coverage for production-critical packages is stable and green in supported development environments.
+- [x] Add a CI-friendly production smoke path for the most important non-host-specific flows.
+- [x] Keep host integration coverage for QEMU workload claims and recovery drills, but document its prerequisites and intended environments.
+- [x] Gate any future “enterprise-ready” docs language on passing tests and documented operator drills.
 
 ## 11. Out of scope for this phase
 

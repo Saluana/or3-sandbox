@@ -637,6 +637,77 @@ func TestTunnelSignedURLSurvivesHandlerRestart(t *testing.T) {
 	}
 }
 
+func TestTunnelProxyMismatchDoesNotPolluteTargetTenantAudit(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+
+	before, err := h.store.ListAuditEvents(context.Background(), "tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.expectStatus(t, "token-b", http.MethodGet, "/v1/tunnels/"+tunnel.ID+"/proxy", nil, http.StatusNotFound)
+	after, err := h.store.ListAuditEvents(context.Background(), "tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("expected cross-tenant tunnel probe to avoid tenant-a audit log, before=%d after=%d events=%+v", len(before), len(after), after)
+	}
+}
+
+func TestTunnelSignedURLAuditRedactsQuerySecrets(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	secret := "signed-url-secret"
+
+	h.createTunnelSignedURL(t, "token-a", tunnel.ID, model.CreateTunnelSignedURLRequest{
+		Path: "/oauth/callback?token=" + secret + "&mode=debug",
+	})
+
+	events, err := h.store.ListAuditEvents(context.Background(), "tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		event := events[i]
+		if event.Action != "tunnel.signed_url" || event.Outcome != "ok" {
+			continue
+		}
+		if strings.Contains(event.Message, secret) {
+			t.Fatalf("expected signed-url audit to redact query secrets, got %+v", event)
+		}
+		if strings.Contains(event.Message, "?") {
+			t.Fatalf("expected signed-url audit path to omit query string, got %+v", event)
+		}
+		return
+	}
+	t.Fatalf("expected signed-url audit event, got %+v", events)
+}
+
 func TestTunnelWebSocketProxyForwardsMessages(t *testing.T) {
 	h := newStubHarness(t)
 	defer h.close()

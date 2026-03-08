@@ -181,7 +181,8 @@ func (r presetRunner) Run() error {
 	if err != nil {
 		return err
 	}
-	req, err := r.buildCreateRequest(inputs)
+	templateVars := r.templateVars(inputs)
+	req, err := r.buildCreateRequest(templateVars)
 	if err != nil {
 		return err
 	}
@@ -195,7 +196,7 @@ func (r presetRunner) Run() error {
 		return err
 	}
 	vars := map[string]string{"SANDBOX_ID": sandbox.ID}
-	for key, value := range inputs {
+	for key, value := range templateVars {
 		vars[key] = value
 	}
 	fmt.Fprintf(os.Stdout, "sandbox_id=%s\n", sandbox.ID)
@@ -284,6 +285,26 @@ func (r presetRunner) resolveInputs() (map[string]string, error) {
 		}
 	}
 	return resolved, nil
+}
+
+func (r presetRunner) templateVars(inputs map[string]string) map[string]string {
+	vars := make(map[string]string, len(inputs)+len(r.dotEnvValues)+len(r.inputOverrides))
+	for key, value := range r.dotEnvValues {
+		if strings.TrimSpace(value) != "" {
+			vars[key] = value
+		}
+	}
+	for key, value := range inputs {
+		if strings.TrimSpace(value) != "" {
+			vars[key] = value
+		}
+	}
+	for key, value := range r.inputOverrides {
+		if strings.TrimSpace(value) != "" {
+			vars[key] = value
+		}
+	}
+	return vars
 }
 
 func loadPresetDotEnv() (map[string]string, error) {

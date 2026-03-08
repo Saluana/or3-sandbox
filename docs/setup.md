@@ -4,6 +4,8 @@ This guide shows the easiest way to get `or3-sandbox` running.
 
 If you are brand new to the project, use the **Docker runtime** first.
 
+If you are deploying for production, stop after the local setup walkthrough and switch to the operator docs in [Production Deployment](operations/production-deployment.md).
+
 ## What you need
 
 ### Required for the easy path

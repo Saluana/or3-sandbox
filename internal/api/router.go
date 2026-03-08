@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -69,8 +70,27 @@ func New(log *slog.Logger, svc *service.Service, cfg config.Config) http.Handler
 func loggingMiddleware(log *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
-		log.Info("http request", "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(start).Milliseconds())
+		recorder := &responseRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(recorder, r)
+		attrs := []any{
+			"event", "http.request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status_code", recorder.status,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"response_bytes", recorder.bytes,
+			"remote_addr", r.RemoteAddr,
+			"outcome", httpOutcome(recorder.status),
+		}
+		if tenantCtx, ok := auth.FromContext(r.Context()); ok {
+			attrs = append(attrs,
+				"tenant_id", tenantCtx.Tenant.ID,
+				"subject", tenantCtx.Identity.Subject,
+				"auth_method", tenantCtx.Identity.AuthMethod,
+			)
+		}
+		attrs = append(attrs, requestResourceAttrs(r.URL.Path)...)
+		log.Log(r.Context(), httpLogLevel(recorder.status), "http request completed", attrs...)
 	})
 }
 
@@ -681,11 +701,14 @@ func (rt *Router) handleTunnelSignedURL(w http.ResponseWriter, r *http.Request, 
 		handleError(w, err)
 		return
 	}
+	requesterTenantID := tenantCtx.Tenant.ID
 	if tunnel.RevokedAt != nil {
+		rt.recordTunnelDenial(r.Context(), requesterTenantID, tunnel, "tunnel.signed_url", "reason=revoked")
 		http.Error(w, "tunnel revoked", http.StatusGone)
 		return
 	}
-	if tenantCtx.Tenant.ID != tunnel.TenantID {
+	if requesterTenantID != tunnel.TenantID {
+		rt.recordTunnelDenial(r.Context(), requesterTenantID, tunnel, "tunnel.signed_url", "reason=tenant_mismatch")
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -727,6 +750,18 @@ func (rt *Router) handleTunnelSignedURL(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	auditPath := sanitizeTunnelAuditPath(path)
+	rt.service.RecordAuditEvent(r.Context(), tunnel.TenantID, tunnel.SandboxID, "tunnel.signed_url", tunnel.ID, "ok", fmt.Sprintf("path=%q expires_at=%s ttl_seconds=%d", auditPath, expiresAt.UTC().Format(time.RFC3339), int(ttl.Seconds())))
+	rt.log.Info("tunnel signed url issued",
+		"event", "tunnel.signed_url",
+		"tenant_id", tunnel.TenantID,
+		"sandbox_id", tunnel.SandboxID,
+		"tunnel_id", tunnel.ID,
+		"path", auditPath,
+		"expires_at", expiresAt.UTC().Format(time.RFC3339),
+		"ttl_seconds", int(ttl.Seconds()),
+		"outcome", "ok",
+	)
 	writeJSON(w, http.StatusOK, model.TunnelSignedURL{URL: signedURL, ExpiresAt: expiresAt})
 }
 
@@ -736,37 +771,71 @@ func (rt *Router) handleTunnelProxy(w http.ResponseWriter, r *http.Request, tunn
 		handleError(w, err)
 		return
 	}
+	tenantCtx, hasTenant := auth.FromContext(r.Context())
+	requesterTenantID := ""
+	if hasTenant {
+		requesterTenantID = tenantCtx.Tenant.ID
+	}
 	if tunnel.RevokedAt != nil {
+		rt.recordTunnelDenial(r.Context(), requesterTenantID, tunnel, "tunnel.proxy", "reason=revoked")
 		http.Error(w, "tunnel revoked", http.StatusGone)
 		return
 	}
-	tenantCtx, hasTenant := auth.FromContext(r.Context())
 	browserAuthorized, bootstrapped := rt.authorizeTunnelBrowserSession(w, r, tunnel)
 	if bootstrapped {
 		return
 	}
 	if tunnel.Visibility != "public" {
 		if (!hasTenant || tenantCtx.Tenant.ID != tunnel.TenantID) && !browserAuthorized {
+			rt.recordTunnelDenial(r.Context(), requesterTenantID, tunnel, "tunnel.proxy", fmt.Sprintf("reason=tenant_mismatch visibility=%s", tunnel.Visibility))
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 	}
 	queryAccessToken := ""
+	authSource := "none"
 	if tunnel.AuthMode == "token" {
 		authorized := browserAuthorized
 		presented := r.Header.Get("X-Tunnel-Token")
+		if browserAuthorized {
+			authSource = "signed_cookie"
+		}
 		if presented == "" {
 			presented = r.URL.Query().Get("token")
 			queryAccessToken = presented
+			if presented != "" {
+				authSource = "query"
+			}
+		} else {
+			authSource = "header"
 		}
 		if !authorized && presented != "" && config.HashToken(presented) == tunnel.AuthSecretHash {
 			authorized = true
 		}
 		if !authorized {
+			rt.recordTunnelDenial(r.Context(), requesterTenantID, tunnel, "tunnel.proxy", fmt.Sprintf("reason=token_auth_failed visibility=%s", tunnel.Visibility))
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
+	} else if browserAuthorized {
+		authSource = "signed_cookie"
+	} else if hasTenant && tenantCtx.Tenant.ID == tunnel.TenantID {
+		authSource = "tenant_bearer"
+	} else if tunnel.Visibility == "public" {
+		authSource = "public"
 	}
+	rt.log.Info("tunnel proxy authorized",
+		"event", "tunnel.proxy",
+		"tenant_id", tunnel.TenantID,
+		"sandbox_id", tunnel.SandboxID,
+		"tunnel_id", tunnel.ID,
+		"visibility", tunnel.Visibility,
+		"auth_mode", tunnel.AuthMode,
+		"auth_source", authSource,
+		"method", r.Method,
+		"path", r.URL.Path,
+		"outcome", "ok",
+	)
 	if websocket.IsWebSocketUpgrade(r) {
 		rt.handleTunnelWebSocket(w, r, tunnel, sandbox, queryAccessToken)
 		return
@@ -1150,6 +1219,123 @@ func requireFilePermission(w http.ResponseWriter, r *http.Request) bool {
 		permission = auth.PermissionFilesWrite
 	}
 	return requirePermission(w, r, permission)
+}
+
+func (rt *Router) recordTunnelDenial(ctx context.Context, requesterTenantID string, tunnel model.Tunnel, action, detail string) {
+	logAttrs := []any{
+		"event", action,
+		"tenant_id", tunnel.TenantID,
+		"sandbox_id", tunnel.SandboxID,
+		"tunnel_id", tunnel.ID,
+		"outcome", "denied",
+		"detail", detail,
+	}
+	if requesterTenantID != "" {
+		logAttrs = append(logAttrs, "requester_tenant_id", requesterTenantID)
+	}
+	rt.log.Warn("tunnel access denied", logAttrs...)
+	if requesterTenantID == tunnel.TenantID {
+		rt.service.RecordAuditEvent(ctx, tunnel.TenantID, tunnel.SandboxID, action, tunnel.ID, "denied", detail)
+	}
+}
+
+func sanitizeTunnelAuditPath(path string) string {
+	parsed, err := url.Parse(path)
+	if err != nil {
+		return path
+	}
+	sanitized := parsed.EscapedPath()
+	if sanitized == "" {
+		sanitized = parsed.Path
+	}
+	if sanitized == "" {
+		return "/"
+	}
+	return sanitized
+}
+
+type responseRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (r *responseRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *responseRecorder) Write(p []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	n, err := r.ResponseWriter.Write(p)
+	r.bytes += n
+	return n, err
+}
+
+func (r *responseRecorder) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (r *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response writer does not support hijacking")
+	}
+	return hijacker.Hijack()
+}
+
+func (r *responseRecorder) Push(target string, opts *http.PushOptions) error {
+	if pusher, ok := r.ResponseWriter.(http.Pusher); ok {
+		return pusher.Push(target, opts)
+	}
+	return http.ErrNotSupported
+}
+
+func httpOutcome(status int) string {
+	switch {
+	case status >= 500:
+		return "error"
+	case status >= 400:
+		return "denied"
+	default:
+		return "ok"
+	}
+}
+
+func httpLogLevel(status int) slog.Level {
+	switch {
+	case status >= 500:
+		return slog.LevelError
+	case status >= 400:
+		return slog.LevelWarn
+	default:
+		return slog.LevelInfo
+	}
+}
+
+func requestResourceAttrs(path string) []any {
+	switch {
+	case strings.HasPrefix(path, "/v1/sandboxes/"):
+		parts := strings.Split(strings.TrimPrefix(path, "/v1/sandboxes/"), "/")
+		if len(parts) > 0 && parts[0] != "" {
+			return []any{"sandbox_id", parts[0]}
+		}
+	case strings.HasPrefix(path, "/v1/snapshots/"):
+		parts := strings.Split(strings.TrimPrefix(path, "/v1/snapshots/"), "/")
+		if len(parts) > 0 && parts[0] != "" {
+			return []any{"snapshot_id", parts[0]}
+		}
+	case strings.HasPrefix(path, "/v1/tunnels/"):
+		parts := strings.Split(strings.TrimPrefix(path, "/v1/tunnels/"), "/")
+		if len(parts) > 0 && parts[0] != "" {
+			return []any{"tunnel_id", parts[0]}
+		}
+	}
+	return nil
 }
 
 func mustJSON(payload any) string {

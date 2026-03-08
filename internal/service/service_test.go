@@ -887,6 +887,157 @@ func TestCreateSandboxRejectsFractionalCPUOnQEMU(t *testing.T) {
 	}
 }
 
+func TestLifecycleAuditsUseSpecificActionsAndFailureOutcomes(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	if _, err := svc.StartSandbox(ctx, tenantA.ID, sandbox.ID, quota); err != nil {
+		t.Fatalf("start sandbox: %v", err)
+	}
+	runtime.stopErr = errors.New("forced stop failure")
+	if _, err := svc.StopSandbox(ctx, tenantA.ID, sandbox.ID, true); err == nil {
+		t.Fatal("expected stop failure")
+	}
+
+	events, err := store.ListAuditEvents(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	var sawStart, sawStopFailure bool
+	for _, event := range events {
+		if event.Action == "sandbox.start" && event.Outcome == "ok" {
+			sawStart = true
+		}
+		if event.Action == "sandbox.stop" && event.Outcome == "error" && strings.Contains(event.Message, "force=true") {
+			sawStopFailure = true
+		}
+		if event.Action == "sandbox.transition" {
+			t.Fatalf("unexpected generic transition audit event: %+v", event)
+		}
+	}
+	if !sawStart {
+		t.Fatalf("expected sandbox.start audit event, got %+v", events)
+	}
+	if !sawStopFailure {
+		t.Fatalf("expected sandbox.stop failure audit event, got %+v", events)
+	}
+}
+
+func TestExecAuditSanitizesCommandArguments(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	runtime.startState = model.RuntimeState{RuntimeID: "rt-start", Status: model.SandboxStatusRunning, Running: true}
+	runtime.execHandleFactory = func(context.Context, model.ExecRequest) model.ExecHandle {
+		ch := make(chan model.ExecResult, 1)
+		now := time.Now().UTC()
+		ch <- model.ExecResult{
+			ExitCode:    0,
+			Status:      model.ExecutionStatusSucceeded,
+			StartedAt:   now,
+			CompletedAt: now,
+		}
+		close(ch)
+		return stubExecHandle{ch: ch}
+	}
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	secret := "super-secret-token"
+	if _, err := svc.ExecSandbox(ctx, tenantA, quota, sandbox.ID, model.ExecRequest{
+		Command: []string{"sh", "-lc", "echo " + secret},
+		Cwd:     "/workspace",
+		Timeout: 10 * time.Second,
+	}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("exec sandbox: %v", err)
+	}
+
+	events, err := store.ListAuditEvents(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	last := events[len(events)-1]
+	if last.Action != "sandbox.exec" {
+		t.Fatalf("unexpected last audit event: %+v", last)
+	}
+	if strings.Contains(last.Message, secret) {
+		t.Fatalf("expected exec audit to omit secret-bearing arguments, got %+v", last)
+	}
+	if !strings.Contains(last.Message, `entrypoint=sh`) {
+		t.Fatalf("expected sanitized exec summary, got %+v", last)
+	}
+}
+
+func TestReconcileAuditsDegradedTransitions(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	runtime.startState = model.RuntimeState{RuntimeID: "rt-start", Status: model.SandboxStatusRunning, Running: true}
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	runtime.inspectErr = errors.New("guest unreachable")
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	events, err := store.ListAuditEvents(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	var sawDegraded bool
+	for _, event := range events {
+		if event.Action == "sandbox.reconcile" && event.Outcome == "error" && strings.Contains(event.Message, "reason=inspect_failed") {
+			sawDegraded = true
+		}
+	}
+	if !sawDegraded {
+		t.Fatalf("expected reconcile degradation audit event, got %+v", events)
+	}
+	stored, err := svc.GetSandbox(ctx, tenantA.ID, sandbox.ID)
+	if err != nil {
+		t.Fatalf("get sandbox: %v", err)
+	}
+	if stored.Status != model.SandboxStatusDegraded {
+		t.Fatalf("expected degraded sandbox after reconcile, got %+v", stored)
+	}
+}
+
 func assertActualStorage(t *testing.T, store *repository.Store, tenantID string, want int64) {
 	t.Helper()
 	usage, err := store.TenantUsage(context.Background(), tenantID)
@@ -955,6 +1106,13 @@ type stubRuntime struct {
 	inspectState      model.RuntimeState
 	snapshotInfo      model.SnapshotInfo
 	storageUsage      model.StorageUsage
+	createErr         error
+	startErr          error
+	stopErr           error
+	suspendErr        error
+	resumeErr         error
+	destroyErr        error
+	restoreErr        error
 	inspectErr        error
 	inspectCalls      int
 	execHandleFactory func(context.Context, model.ExecRequest) model.ExecHandle
@@ -1004,27 +1162,42 @@ func newRuntimeOnlyStub() *runtimeOnlyStub {
 
 func (r *stubRuntime) Create(_ context.Context, spec model.SandboxSpec) (model.RuntimeState, error) {
 	r.createdSpec = spec
+	if r.createErr != nil {
+		return model.RuntimeState{}, r.createErr
+	}
 	return withDefaultRuntimeState(r.createState, model.SandboxStatusStopped, false), nil
 }
 
 func (r *stubRuntime) Start(context.Context, model.Sandbox) (model.RuntimeState, error) {
+	if r.startErr != nil {
+		return model.RuntimeState{}, r.startErr
+	}
 	return withDefaultRuntimeState(r.startState, model.SandboxStatusRunning, true), nil
 }
 
 func (r *stubRuntime) Stop(context.Context, model.Sandbox, bool) (model.RuntimeState, error) {
+	if r.stopErr != nil {
+		return model.RuntimeState{}, r.stopErr
+	}
 	return withDefaultRuntimeState(r.stopState, model.SandboxStatusStopped, false), nil
 }
 
 func (r *stubRuntime) Suspend(context.Context, model.Sandbox) (model.RuntimeState, error) {
-	return model.RuntimeState{}, errors.New("not implemented")
+	if r.suspendErr != nil {
+		return model.RuntimeState{}, r.suspendErr
+	}
+	return withDefaultRuntimeState(model.RuntimeState{}, model.SandboxStatusSuspended, false), nil
 }
 
 func (r *stubRuntime) Resume(context.Context, model.Sandbox) (model.RuntimeState, error) {
-	return model.RuntimeState{}, errors.New("not implemented")
+	if r.resumeErr != nil {
+		return model.RuntimeState{}, r.resumeErr
+	}
+	return withDefaultRuntimeState(model.RuntimeState{}, model.SandboxStatusRunning, true), nil
 }
 
 func (r *stubRuntime) Destroy(context.Context, model.Sandbox) error {
-	return nil
+	return r.destroyErr
 }
 
 func (r *stubRuntime) Inspect(context.Context, model.Sandbox) (model.RuntimeState, error) {
@@ -1054,6 +1227,9 @@ func (r *stubRuntime) CreateSnapshot(context.Context, model.Sandbox, string) (mo
 }
 
 func (r *stubRuntime) RestoreSnapshot(context.Context, model.Sandbox, model.Snapshot) (model.RuntimeState, error) {
+	if r.restoreErr != nil {
+		return model.RuntimeState{}, r.restoreErr
+	}
 	return withDefaultRuntimeState(r.restoreState, model.SandboxStatusStopped, false), nil
 }
 

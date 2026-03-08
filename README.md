@@ -31,6 +31,7 @@ See also:
 - `planning/onwards/tasks.md`
 - `planning/onwards/status_matrix.md`
 - `docs/README.md`
+- `docs/operations/README.md`
 
 ## Documentation
 
@@ -121,5 +122,9 @@ The active next-step design work is focused on:
 ## Tests
 
 ```bash
-go test ./...
+./scripts/production-smoke.sh
 ```
+
+For host-prepared QEMU verification, backup or restore procedures, and incident drills, use the operator docs under `docs/operations/`.
+
+Production-facing deployment language should be gated on the smoke path above plus the documented drills in `docs/operations/verification.md`.

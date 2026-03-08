@@ -35,6 +35,17 @@ If you are learning the project or trying it on your own computer, start with Do
 6. [Runtimes](runtimes.md) — Docker vs. QEMU, and when to use each one
 7. [API Reference](api-reference.md) — the main HTTP endpoints and quick examples
 
+## Operations
+
+For production and operator workflows, continue with:
+
+- [Operations Overview](operations/README.md)
+- [Production Deployment](operations/production-deployment.md)
+- [Backup And Restore](operations/backup-and-restore.md)
+- [Upgrade Guide](operations/upgrades.md)
+- [Incident Runbooks](operations/incidents.md)
+- [Production Verification](operations/verification.md)
+
 ## Tutorials
 
 - [Tutorial 1: Your First Sandbox](tutorials/first-sandbox.md)

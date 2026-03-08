@@ -27,43 +27,44 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	log := logging.New()
+	rootLog := logging.New()
+	log := rootLog.With("component", "daemon")
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	sqlDB, err := db.Open(ctx, cfg.DatabasePath)
 	if err != nil {
-		log.Error("open database", "error", err)
+		log.Error("database open failed", "event", "database.open", "error", err)
 		os.Exit(1)
 	}
 	defer sqlDB.Close()
 
 	store := repository.New(sqlDB)
 	if err := store.SeedTenants(ctx, cfg.Tenants, cfg.DefaultQuota); err != nil {
-		log.Error("seed tenants", "error", err)
+		log.Error("tenant seed failed", "event", "tenant.seed", "error", err)
 		os.Exit(1)
 	}
 
 	runtime, err := buildRuntime(cfg)
 	if err != nil {
-		log.Error("configure runtime", "error", err, "runtime", cfg.RuntimeBackend)
+		log.Error("runtime configure failed", "event", "runtime.configure", "runtime", cfg.RuntimeBackend, "error", err)
 		os.Exit(1)
 	}
-	svc := service.New(cfg, store, runtime)
+	svc := service.New(cfg, store, runtime, rootLog.With("component", "service"))
 	if err := svc.Reconcile(ctx); err != nil {
-		log.Error("initial reconcile failed", "error", err)
+		log.Error("initial reconcile failed", "event", "reconcile.initial", "error", err)
 	}
 
 	go reconcileLoop(ctx, log, svc, cfg.ReconcileInterval)
 
-	handler := auth.New(store, cfg).Wrap(api.New(log, svc, cfg))
+	handler := auth.New(store, cfg, rootLog.With("component", "auth")).Wrap(api.New(rootLog.With("component", "api"), svc, cfg))
 	server := &http.Server{
 		Addr:              cfg.ListenAddress,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
-		log.Info("sandboxd listening", "addr", cfg.ListenAddress, "runtime", cfg.RuntimeBackend, "mode", cfg.DeploymentMode, "auth_mode", cfg.AuthMode, "tls", cfg.TLSCertPath != "", "trusted_proxy", cfg.TrustedProxyHeaders)
+		log.Info("daemon listening", "event", "daemon.listen", "addr", cfg.ListenAddress, "runtime", cfg.RuntimeBackend, "mode", cfg.DeploymentMode, "auth_mode", cfg.AuthMode, "tls_enabled", cfg.TLSCertPath != "", "trusted_proxy", cfg.TrustedProxyHeaders)
 		var err error
 		if cfg.TLSCertPath != "" {
 			err = server.ListenAndServeTLS(cfg.TLSCertPath, cfg.TLSKeyPath)
@@ -71,7 +72,7 @@ func main() {
 			err = server.ListenAndServe()
 		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Error("server failed", "error", err)
+			log.Error("server failed", "event", "daemon.serve", "error", err)
 			stop()
 		}
 	}()
@@ -80,7 +81,7 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.GracefulShutdown)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Error("shutdown failed", "error", err)
+		log.Error("shutdown failed", "event", "daemon.shutdown", "error", err)
 	}
 }
 
@@ -111,7 +112,7 @@ func reconcileLoop(ctx context.Context, log *slog.Logger, svc *service.Service, 
 			return
 		case <-ticker.C:
 			if err := svc.Reconcile(ctx); err != nil {
-				log.Error("reconcile failed", "error", err)
+				log.Error("reconcile failed", "event", "reconcile.tick", "error", err)
 			}
 		}
 	}
