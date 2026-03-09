@@ -52,39 +52,83 @@ const (
 	ExecutionStatusCanceled  ExecutionStatus = "canceled"
 )
 
+type GuestProfile string
+
+const (
+	GuestProfileCore      GuestProfile = "core"
+	GuestProfileRuntime   GuestProfile = "runtime"
+	GuestProfileBrowser   GuestProfile = "browser"
+	GuestProfileContainer GuestProfile = "container"
+	GuestProfileDebug     GuestProfile = "debug"
+)
+
+type GuestControlMode string
+
+const (
+	GuestControlModeAgent     GuestControlMode = "agent"
+	GuestControlModeSSHCompat GuestControlMode = "ssh-compat"
+)
+
+func (p GuestProfile) IsValid() bool {
+	switch p {
+	case GuestProfileCore, GuestProfileRuntime, GuestProfileBrowser, GuestProfileContainer, GuestProfileDebug:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m GuestControlMode) IsValid() bool {
+	switch m {
+	case GuestControlModeAgent, GuestControlModeSSHCompat:
+		return true
+	default:
+		return false
+	}
+}
+
 type Sandbox struct {
-	ID               string        `json:"id"`
-	TenantID         string        `json:"tenant_id"`
-	Status           SandboxStatus `json:"status"`
-	RuntimeBackend   string        `json:"runtime_backend"`
-	BaseImageRef     string        `json:"base_image_ref"`
-	CPULimit         CPUQuantity   `json:"cpu_limit"`
-	MemoryLimitMB    int           `json:"memory_limit_mb"`
-	PIDsLimit        int           `json:"pids_limit"`
-	DiskLimitMB      int           `json:"disk_limit_mb"`
-	NetworkMode      NetworkMode   `json:"network_mode"`
-	AllowTunnels     bool          `json:"allow_tunnels"`
-	StorageRoot      string        `json:"-"`
-	WorkspaceRoot    string        `json:"-"`
-	CacheRoot        string        `json:"-"`
-	RuntimeID        string        `json:"runtime_id"`
-	RuntimeStatus    string        `json:"runtime_status"`
-	LastRuntimeError string        `json:"last_runtime_error,omitempty"`
-	CreatedAt        time.Time     `json:"created_at"`
-	UpdatedAt        time.Time     `json:"updated_at"`
-	LastActiveAt     time.Time     `json:"last_active_at"`
-	DeletedAt        *time.Time    `json:"deleted_at,omitempty"`
+	ID                       string           `json:"id"`
+	TenantID                 string           `json:"tenant_id"`
+	Status                   SandboxStatus    `json:"status"`
+	RuntimeBackend           string           `json:"runtime_backend"`
+	BaseImageRef             string           `json:"base_image_ref"`
+	Profile                  GuestProfile     `json:"profile,omitempty"`
+	Features                 []string         `json:"features,omitempty"`
+	Capabilities             []string         `json:"capabilities,omitempty"`
+	ControlMode              GuestControlMode `json:"control_mode,omitempty"`
+	ControlProtocolVersion   string           `json:"control_protocol_version,omitempty"`
+	WorkspaceContractVersion string           `json:"workspace_contract_version,omitempty"`
+	ImageContractVersion     string           `json:"image_contract_version,omitempty"`
+	CPULimit                 CPUQuantity      `json:"cpu_limit"`
+	MemoryLimitMB            int              `json:"memory_limit_mb"`
+	PIDsLimit                int              `json:"pids_limit"`
+	DiskLimitMB              int              `json:"disk_limit_mb"`
+	NetworkMode              NetworkMode      `json:"network_mode"`
+	AllowTunnels             bool             `json:"allow_tunnels"`
+	StorageRoot              string           `json:"-"`
+	WorkspaceRoot            string           `json:"-"`
+	CacheRoot                string           `json:"-"`
+	RuntimeID                string           `json:"runtime_id"`
+	RuntimeStatus            string           `json:"runtime_status"`
+	LastRuntimeError         string           `json:"last_runtime_error,omitempty"`
+	CreatedAt                time.Time        `json:"created_at"`
+	UpdatedAt                time.Time        `json:"updated_at"`
+	LastActiveAt             time.Time        `json:"last_active_at"`
+	DeletedAt                *time.Time       `json:"deleted_at,omitempty"`
 }
 
 type CreateSandboxRequest struct {
-	BaseImageRef  string      `json:"base_image_ref"`
-	CPULimit      CPUQuantity `json:"cpu_limit"`
-	MemoryLimitMB int         `json:"memory_limit_mb"`
-	PIDsLimit     int         `json:"pids_limit"`
-	DiskLimitMB   int         `json:"disk_limit_mb"`
-	NetworkMode   NetworkMode `json:"network_mode"`
-	AllowTunnels  *bool       `json:"allow_tunnels,omitempty"`
-	Start         bool        `json:"start"`
+	BaseImageRef  string       `json:"base_image_ref"`
+	Profile       GuestProfile `json:"profile,omitempty"`
+	Features      []string     `json:"features,omitempty"`
+	CPULimit      CPUQuantity  `json:"cpu_limit"`
+	MemoryLimitMB int          `json:"memory_limit_mb"`
+	PIDsLimit     int          `json:"pids_limit"`
+	DiskLimitMB   int          `json:"disk_limit_mb"`
+	NetworkMode   NetworkMode  `json:"network_mode"`
+	AllowTunnels  *bool        `json:"allow_tunnels,omitempty"`
+	Start         bool         `json:"start"`
 }
 
 type LifecycleRequest struct {
@@ -191,16 +235,19 @@ type CreateSnapshotRequest struct {
 }
 
 type Snapshot struct {
-	ID             string         `json:"id"`
-	SandboxID      string         `json:"sandbox_id"`
-	TenantID       string         `json:"tenant_id"`
-	Name           string         `json:"name"`
-	Status         SnapshotStatus `json:"status"`
-	ImageRef       string         `json:"image_ref"`
-	WorkspaceTar   string         `json:"-"`
-	ExportLocation string         `json:"export_location,omitempty"`
-	CreatedAt      time.Time      `json:"created_at"`
-	CompletedAt    *time.Time     `json:"completed_at,omitempty"`
+	ID                     string         `json:"id"`
+	SandboxID              string         `json:"sandbox_id"`
+	TenantID               string         `json:"tenant_id"`
+	Name                   string         `json:"name"`
+	Status                 SnapshotStatus `json:"status"`
+	ImageRef               string         `json:"image_ref"`
+	Profile                GuestProfile   `json:"profile,omitempty"`
+	ImageContractVersion   string         `json:"image_contract_version,omitempty"`
+	ControlProtocolVersion string         `json:"control_protocol_version,omitempty"`
+	WorkspaceTar           string         `json:"-"`
+	ExportLocation         string         `json:"export_location,omitempty"`
+	CreatedAt              time.Time      `json:"created_at"`
+	CompletedAt            *time.Time     `json:"completed_at,omitempty"`
 }
 
 type RestoreSnapshotRequest struct {

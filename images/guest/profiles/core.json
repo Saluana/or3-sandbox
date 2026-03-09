@@ -1,0 +1,30 @@
+{
+  "profile": "core",
+  "description": "Minimal production profile with agent-based control and no SSH or inner Docker.",
+  "control": {
+    "mode": "agent",
+    "protocol_version": "1",
+    "supported_transports": [
+      "virtio-serial"
+    ]
+  },
+  "workspace_contract_version": "1",
+  "capabilities": [
+    "exec",
+    "files",
+    "pty"
+  ],
+  "allowed_features": [],
+  "packages": [
+    "ca-certificates",
+    "curl",
+    "e2fsprogs",
+    "jq"
+  ],
+  "enable_services": [],
+  "sandbox_groups": [],
+  "sandbox_passwordless_sudo": false,
+  "ssh_present": false,
+  "dangerous": false,
+  "debug": false
+}

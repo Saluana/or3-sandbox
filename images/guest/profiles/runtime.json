@@ -1,0 +1,15 @@
+{
+  "extends": "core",
+  "profile": "runtime",
+  "description": "Agent-based profile with common language runtimes and build tools.",
+  "capabilities": [
+    "runtime"
+  ],
+  "packages": [
+    "git",
+    "nodejs",
+    "npm",
+    "python3",
+    "python3-pip"
+  ]
+}

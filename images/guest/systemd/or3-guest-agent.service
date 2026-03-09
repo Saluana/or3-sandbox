@@ -1,0 +1,13 @@
+[Unit]
+Description=or3 guest agent
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/or3-guest-agent
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

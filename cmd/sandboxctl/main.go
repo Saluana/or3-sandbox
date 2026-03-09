@@ -34,6 +34,8 @@ func main() {
 	}
 	var err error
 	switch os.Args[1] {
+	case "doctor":
+		err = runDoctor(os.Args[2:])
 	case "create":
 		err = runCreate(client, os.Args[2:])
 	case "list":
@@ -94,6 +96,8 @@ type clientConfig struct {
 func runCreate(client clientConfig, args []string) error {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	image := fs.String("image", "", "base image")
+	profile := fs.String("profile", "", "guest profile for qemu images: core, runtime, browser, container, debug")
+	features := fs.String("features", "", "comma-separated guest features to request when supported by the qemu image contract")
 	cpu := fs.String("cpu", "2", "cpu limit (cores, decimal cores, or millicores like 1500m)")
 	memory := fs.Int("memory-mb", 2048, "memory limit")
 	pids := fs.Int("pids", 512, "pids limit")
@@ -112,6 +116,8 @@ func runCreate(client clientConfig, args []string) error {
 	}
 	return doJSON(client, http.MethodPost, "/v1/sandboxes", model.CreateSandboxRequest{
 		BaseImageRef:  *image,
+		Profile:       model.GuestProfile(strings.ToLower(strings.TrimSpace(*profile))),
+		Features:      model.NormalizeFeatures(strings.Split(*features, ",")),
 		CPULimit:      cpuLimit,
 		MemoryLimitMB: *memory,
 		PIDsLimit:     *pids,
@@ -509,7 +515,7 @@ func printJSON(value any) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: sandboxctl <create|list|inspect|start|stop|suspend|resume|delete|exec|tty|upload|download|mkdir|tunnel-create|tunnel-list|tunnel-revoke|quota|runtime-health|snapshot-create|snapshot-list|snapshot-inspect|snapshot-restore|preset>")
+	fmt.Fprintln(os.Stderr, "usage: sandboxctl <doctor|create|list|inspect|start|stop|suspend|resume|delete|exec|tty|upload|download|mkdir|tunnel-create|tunnel-list|tunnel-revoke|quota|runtime-health|snapshot-create|snapshot-list|snapshot-inspect|snapshot-restore|preset>")
 }
 
 func env(key, fallback string) string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"or3-sandbox/internal/config"
@@ -172,12 +173,14 @@ func (s *Store) CreateSandbox(ctx context.Context, sandbox model.Sandbox) error 
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO sandboxes(
 				sandbox_id, tenant_id, status, runtime_backend, base_image_ref,
+				profile, feature_set, capability_set, control_mode, control_protocol_version, workspace_contract_version, image_contract_version,
 				cpu_limit, cpu_limit_millis, memory_limit_mb, pids_limit, disk_limit_mb,
 				network_mode, allow_tunnels, storage_root, workspace_root, cache_root,
 				created_at, updated_at, last_active_at, deleted_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
 		`, sandbox.ID, sandbox.TenantID, string(sandbox.Status), sandbox.RuntimeBackend, sandbox.BaseImageRef,
+			string(sandbox.Profile), joinStringList(sandbox.Features), joinStringList(sandbox.Capabilities), string(sandbox.ControlMode), sandbox.ControlProtocolVersion, sandbox.WorkspaceContractVersion, sandbox.ImageContractVersion,
 			sandbox.CPULimit.VCPUCount(), sandbox.CPULimit.MilliValue(), sandbox.MemoryLimitMB, sandbox.PIDsLimit, sandbox.DiskLimitMB,
 			string(sandbox.NetworkMode), boolToInt(sandbox.AllowTunnels), sandbox.StorageRoot, sandbox.WorkspaceRoot, sandbox.CacheRoot,
 			now, sandbox.UpdatedAt.UTC().Format(time.RFC3339Nano), sandbox.LastActiveAt.UTC().Format(time.RFC3339Nano),
@@ -208,10 +211,10 @@ func (s *Store) UpdateSandboxState(ctx context.Context, sandbox model.Sandbox) e
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE sandboxes
-			SET status=?, base_image_ref=?, cpu_limit=?, cpu_limit_millis=?, memory_limit_mb=?, pids_limit=?, disk_limit_mb=?, network_mode=?, allow_tunnels=?,
+			SET status=?, base_image_ref=?, profile=?, feature_set=?, capability_set=?, control_mode=?, control_protocol_version=?, workspace_contract_version=?, image_contract_version=?, cpu_limit=?, cpu_limit_millis=?, memory_limit_mb=?, pids_limit=?, disk_limit_mb=?, network_mode=?, allow_tunnels=?,
 			    updated_at=?, last_active_at=?, deleted_at=?
 			WHERE sandbox_id=? AND tenant_id=?
-		`, string(sandbox.Status), sandbox.BaseImageRef, sandbox.CPULimit.VCPUCount(), sandbox.CPULimit.MilliValue(), sandbox.MemoryLimitMB, sandbox.PIDsLimit, sandbox.DiskLimitMB,
+		`, string(sandbox.Status), sandbox.BaseImageRef, string(sandbox.Profile), joinStringList(sandbox.Features), joinStringList(sandbox.Capabilities), string(sandbox.ControlMode), sandbox.ControlProtocolVersion, sandbox.WorkspaceContractVersion, sandbox.ImageContractVersion, sandbox.CPULimit.VCPUCount(), sandbox.CPULimit.MilliValue(), sandbox.MemoryLimitMB, sandbox.PIDsLimit, sandbox.DiskLimitMB,
 			string(sandbox.NetworkMode), boolToInt(sandbox.AllowTunnels), sandbox.UpdatedAt.UTC().Format(time.RFC3339Nano),
 			sandbox.LastActiveAt.UTC().Format(time.RFC3339Nano), deletedAt, sandbox.ID, sandbox.TenantID); err != nil {
 			return err
@@ -242,7 +245,7 @@ func (s *Store) UpdateRuntimeState(ctx context.Context, sandboxID string, state 
 
 func (s *Store) GetSandbox(ctx context.Context, tenantID, sandboxID string) (model.Sandbox, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.cpu_limit_millis,
+		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
 		       s.memory_limit_mb, s.pids_limit, s.disk_limit_mb, s.network_mode, s.allow_tunnels,
 		       s.storage_root, s.workspace_root, s.cache_root,
 		       s.created_at, s.updated_at, s.last_active_at, s.deleted_at,
@@ -260,7 +263,7 @@ func (s *Store) GetSandbox(ctx context.Context, tenantID, sandboxID string) (mod
 
 func (s *Store) ListSandboxes(ctx context.Context, tenantID string) ([]model.Sandbox, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.cpu_limit_millis,
+		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
 		       s.memory_limit_mb, s.pids_limit, s.disk_limit_mb, s.network_mode, s.allow_tunnels,
 		       s.storage_root, s.workspace_root, s.cache_root,
 		       s.created_at, s.updated_at, s.last_active_at, s.deleted_at,
@@ -295,7 +298,7 @@ func (s *Store) ListNonDeletedSandboxesByTenant(ctx context.Context, tenantID st
 
 func (s *Store) listNonDeletedSandboxes(ctx context.Context, tenantID string) ([]model.Sandbox, error) {
 	query := `
-		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.cpu_limit_millis,
+		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
 		       s.memory_limit_mb, s.pids_limit, s.disk_limit_mb, s.network_mode, s.allow_tunnels,
 		       s.storage_root, s.workspace_root, s.cache_root,
 		       s.created_at, s.updated_at, s.last_active_at, s.deleted_at,
@@ -498,9 +501,9 @@ func (s *Store) CreateSnapshot(ctx context.Context, snapshot model.Snapshot) err
 		completed = snapshot.CompletedAt.UTC().Format(time.RFC3339Nano)
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO snapshots(snapshot_id, sandbox_id, tenant_id, name, status, image_ref, workspace_tar, export_location, created_at, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, snapshot.ID, snapshot.SandboxID, snapshot.TenantID, snapshot.Name, string(snapshot.Status), snapshot.ImageRef, snapshot.WorkspaceTar, snapshot.ExportLocation, snapshot.CreatedAt.UTC().Format(time.RFC3339Nano), completed)
+		INSERT INTO snapshots(snapshot_id, sandbox_id, tenant_id, name, status, image_ref, profile, image_contract_version, control_protocol_version, workspace_tar, export_location, created_at, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, snapshot.ID, snapshot.SandboxID, snapshot.TenantID, snapshot.Name, string(snapshot.Status), snapshot.ImageRef, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceTar, snapshot.ExportLocation, snapshot.CreatedAt.UTC().Format(time.RFC3339Nano), completed)
 	return err
 }
 
@@ -511,15 +514,15 @@ func (s *Store) UpdateSnapshot(ctx context.Context, snapshot model.Snapshot) err
 	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE snapshots
-		SET status=?, image_ref=?, workspace_tar=?, export_location=?, completed_at=?
+		SET status=?, image_ref=?, profile=?, image_contract_version=?, control_protocol_version=?, workspace_tar=?, export_location=?, completed_at=?
 		WHERE snapshot_id=? AND tenant_id=?
-	`, string(snapshot.Status), snapshot.ImageRef, snapshot.WorkspaceTar, snapshot.ExportLocation, completed, snapshot.ID, snapshot.TenantID)
+	`, string(snapshot.Status), snapshot.ImageRef, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceTar, snapshot.ExportLocation, completed, snapshot.ID, snapshot.TenantID)
 	return err
 }
 
 func (s *Store) GetSnapshot(ctx context.Context, tenantID, snapshotID string) (model.Snapshot, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, workspace_tar, export_location, created_at, completed_at
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, profile, image_contract_version, control_protocol_version, workspace_tar, export_location, created_at, completed_at
 		FROM snapshots WHERE tenant_id=? AND snapshot_id=?
 	`, tenantID, snapshotID)
 	return scanSnapshot(row)
@@ -527,7 +530,7 @@ func (s *Store) GetSnapshot(ctx context.Context, tenantID, snapshotID string) (m
 
 func (s *Store) ListSnapshots(ctx context.Context, tenantID, sandboxID string) ([]model.Snapshot, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, workspace_tar, export_location, created_at, completed_at
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, profile, image_contract_version, control_protocol_version, workspace_tar, export_location, created_at, completed_at
 		FROM snapshots
 		WHERE tenant_id=? AND sandbox_id=?
 		ORDER BY created_at DESC
@@ -584,7 +587,7 @@ func (s *Store) ListRunningExecutions(ctx context.Context) ([]model.Execution, e
 
 func (s *Store) ListSnapshotsByStatus(ctx context.Context, status model.SnapshotStatus) ([]model.Snapshot, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, workspace_tar, export_location, created_at, completed_at
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, profile, image_contract_version, control_protocol_version, workspace_tar, export_location, created_at, completed_at
 		FROM snapshots
 		WHERE status = ?
 		ORDER BY created_at
@@ -686,9 +689,10 @@ func scanSandbox(scanner interface{ Scan(...any) error }) (model.Sandbox, error)
 	var created, updated, lastActive string
 	var deleted sql.NullString
 	var allowTunnels int
+	var profile, featureSet, capabilitySet, controlMode, controlProtocolVersion, workspaceContractVersion, imageContractVersion string
 	var cpuLimitMillis int64
 	if err := scanner.Scan(
-		&sandbox.ID, &sandbox.TenantID, &sandbox.Status, &sandbox.RuntimeBackend, &sandbox.BaseImageRef,
+		&sandbox.ID, &sandbox.TenantID, &sandbox.Status, &sandbox.RuntimeBackend, &sandbox.BaseImageRef, &profile, &featureSet, &capabilitySet, &controlMode, &controlProtocolVersion, &workspaceContractVersion, &imageContractVersion,
 		&cpuLimitMillis, &sandbox.MemoryLimitMB, &sandbox.PIDsLimit, &sandbox.DiskLimitMB, &sandbox.NetworkMode,
 		&allowTunnels, &sandbox.StorageRoot, &sandbox.WorkspaceRoot, &sandbox.CacheRoot,
 		&created, &updated, &lastActive, &deleted,
@@ -700,6 +704,13 @@ func scanSandbox(scanner interface{ Scan(...any) error }) (model.Sandbox, error)
 		return model.Sandbox{}, err
 	}
 	sandbox.CPULimit = model.CPUQuantity(cpuLimitMillis)
+	sandbox.Profile = model.GuestProfile(profile)
+	sandbox.Features = splitStringList(featureSet)
+	sandbox.Capabilities = splitStringList(capabilitySet)
+	sandbox.ControlMode = model.GuestControlMode(controlMode)
+	sandbox.ControlProtocolVersion = controlProtocolVersion
+	sandbox.WorkspaceContractVersion = workspaceContractVersion
+	sandbox.ImageContractVersion = imageContractVersion
 	sandbox.AllowTunnels = allowTunnels == 1
 	createdAt, err := parseTime(created)
 	if err != nil {
@@ -755,12 +766,16 @@ func scanSnapshot(scanner interface{ Scan(...any) error }) (model.Snapshot, erro
 	var snapshot model.Snapshot
 	var created string
 	var completed sql.NullString
-	if err := scanner.Scan(&snapshot.ID, &snapshot.SandboxID, &snapshot.TenantID, &snapshot.Name, &snapshot.Status, &snapshot.ImageRef, &snapshot.WorkspaceTar, &snapshot.ExportLocation, &created, &completed); err != nil {
+	var profile, imageContractVersion, controlProtocolVersion string
+	if err := scanner.Scan(&snapshot.ID, &snapshot.SandboxID, &snapshot.TenantID, &snapshot.Name, &snapshot.Status, &snapshot.ImageRef, &profile, &imageContractVersion, &controlProtocolVersion, &snapshot.WorkspaceTar, &snapshot.ExportLocation, &created, &completed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.Snapshot{}, ErrNotFound
 		}
 		return model.Snapshot{}, err
 	}
+	snapshot.Profile = model.GuestProfile(profile)
+	snapshot.ImageContractVersion = imageContractVersion
+	snapshot.ControlProtocolVersion = controlProtocolVersion
 	createdAt, err := parseTime(created)
 	if err != nil {
 		return model.Snapshot{}, err
@@ -789,4 +804,24 @@ func boolToInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func joinStringList(values []string) string {
+	return strings.Join(values, ",")
+}
+
+func splitStringList(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		result = append(result, part)
+	}
+	return result
 }

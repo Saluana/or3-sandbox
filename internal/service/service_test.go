@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"or3-sandbox/internal/auth"
 	"or3-sandbox/internal/config"
 	"or3-sandbox/internal/db"
+	"or3-sandbox/internal/guestimage"
 	"or3-sandbox/internal/model"
 	"or3-sandbox/internal/repository"
 )
@@ -806,11 +808,17 @@ func TestCapacityReportAndMetricsShowQuotaPressure(t *testing.T) {
 	if len(report.Alerts) == 0 {
 		t.Fatalf("expected capacity alerts, got %+v", report)
 	}
+	if report.ProfileCounts["core"] != 1 {
+		t.Fatalf("expected core profile count in capacity report, got %+v", report.ProfileCounts)
+	}
+	if report.CapabilityCounts["exec"] == 0 {
+		t.Fatalf("expected exec capability count in capacity report, got %+v", report.CapabilityCounts)
+	}
 	metrics, err := svc.MetricsReport(ctx, tenantA.ID)
 	if err != nil {
 		t.Fatalf("metrics report: %v", err)
 	}
-	if !strings.Contains(metrics, "or3_sandbox_storage_pressure_ratio") || !strings.Contains(metrics, "or3_sandbox_runtime_status_count") {
+	if !strings.Contains(metrics, "or3_sandbox_storage_pressure_ratio") || !strings.Contains(metrics, "or3_sandbox_runtime_status_count") || !strings.Contains(metrics, `or3_sandbox_profile_count{profile="core"} 1`) || !strings.Contains(metrics, `or3_sandbox_capability_count{capability="exec"} 1`) {
 		t.Fatalf("unexpected metrics output: %s", metrics)
 	}
 }
@@ -1022,6 +1030,142 @@ func TestCreateSandboxRejectsFractionalCPUOnQEMU(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxRejectsDangerousQEMUProfileByDefault(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.QEMUAllowedProfiles = []model.GuestProfile{model.GuestProfileDebug}
+	svc.cfg.QEMUDangerousProfiles = []model.GuestProfile{model.GuestProfileDebug}
+
+	imagePath := filepath.Join(t.TempDir(), "guest-debug.qcow2")
+	if err := os.WriteFile(imagePath, []byte("debug-image"), 0o644); err != nil {
+		t.Fatalf("write debug guest image fixture: %v", err)
+	}
+	writeGuestImageContract(t, imagePath, guestimage.Contract{
+		ContractVersion:          model.DefaultImageContractVersion,
+		ImagePath:                imagePath,
+		BuildVersion:             "test",
+		Profile:                  model.GuestProfileDebug,
+		Control:                  guestimage.ControlContract{Mode: model.GuestControlModeAgent, ProtocolVersion: model.DefaultGuestControlProtocolVersion},
+		WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
+		Dangerous:                true,
+		Debug:                    true,
+	})
+	svc.cfg.QEMUBaseImagePath = imagePath
+	svc.cfg.QEMUAllowedBaseImagePaths = []string{imagePath}
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  imagePath,
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Profile:       model.GuestProfileDebug,
+	})
+	if err == nil || !strings.Contains(err.Error(), "blocked by policy") {
+		t.Fatalf("expected dangerous-profile rejection, got %v", err)
+	}
+}
+
+func TestCreateSandboxRejectsFeatureNotAllowedByImageProfile(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+
+	imagePath := filepath.Join(t.TempDir(), "guest-container.qcow2")
+	if err := os.WriteFile(imagePath, []byte("container-image"), 0o644); err != nil {
+		t.Fatalf("write container guest image fixture: %v", err)
+	}
+	writeGuestImageContract(t, imagePath, guestimage.Contract{
+		ContractVersion:          model.DefaultImageContractVersion,
+		ImagePath:                imagePath,
+		BuildVersion:             "test",
+		Profile:                  model.GuestProfileContainer,
+		AllowedFeatures:          []string{"docker"},
+		Control:                  guestimage.ControlContract{Mode: model.GuestControlModeAgent, ProtocolVersion: model.DefaultGuestControlProtocolVersion},
+		WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
+	})
+	svc.cfg.QEMUBaseImagePath = imagePath
+	svc.cfg.QEMUAllowedBaseImagePaths = []string{imagePath}
+	svc.cfg.QEMUAllowedProfiles = []model.GuestProfile{model.GuestProfileContainer}
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  imagePath,
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Profile:       model.GuestProfileContainer,
+		Features:      []string{"gpu"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "not allowed by image profile") {
+		t.Fatalf("expected forbidden feature rejection, got %v", err)
+	}
+}
+
+func TestRestoreSnapshotPreservesProfileContractMetadata(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	runtime.restoreState = model.RuntimeState{RuntimeID: "rt-restore", Status: model.SandboxStatusStopped}
+	runtime.snapshotInfo = model.SnapshotInfo{ImageRef: "snapshot-image"}
+
+	imagePath := filepath.Join(t.TempDir(), "guest-browser.qcow2")
+	if err := os.WriteFile(imagePath, []byte("browser-image"), 0o644); err != nil {
+		t.Fatalf("write browser guest image fixture: %v", err)
+	}
+	writeGuestImageContract(t, imagePath, guestimage.Contract{
+		ContractVersion:          model.DefaultImageContractVersion,
+		ImagePath:                imagePath,
+		BuildVersion:             "test",
+		Profile:                  model.GuestProfileBrowser,
+		Control:                  guestimage.ControlContract{Mode: model.GuestControlModeAgent, ProtocolVersion: model.DefaultGuestControlProtocolVersion},
+		WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
+	})
+	svc.cfg.QEMUBaseImagePath = imagePath
+	svc.cfg.QEMUAllowedBaseImagePaths = []string{imagePath}
+	svc.cfg.QEMUAllowedProfiles = []model.GuestProfile{model.GuestProfileBrowser}
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  imagePath,
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Profile:       model.GuestProfileBrowser,
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	snapshot, err := svc.CreateSnapshot(ctx, tenantA.ID, sandbox.ID, model.CreateSnapshotRequest{Name: "snap"})
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if _, err := svc.RestoreSnapshot(ctx, tenantA.ID, snapshot.ID, model.RestoreSnapshotRequest{TargetSandboxID: sandbox.ID}); err != nil {
+		t.Fatalf("restore snapshot: %v", err)
+	}
+	restored, err := svc.GetSandbox(ctx, tenantA.ID, sandbox.ID)
+	if err != nil {
+		t.Fatalf("get sandbox: %v", err)
+	}
+	if restored.Profile != model.GuestProfileBrowser {
+		t.Fatalf("expected restored profile to remain browser, got %q", restored.Profile)
+	}
+	if restored.ControlProtocolVersion != model.DefaultGuestControlProtocolVersion {
+		t.Fatalf("expected restored control protocol version %q, got %q", model.DefaultGuestControlProtocolVersion, restored.ControlProtocolVersion)
+	}
+	if restored.ImageContractVersion != model.DefaultImageContractVersion {
+		t.Fatalf("expected restored image contract version %q, got %q", model.DefaultImageContractVersion, restored.ImageContractVersion)
+	}
+}
+
 func TestLifecycleAuditsUseSpecificActionsAndFailureOutcomes(t *testing.T) {
 	ctx := context.Background()
 	runtime := newStubRuntime()
@@ -1206,9 +1350,19 @@ func newServiceHarness(t *testing.T, runtime model.RuntimeManager, backend strin
 		if err := os.WriteFile(qemuImage, []byte("qcow2"), 0o644); err != nil {
 			t.Fatalf("write qemu guest image fixture: %v", err)
 		}
+		writeGuestImageContract(t, qemuImage, guestimage.Contract{
+			ContractVersion:          model.DefaultImageContractVersion,
+			ImagePath:                qemuImage,
+			BuildVersion:             "test",
+			Profile:                  model.GuestProfileCore,
+			Capabilities:             []string{"exec", "files", "pty"},
+			Control:                  guestimage.ControlContract{Mode: model.GuestControlModeAgent, ProtocolVersion: model.DefaultGuestControlProtocolVersion},
+			WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
+		})
 		cfg.BaseImageRef = "guest-base.qcow2"
 		cfg.QEMUBaseImagePath = qemuImage
 		cfg.QEMUAllowedBaseImagePaths = []string{qemuImage}
+		cfg.QEMUAllowedProfiles = []model.GuestProfile{model.GuestProfileCore}
 	}
 	sqlDB, err := db.Open(context.Background(), cfg.DatabasePath)
 	if err != nil {
@@ -1236,6 +1390,25 @@ func newServiceHarness(t *testing.T, runtime model.RuntimeManager, backend strin
 		t.Fatalf("seed tenants: %v", err)
 	}
 	return New(cfg, store, runtime), store, quota, model.Tenant{ID: "tenant-a", Name: "Tenant A"}, model.Tenant{ID: "tenant-b", Name: "Tenant B"}
+}
+
+func writeGuestImageContract(t *testing.T, imagePath string, contract guestimage.Contract) {
+	t.Helper()
+	sha, err := guestimage.ComputeSHA256(imagePath)
+	if err != nil {
+		t.Fatalf("compute guest image sha: %v", err)
+	}
+	contract.ImageSHA256 = sha
+	if contract.ImagePath == "" {
+		contract.ImagePath = imagePath
+	}
+	data, err := json.Marshal(contract)
+	if err != nil {
+		t.Fatalf("marshal guest image contract: %v", err)
+	}
+	if err := os.WriteFile(guestimage.SidecarPath(imagePath), data, 0o644); err != nil {
+		t.Fatalf("write guest image contract: %v", err)
+	}
 }
 
 func boolPtr(value bool) *bool {

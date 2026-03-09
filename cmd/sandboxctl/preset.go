@@ -396,7 +396,7 @@ func (r presetRunner) buildCreateRequest(inputs map[string]string) (model.Create
 		}
 		start = parsed
 	}
-	return model.CreateSandboxRequest{BaseImageRef: image, CPULimit: cpuLimit, MemoryLimitMB: memoryMB, PIDsLimit: pidsLimit, DiskLimitMB: diskMB, NetworkMode: model.NetworkMode(networkMode), AllowTunnels: &allowTunnels, Start: start}, nil
+	return model.CreateSandboxRequest{BaseImageRef: image, Profile: model.GuestProfile(strings.ToLower(strings.TrimSpace(r.manifest.Runtime.Profile))), CPULimit: cpuLimit, MemoryLimitMB: memoryMB, PIDsLimit: pidsLimit, DiskLimitMB: diskMB, NetworkMode: model.NetworkMode(networkMode), AllowTunnels: &allowTunnels, Start: start}, nil
 }
 
 func (r presetRunner) uploadFiles(sandboxID string, vars map[string]string) error {

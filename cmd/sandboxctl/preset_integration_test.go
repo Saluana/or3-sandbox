@@ -149,34 +149,7 @@ func TestPresetRunArtifactQEMU(t *testing.T) {
 	h := newPresetQEMUHarness(t)
 	defer h.close()
 	examplesDir := t.TempDir()
-	writePresetFixture(t, examplesDir, "qemu-artifact", `
-name: qemu-artifact
-runtime:
-  allowed: [qemu]
-  profile: base-guest
-sandbox:
-  image: ${QEMU_GUEST_IMAGE}
-  cpu: "1"
-  memory_mb: 1024
-files:
-  - path: hello.txt
-    content: "qemu-ok"
-bootstrap:
-  - name: write-binary
-    command: ["sh", "-lc", "cp /workspace/hello.txt /workspace/out.txt && printf '\\211PNG\\r\\n\\032\\n' > /workspace/pixel.bin"]
-readiness:
-  type: command
-  command: ["sh", "-lc", "test -f /workspace/out.txt && grep -q qemu-ok /workspace/out.txt"]
-  timeout: 30s
-  interval: 500ms
-artifacts:
-  - remote_path: out.txt
-    local_path: outputs/out.txt
-  - remote_path: pixel.bin
-    local_path: outputs/pixel.bin
-    binary: true
-cleanup: always
-`)
+	writePresetFixture(t, examplesDir, "qemu-artifact", "\nname: qemu-artifact\nruntime:\n  allowed: [qemu]\n  profile: core\nsandbox:\n  image: ${QEMU_GUEST_IMAGE}\n  cpu: \"1\"\n  memory_mb: 1024\nfiles:\n  - path: hello.txt\n    content: \"qemu-ok\"\nbootstrap:\n  - name: write-binary\n    command: [\"sh\", \"-lc\", \"cp /workspace/hello.txt /workspace/out.txt && printf '\\\\211PNG\\\\r\\\\n\\\\032\\\\n' > /workspace/pixel.bin\"]\nreadiness:\n  type: command\n  command: [\"sh\", \"-lc\", \"test -f /workspace/out.txt && grep -q qemu-ok /workspace/out.txt\"]\n  timeout: 30s\n  interval: 500ms\nartifacts:\n  - remote_path: out.txt\n    local_path: outputs/out.txt\n  - remote_path: pixel.bin\n    local_path: outputs/pixel.bin\n    binary: true\ncleanup: always\n")
 	if err := runPresetRun(clientConfig{baseURL: h.server.URL, token: "dev-token"}, []string{"--examples-dir", examplesDir, "--env", "QEMU_GUEST_IMAGE=" + h.baseImagePath, "qemu-artifact"}); err != nil {
 		t.Fatalf("runPresetRun: %v", err)
 	}
@@ -268,36 +241,36 @@ func newPresetQEMUHarness(t *testing.T) *presetQEMUHarness {
 	qemuCfg := requirePresetQEMUConfig(t)
 	root := t.TempDir()
 	cfg := config.Config{
-		DeploymentMode:        "development",
-		ListenAddress:         "127.0.0.1:0",
-		DatabasePath:          filepath.Join(root, "sandbox.db"),
-		StorageRoot:           filepath.Join(root, "storage"),
-		SnapshotRoot:          filepath.Join(root, "snapshots"),
-		BaseImageRef:          qemuCfg.baseImagePath,
-		RuntimeBackend:        "qemu",
-		AuthMode:              "static",
-		QEMUBinary:            qemuCfg.binary,
-		QEMUAccel:             qemuCfg.accel,
-		QEMUBaseImagePath:     qemuCfg.baseImagePath,
+		DeploymentMode:            "development",
+		ListenAddress:             "127.0.0.1:0",
+		DatabasePath:              filepath.Join(root, "sandbox.db"),
+		StorageRoot:               filepath.Join(root, "storage"),
+		SnapshotRoot:              filepath.Join(root, "snapshots"),
+		BaseImageRef:              qemuCfg.baseImagePath,
+		RuntimeBackend:            "qemu",
+		AuthMode:                  "static",
+		QEMUBinary:                qemuCfg.binary,
+		QEMUAccel:                 qemuCfg.accel,
+		QEMUBaseImagePath:         qemuCfg.baseImagePath,
 		QEMUAllowedBaseImagePaths: []string{qemuCfg.baseImagePath},
-		QEMUSSHUser:           qemuCfg.sshUser,
-		QEMUSSHPrivateKeyPath: qemuCfg.sshKeyPath,
-		QEMUSSHHostKeyPath:    qemuCfg.sshHostKeyPath,
-		QEMUBootTimeout:       2 * time.Minute,
-		DefaultCPULimit:       model.CPUCores(1),
-		DefaultMemoryLimitMB:  1024,
-		DefaultPIDsLimit:      256,
-		DefaultDiskLimitMB:    2048,
-		DefaultNetworkMode:    model.NetworkModeInternetEnabled,
-		DefaultAllowTunnels:   true,
-		RequestRatePerMinute:  600,
-		RequestBurst:          120,
-		GracefulShutdown:      5 * time.Second,
-		ReconcileInterval:     30 * time.Second,
-		CleanupInterval:       30 * time.Second,
-		OperatorHost:          "http://example.invalid",
-		Tenants:               []config.TenantConfig{{ID: "tenant-dev", Name: "Tenant Dev", Token: "dev-token"}},
-		DefaultQuota:          model.TenantQuota{MaxSandboxes: 4, MaxRunningSandboxes: 4, MaxConcurrentExecs: 8, MaxTunnels: 4, MaxCPUCores: model.CPUCores(8), MaxMemoryMB: 8192, MaxStorageMB: 16384, AllowTunnels: true, DefaultTunnelAuthMode: "token", DefaultTunnelVisibility: "private"},
+		QEMUSSHUser:               qemuCfg.sshUser,
+		QEMUSSHPrivateKeyPath:     qemuCfg.sshKeyPath,
+		QEMUSSHHostKeyPath:        qemuCfg.sshHostKeyPath,
+		QEMUBootTimeout:           2 * time.Minute,
+		DefaultCPULimit:           model.CPUCores(1),
+		DefaultMemoryLimitMB:      1024,
+		DefaultPIDsLimit:          256,
+		DefaultDiskLimitMB:        2048,
+		DefaultNetworkMode:        model.NetworkModeInternetEnabled,
+		DefaultAllowTunnels:       true,
+		RequestRatePerMinute:      600,
+		RequestBurst:              120,
+		GracefulShutdown:          5 * time.Second,
+		ReconcileInterval:         30 * time.Second,
+		CleanupInterval:           30 * time.Second,
+		OperatorHost:              "http://example.invalid",
+		Tenants:                   []config.TenantConfig{{ID: "tenant-dev", Name: "Tenant Dev", Token: "dev-token"}},
+		DefaultQuota:              model.TenantQuota{MaxSandboxes: 4, MaxRunningSandboxes: 4, MaxConcurrentExecs: 8, MaxTunnels: 4, MaxCPUCores: model.CPUCores(8), MaxMemoryMB: 8192, MaxStorageMB: 16384, AllowTunnels: true, DefaultTunnelAuthMode: "token", DefaultTunnelVisibility: "private"},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
@@ -328,22 +301,22 @@ func (h *presetQEMUHarness) close() {
 }
 
 type presetQEMUConfig struct {
-	binary        string
-	accel         string
-	baseImagePath string
-	sshUser       string
-	sshKeyPath    string
+	binary         string
+	accel          string
+	baseImagePath  string
+	sshUser        string
+	sshKeyPath     string
 	sshHostKeyPath string
 }
 
 func requirePresetQEMUConfig(t *testing.T) presetQEMUConfig {
 	t.Helper()
 	cfg := presetQEMUConfig{
-		binary:        firstPresetEnv("SANDBOX_QEMU_BINARY", "OR3_QEMU_BINARY"),
-		accel:         firstPresetEnv("SANDBOX_QEMU_ACCEL", "OR3_QEMU_ACCEL"),
-		baseImagePath: firstPresetEnv("SANDBOX_QEMU_BASE_IMAGE_PATH", "OR3_QEMU_BASE_IMAGE_PATH"),
-		sshUser:       firstPresetEnv("SANDBOX_QEMU_SSH_USER", "OR3_QEMU_SSH_USER"),
-		sshKeyPath:    firstPresetEnv("SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH", "OR3_QEMU_SSH_PRIVATE_KEY_PATH"),
+		binary:         firstPresetEnv("SANDBOX_QEMU_BINARY", "OR3_QEMU_BINARY"),
+		accel:          firstPresetEnv("SANDBOX_QEMU_ACCEL", "OR3_QEMU_ACCEL"),
+		baseImagePath:  firstPresetEnv("SANDBOX_QEMU_BASE_IMAGE_PATH", "OR3_QEMU_BASE_IMAGE_PATH"),
+		sshUser:        firstPresetEnv("SANDBOX_QEMU_SSH_USER", "OR3_QEMU_SSH_USER"),
+		sshKeyPath:     firstPresetEnv("SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH", "OR3_QEMU_SSH_PRIVATE_KEY_PATH"),
 		sshHostKeyPath: firstPresetEnv("SANDBOX_QEMU_SSH_HOST_KEY_PATH", "OR3_QEMU_SSH_HOST_KEY_PATH"),
 	}
 	if cfg.binary == "" || cfg.baseImagePath == "" || cfg.sshUser == "" || cfg.sshKeyPath == "" || cfg.sshHostKeyPath == "" {

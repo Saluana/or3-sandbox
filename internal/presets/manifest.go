@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"or3-sandbox/internal/model"
 )
 
 // YAML is used for preset manifests because these files are intended to be
@@ -190,6 +192,9 @@ func (m Manifest) Validate() error {
 			}
 			seen[runtimeName] = struct{}{}
 		}
+	}
+	if profile := model.GuestProfile(strings.TrimSpace(m.Runtime.Profile)); m.Runtime.Profile != "" && !profile.IsValid() {
+		return fmt.Errorf("runtime.profile %q is invalid", m.Runtime.Profile)
 	}
 	seenInputs := map[string]struct{}{}
 	for _, input := range m.Inputs {

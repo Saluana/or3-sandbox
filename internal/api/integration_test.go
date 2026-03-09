@@ -27,6 +27,7 @@ import (
 	"or3-sandbox/internal/auth"
 	"or3-sandbox/internal/config"
 	"or3-sandbox/internal/db"
+	"or3-sandbox/internal/guestimage"
 	"or3-sandbox/internal/logging"
 	"or3-sandbox/internal/model"
 	"or3-sandbox/internal/repository"
@@ -589,6 +590,60 @@ func TestTunnelSignedURLRejectsTampering(t *testing.T) {
 	}
 }
 
+func TestTunnelSignedURLRejectsTTLAboveMaximum(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	h.expectStatus(t, "token-a", http.MethodPost, "/v1/tunnels/"+tunnel.ID+"/signed-url", model.CreateTunnelSignedURLRequest{Path: "/", TTLSeconds: 3600}, http.StatusBadRequest)
+}
+
+func TestTunnelSignedURLRejectsInvalidPath(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	h.expectStatus(t, "token-a", http.MethodPost, "/v1/tunnels/"+tunnel.ID+"/signed-url", model.CreateTunnelSignedURLRequest{Path: "relative/path"}, http.StatusBadRequest)
+}
+
+func TestTunnelSignedURLRejectsCrossTenantIssuance(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	h.expectStatus(t, "token-b", http.MethodPost, "/v1/tunnels/"+tunnel.ID+"/signed-url", model.CreateTunnelSignedURLRequest{Path: "/"}, http.StatusNotFound)
+}
+
 func TestTunnelSignedURLExpires(t *testing.T) {
 	h := newStubHarness(t)
 	defer h.close()
@@ -648,6 +703,54 @@ func TestTunnelSignedURLSurvivesHandlerRestart(t *testing.T) {
 	}
 }
 
+func TestTunnelSignedURLBootstrapSetsExpectedCookieFlags(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	h.cfg.OperatorHost = "https://operator.example"
+	h.service = service.New(h.cfg, h.store, h.stubRuntime)
+	h.server.Config.Handler = auth.New(h.store, h.cfg).Wrap(api.New(logging.New(), h.service, h.cfg))
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	signed := h.createTunnelSignedURL(t, "token-a", tunnel.ID, model.CreateTunnelSignedURLRequest{Path: "/"})
+	parsed, err := url.Parse(signed.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.Get(h.server.URL + parsed.RequestURI())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected signed tunnel status %d: %s", response.StatusCode, string(body))
+	}
+	setCookie := response.Header.Get("Set-Cookie")
+	if !strings.Contains(setCookie, "HttpOnly") {
+		t.Fatalf("expected HttpOnly cookie, got %q", setCookie)
+	}
+	if !strings.Contains(setCookie, "Secure") {
+		t.Fatalf("expected Secure cookie, got %q", setCookie)
+	}
+	if !strings.Contains(setCookie, "SameSite=Lax") {
+		t.Fatalf("expected SameSite=Lax cookie, got %q", setCookie)
+	}
+	if !strings.Contains(setCookie, "Path=/v1/tunnels/"+tunnel.ID+"/proxy") {
+		t.Fatalf("expected scoped tunnel cookie path, got %q", setCookie)
+	}
+}
+
 func TestTunnelProxyMismatchDoesNotPolluteTargetTenantAudit(t *testing.T) {
 	h := newStubHarness(t)
 	defer h.close()
@@ -675,6 +778,47 @@ func TestTunnelProxyMismatchDoesNotPolluteTargetTenantAudit(t *testing.T) {
 	}
 	if len(after) != len(before) {
 		t.Fatalf("expected cross-tenant tunnel probe to avoid tenant-a audit log, before=%d after=%d events=%+v", len(before), len(after), after)
+	}
+}
+
+func TestTunnelSignedURLRevokedCookieReturnsGone(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	signed := h.createTunnelSignedURL(t, "token-a", tunnel.ID, model.CreateTunnelSignedURLRequest{Path: "/"})
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar}
+	response, err := client.Get(signed.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+
+	h.expectStatus(t, "token-a", http.MethodDelete, "/v1/tunnels/"+tunnel.ID, nil, http.StatusNoContent)
+
+	response, err = client.Get(h.server.URL + "/v1/tunnels/" + tunnel.ID + "/proxy/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusGone {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected revoked tunnel status %d: %s", response.StatusCode, string(body))
 	}
 }
 
@@ -1046,29 +1190,38 @@ func newStubHarness(t *testing.T) *harness {
 	if err := os.WriteFile(qemuImage, []byte("qcow2"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	writeGuestImageContract(t, qemuImage, guestimage.Contract{
+		ContractVersion:          model.DefaultImageContractVersion,
+		ImagePath:                qemuImage,
+		Profile:                  model.GuestProfileCore,
+		Control:                  guestimage.ControlContract{Mode: model.GuestControlModeAgent, ProtocolVersion: model.DefaultGuestControlProtocolVersion},
+		WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
+		Capabilities:             []string{"exec", "files", "pty"},
+	})
 	cfg := config.Config{
-		DeploymentMode:       "development",
-		ListenAddress:        "127.0.0.1:0",
-		DatabasePath:         filepath.Join(root, "sandbox.db"),
-		StorageRoot:          filepath.Join(root, "storage"),
-		SnapshotRoot:         filepath.Join(root, "snapshots"),
-		BaseImageRef:         "guest-base.qcow2",
-		RuntimeBackend:       "qemu",
-		QEMUBaseImagePath:    qemuImage,
+		DeploymentMode:            "development",
+		ListenAddress:             "127.0.0.1:0",
+		DatabasePath:              filepath.Join(root, "sandbox.db"),
+		StorageRoot:               filepath.Join(root, "storage"),
+		SnapshotRoot:              filepath.Join(root, "snapshots"),
+		BaseImageRef:              "guest-base.qcow2",
+		RuntimeBackend:            "qemu",
+		QEMUBaseImagePath:         qemuImage,
 		QEMUAllowedBaseImagePaths: []string{qemuImage},
-		AuthMode:             "static",
-		DefaultCPULimit:      model.CPUCores(1),
-		DefaultMemoryLimitMB: 256,
-		DefaultPIDsLimit:     128,
-		DefaultDiskLimitMB:   512,
-		DefaultNetworkMode:   model.NetworkModeInternetDisabled,
-		DefaultAllowTunnels:  true,
-		RequestRatePerMinute: 600,
-		RequestBurst:         120,
-		GracefulShutdown:     5 * time.Second,
-		ReconcileInterval:    30 * time.Second,
-		CleanupInterval:      30 * time.Second,
-		OperatorHost:         "http://example.invalid",
+		QEMUAllowedProfiles:       []model.GuestProfile{model.GuestProfileCore},
+		AuthMode:                  "static",
+		DefaultCPULimit:           model.CPUCores(1),
+		DefaultMemoryLimitMB:      256,
+		DefaultPIDsLimit:          128,
+		DefaultDiskLimitMB:        512,
+		DefaultNetworkMode:        model.NetworkModeInternetDisabled,
+		DefaultAllowTunnels:       true,
+		RequestRatePerMinute:      600,
+		RequestBurst:              120,
+		GracefulShutdown:          5 * time.Second,
+		ReconcileInterval:         30 * time.Second,
+		CleanupInterval:           30 * time.Second,
+		OperatorHost:              "http://example.invalid",
 		Tenants: []config.TenantConfig{
 			{ID: "tenant-a", Name: "Tenant A", Token: "token-a"},
 			{ID: "tenant-b", Name: "Tenant B", Token: "token-b"},
@@ -1102,6 +1255,25 @@ func newStubHarness(t *testing.T) *harness {
 	svc = service.New(cfg, store, runtime)
 	server.Config.Handler = auth.New(store, cfg).Wrap(api.New(logging.New(), svc, cfg))
 	return &harness{t: t, cfg: cfg, db: sqlDB, store: store, service: svc, stubRuntime: runtime, server: server}
+}
+
+func writeGuestImageContract(t *testing.T, imagePath string, contract guestimage.Contract) {
+	t.Helper()
+	sha, err := guestimage.ComputeSHA256(imagePath)
+	if err != nil {
+		t.Fatalf("compute guest image sha: %v", err)
+	}
+	contract.ImageSHA256 = sha
+	if contract.ImagePath == "" {
+		contract.ImagePath = imagePath
+	}
+	data, err := json.Marshal(contract)
+	if err != nil {
+		t.Fatalf("marshal guest image contract: %v", err)
+	}
+	if err := os.WriteFile(guestimage.SidecarPath(imagePath), data, 0o644); err != nil {
+		t.Fatalf("write guest image contract: %v", err)
+	}
 }
 
 func newJWTStubHarness(t *testing.T) *harness {

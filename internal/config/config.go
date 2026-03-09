@@ -24,50 +24,55 @@ type TenantConfig struct {
 }
 
 type Config struct {
-	DeploymentMode           string
-	ListenAddress            string
-	DatabasePath             string
-	StorageRoot              string
-	SnapshotRoot             string
-	BaseImageRef             string
-	RuntimeBackend           string
-	AuthMode                 string
-	AuthJWTIssuer            string
-	AuthJWTAudience          string
-	AuthJWTSecretPaths       []string
-	TLSCertPath              string
-	TLSKeyPath               string
-	TrustedProxyHeaders      bool
-	TrustedDockerRuntime     bool
-	PolicyAllowedImages      []string
-	PolicyAllowPublicTunnels bool
-	PolicyMaxSandboxLifetime time.Duration
-	PolicyMaxIdleTimeout     time.Duration
-	DefaultCPULimit          model.CPUQuantity
-	DefaultMemoryLimitMB     int
-	DefaultPIDsLimit         int
-	DefaultDiskLimitMB       int
-	DefaultNetworkMode       model.NetworkMode
-	DefaultAllowTunnels      bool
-	RequestRatePerMinute     int
-	RequestBurst             int
-	DefaultQuota             model.TenantQuota
-	GracefulShutdown         time.Duration
-	ReconcileInterval        time.Duration
-	CleanupInterval          time.Duration
-	OperatorHost             string
-	TunnelSigningKey         string
-	TunnelSigningKeyPath     string
-	Tenants                  []TenantConfig
-	OptionalSnapshotExport   string
-	QEMUBinary               string
-	QEMUAccel                string
-	QEMUBaseImagePath        string
-	QEMUAllowedBaseImagePaths []string
-	QEMUSSHUser              string
-	QEMUSSHPrivateKeyPath    string
-	QEMUSSHHostKeyPath       string
-	QEMUBootTimeout          time.Duration
+	DeploymentMode             string
+	ListenAddress              string
+	DatabasePath               string
+	StorageRoot                string
+	SnapshotRoot               string
+	BaseImageRef               string
+	RuntimeBackend             string
+	AuthMode                   string
+	AuthJWTIssuer              string
+	AuthJWTAudience            string
+	AuthJWTSecretPaths         []string
+	TLSCertPath                string
+	TLSKeyPath                 string
+	TrustedProxyHeaders        bool
+	TrustedDockerRuntime       bool
+	PolicyAllowedImages        []string
+	PolicyAllowPublicTunnels   bool
+	PolicyMaxSandboxLifetime   time.Duration
+	PolicyMaxIdleTimeout       time.Duration
+	DefaultCPULimit            model.CPUQuantity
+	DefaultMemoryLimitMB       int
+	DefaultPIDsLimit           int
+	DefaultDiskLimitMB         int
+	DefaultNetworkMode         model.NetworkMode
+	DefaultAllowTunnels        bool
+	RequestRatePerMinute       int
+	RequestBurst               int
+	DefaultQuota               model.TenantQuota
+	GracefulShutdown           time.Duration
+	ReconcileInterval          time.Duration
+	CleanupInterval            time.Duration
+	OperatorHost               string
+	TunnelSigningKey           string
+	TunnelSigningKeyPath       string
+	Tenants                    []TenantConfig
+	OptionalSnapshotExport     string
+	QEMUBinary                 string
+	QEMUAccel                  string
+	QEMUBaseImagePath          string
+	QEMUAllowedBaseImagePaths  []string
+	QEMUControlMode            model.GuestControlMode
+	QEMUAllowedProfiles        []model.GuestProfile
+	QEMUDangerousProfiles      []model.GuestProfile
+	QEMUAllowDangerousProfiles bool
+	QEMUAllowSSHCompat         bool
+	QEMUSSHUser                string
+	QEMUSSHPrivateKeyPath      string
+	QEMUSSHHostKeyPath         string
+	QEMUBootTimeout            time.Duration
 }
 
 func Load(args []string) (Config, error) {
@@ -98,6 +103,16 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.QEMUBaseImagePath, "qemu-base-image-path", env("SANDBOX_QEMU_BASE_IMAGE_PATH", ""), "qemu base guest image path")
 	qemuAllowedBaseImagePaths := env("SANDBOX_QEMU_ALLOWED_BASE_IMAGE_PATHS", "")
 	fs.StringVar(&qemuAllowedBaseImagePaths, "qemu-allowed-base-image-paths", qemuAllowedBaseImagePaths, "comma-separated qemu guest image paths tenants may request")
+	qemuAllowedProfiles := env("SANDBOX_QEMU_ALLOWED_PROFILES", "core,runtime,browser,container")
+	fs.StringVar(&qemuAllowedProfiles, "qemu-allowed-profiles", qemuAllowedProfiles, "comma-separated qemu guest profiles allowed for sandbox creation")
+	qemuDangerousProfiles := env("SANDBOX_QEMU_DANGEROUS_PROFILES", "container,debug")
+	fs.StringVar(&qemuDangerousProfiles, "qemu-dangerous-profiles", qemuDangerousProfiles, "comma-separated qemu guest profiles treated as dangerous and blocked unless explicitly allowed")
+	qemuControlMode := env("SANDBOX_QEMU_CONTROL_MODE", string(model.GuestControlModeAgent))
+	fs.StringVar(&qemuControlMode, "qemu-control-mode", qemuControlMode, "qemu control mode: agent or ssh-compat")
+	qemuAllowDangerousProfiles := strings.EqualFold(env("SANDBOX_QEMU_ALLOW_DANGEROUS_PROFILES", "false"), "true")
+	fs.BoolVar(&qemuAllowDangerousProfiles, "qemu-allow-dangerous-profiles", qemuAllowDangerousProfiles, "allow dangerous qemu guest profiles such as container and debug")
+	qemuAllowSSHCompat := strings.EqualFold(env("SANDBOX_QEMU_ALLOW_SSH_COMPAT", "false"), "true")
+	fs.BoolVar(&qemuAllowSSHCompat, "qemu-allow-ssh-compat", qemuAllowSSHCompat, "allow ssh-compat qemu image contracts in production validation and policy")
 	fs.StringVar(&cfg.QEMUSSHUser, "qemu-ssh-user", env("SANDBOX_QEMU_SSH_USER", ""), "qemu guest ssh user")
 	fs.StringVar(&cfg.QEMUSSHPrivateKeyPath, "qemu-ssh-private-key", env("SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH", ""), "qemu guest ssh private key path")
 	fs.StringVar(&cfg.QEMUSSHHostKeyPath, "qemu-ssh-host-key", env("SANDBOX_QEMU_SSH_HOST_KEY_PATH", ""), "qemu guest ssh host public key path")
@@ -141,6 +156,11 @@ func Load(args []string) (Config, error) {
 	cfg.PolicyAllowPublicTunnels = policyAllowPublicTunnels
 	cfg.OptionalSnapshotExport = env("SANDBOX_S3_EXPORT_URI", "")
 	cfg.QEMUAllowedBaseImagePaths = parseCommaSeparated(qemuAllowedBaseImagePaths)
+	cfg.QEMUControlMode = model.GuestControlMode(strings.ToLower(strings.TrimSpace(qemuControlMode)))
+	cfg.QEMUAllowedProfiles = parseGuestProfiles(qemuAllowedProfiles)
+	cfg.QEMUDangerousProfiles = parseGuestProfiles(qemuDangerousProfiles)
+	cfg.QEMUAllowDangerousProfiles = qemuAllowDangerousProfiles
+	cfg.QEMUAllowSSHCompat = qemuAllowSSHCompat
 	cfg.DefaultQuota = model.TenantQuota{
 		MaxSandboxes:            envInt("SANDBOX_QUOTA_MAX_SANDBOXES", 10),
 		MaxRunningSandboxes:     envInt("SANDBOX_QUOTA_MAX_RUNNING", 5),
@@ -336,14 +356,22 @@ func validateQEMUConfig(c Config, probe runtimeValidationProbe) error {
 	if strings.TrimSpace(c.QEMUBaseImagePath) == "" {
 		return errors.New("qemu runtime requires SANDBOX_QEMU_BASE_IMAGE_PATH")
 	}
-	if strings.TrimSpace(c.QEMUSSHUser) == "" {
-		return errors.New("qemu runtime requires SANDBOX_QEMU_SSH_USER")
+	if !c.QEMUControlMode.IsValid() {
+		return fmt.Errorf("qemu runtime requires SANDBOX_QEMU_CONTROL_MODE to be one of %q or %q", model.GuestControlModeAgent, model.GuestControlModeSSHCompat)
 	}
-	if strings.TrimSpace(c.QEMUSSHPrivateKeyPath) == "" {
-		return errors.New("qemu runtime requires SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH")
+	if len(c.QEMUAllowedProfiles) == 0 {
+		return errors.New("qemu runtime requires at least one allowed guest profile")
 	}
-	if strings.TrimSpace(c.QEMUSSHHostKeyPath) == "" {
-		return errors.New("qemu runtime requires SANDBOX_QEMU_SSH_HOST_KEY_PATH")
+	if c.QEMUControlMode == model.GuestControlModeSSHCompat {
+		if strings.TrimSpace(c.QEMUSSHUser) == "" {
+			return errors.New("qemu ssh-compat mode requires SANDBOX_QEMU_SSH_USER")
+		}
+		if strings.TrimSpace(c.QEMUSSHPrivateKeyPath) == "" {
+			return errors.New("qemu ssh-compat mode requires SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH")
+		}
+		if strings.TrimSpace(c.QEMUSSHHostKeyPath) == "" {
+			return errors.New("qemu ssh-compat mode requires SANDBOX_QEMU_SSH_HOST_KEY_PATH")
+		}
 	}
 	if err := probe.commandExists(c.QEMUBinary); err != nil {
 		return fmt.Errorf("qemu runtime requires a working QEMU binary: %w", err)
@@ -351,11 +379,13 @@ func validateQEMUConfig(c Config, probe runtimeValidationProbe) error {
 	if err := probe.fileReadable(c.QEMUBaseImagePath); err != nil {
 		return fmt.Errorf("qemu runtime base image path is not readable: %w", err)
 	}
-	if err := probe.fileReadable(c.QEMUSSHPrivateKeyPath); err != nil {
-		return fmt.Errorf("qemu runtime ssh private key is not readable: %w", err)
-	}
-	if err := probe.fileReadable(c.QEMUSSHHostKeyPath); err != nil {
-		return fmt.Errorf("qemu runtime ssh host public key is not readable: %w", err)
+	if c.QEMUControlMode == model.GuestControlModeSSHCompat {
+		if err := probe.fileReadable(c.QEMUSSHPrivateKeyPath); err != nil {
+			return fmt.Errorf("qemu runtime ssh private key is not readable: %w", err)
+		}
+		if err := probe.fileReadable(c.QEMUSSHHostKeyPath); err != nil {
+			return fmt.Errorf("qemu runtime ssh host public key is not readable: %w", err)
+		}
 	}
 	for _, path := range c.EffectiveQEMUAllowedBaseImagePaths() {
 		if err := probe.fileReadable(path); err != nil {
@@ -371,6 +401,9 @@ func validateQEMUConfig(c Config, probe runtimeValidationProbe) error {
 		if err := probe.hvfAvailable(); err != nil {
 			return fmt.Errorf("qemu runtime requires HVF support on macOS hosts: %w", err)
 		}
+	}
+	if c.DeploymentMode == "production" && c.QEMUControlMode == model.GuestControlModeSSHCompat && !c.QEMUAllowSSHCompat {
+		return errors.New("production qemu mode rejects ssh-compat images unless SANDBOX_QEMU_ALLOW_SSH_COMPAT=true")
 	}
 	return nil
 }
@@ -402,6 +435,42 @@ func NormalizeQEMUBaseImagePath(path string) string {
 		return ""
 	}
 	return filepath.Clean(trimmed)
+}
+
+func (c Config) IsAllowedQEMUProfile(profile model.GuestProfile) bool {
+	for _, allowed := range c.QEMUAllowedProfiles {
+		if allowed == profile {
+			return true
+		}
+	}
+	return false
+}
+
+func (c Config) IsDangerousQEMUProfile(profile model.GuestProfile) bool {
+	for _, dangerous := range c.QEMUDangerousProfiles {
+		if dangerous == profile {
+			return true
+		}
+	}
+	return false
+}
+
+func parseGuestProfiles(raw string) []model.GuestProfile {
+	entries := parseCommaSeparated(raw)
+	seen := make(map[model.GuestProfile]struct{}, len(entries))
+	result := make([]model.GuestProfile, 0, len(entries))
+	for _, entry := range entries {
+		profile := model.GuestProfile(strings.ToLower(strings.TrimSpace(entry)))
+		if !profile.IsValid() {
+			continue
+		}
+		if _, ok := seen[profile]; ok {
+			continue
+		}
+		seen[profile] = struct{}{}
+		result = append(result, profile)
+	}
+	return result
 }
 
 func resolveQEMUAccel(value, goos string) (string, error) {

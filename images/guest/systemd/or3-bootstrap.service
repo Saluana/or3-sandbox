@@ -1,6 +1,6 @@
 [Unit]
 Description=or3 guest bootstrap
-After=network-online.target docker.service
+After=local-fs.target network-online.target
 Wants=network-online.target
 
 [Service]

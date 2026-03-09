@@ -42,6 +42,18 @@ func (s *Service) enforceLifecyclePolicy(ctx context.Context, sandbox model.Sand
 		s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.BaseImageRef, "denied", message)
 		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
 	}
+	if sandbox.RuntimeBackend == "qemu" {
+		if sandbox.Profile != "" && !s.cfg.IsAllowedQEMUProfile(sandbox.Profile) {
+			message := fmt.Sprintf("sandbox profile %q is no longer allowed by policy", sandbox.Profile)
+			s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.ID, "denied", message)
+			return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+		}
+		if sandbox.Profile != "" && s.cfg.IsDangerousQEMUProfile(sandbox.Profile) && !s.cfg.QEMUAllowDangerousProfiles {
+			message := fmt.Sprintf("sandbox profile %q is blocked by dangerous-profile policy", sandbox.Profile)
+			s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.ID, "denied", message)
+			return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+		}
+	}
 	return nil
 }
 

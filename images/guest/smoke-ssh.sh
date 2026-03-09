@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BASE_IMAGE="${BASE_IMAGE:-$ROOT_DIR/or3-guest-base.qcow2}"
+BASE_IMAGE="${BASE_IMAGE:-$ROOT_DIR/or3-guest-debug.qcow2}"
 SSH_USER="${SSH_USER:-sandbox}"
 SSH_PRIVATE_KEY_PATH="${SSH_PRIVATE_KEY_PATH:?set SSH_PRIVATE_KEY_PATH to the operator private key path}"
 QEMU_BINARY="${QEMU_BINARY:-qemu-system-x86_64}"

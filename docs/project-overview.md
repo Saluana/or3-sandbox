@@ -100,7 +100,8 @@ The project supports two runtime styles:
 ### QEMU runtime
 
 - more production-like because each sandbox is a guest machine
-- uses SSH to control the guest
+- uses a small in-guest agent for the production-default control path
+- keeps SSH only for explicit compatibility/debug images
 - still under active development and validation
 
 A simple way to remember it:

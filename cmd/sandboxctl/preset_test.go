@@ -15,6 +15,22 @@ import (
 	"or3-sandbox/internal/presets"
 )
 
+func respondRuntimeBackend(w http.ResponseWriter, r *http.Request, backend string) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	switch r.URL.Path {
+	case "/v1/runtime/info":
+		_ = json.NewEncoder(w).Encode(model.RuntimeInfo{Backend: backend})
+		return true
+	case "/v1/runtime/health":
+		_ = json.NewEncoder(w).Encode(model.RuntimeHealth{Backend: backend})
+		return true
+	default:
+		return false
+	}
+}
+
 func TestRunPresetListAndInspect(t *testing.T) {
 	examplesDir := t.TempDir()
 	writePresetFixture(t, examplesDir, "alpha", "name: alpha\ndescription: Alpha preset\nsandbox:\n  image: alpine:3.20\n")
@@ -78,8 +94,7 @@ cleanup: always
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtime/health":
-			_ = json.NewEncoder(w).Encode(model.RuntimeHealth{Backend: "docker"})
+		case respondRuntimeBackend(w, r, "docker"):
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
 			sawCreate = true
 			if err := json.NewDecoder(r.Body).Decode(&createReq); err != nil {
@@ -167,8 +182,7 @@ cleanup: always
 	var writeReq model.FileWriteRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtime/health":
-			_ = json.NewEncoder(w).Encode(model.RuntimeHealth{Backend: "docker"})
+		case respondRuntimeBackend(w, r, "docker"):
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
 			_ = json.NewEncoder(w).Encode(model.Sandbox{ID: "sbx-scoped", RuntimeBackend: "docker", Status: model.SandboxStatusRunning})
 		case r.Method == http.MethodPut && r.URL.Path == "/v1/sandboxes/sbx-scoped/files/note.txt":
@@ -207,8 +221,7 @@ cleanup: always
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtime/health":
-			_ = json.NewEncoder(w).Encode(model.RuntimeHealth{Backend: "docker"})
+		case respondRuntimeBackend(w, r, "docker"):
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
 			_ = json.NewEncoder(w).Encode(model.Sandbox{ID: "sbx-ordered", RuntimeBackend: "docker", Status: model.SandboxStatusRunning})
 		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sbx-ordered":
@@ -256,8 +269,7 @@ cleanup: always
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtime/health":
-			_ = json.NewEncoder(w).Encode(model.RuntimeHealth{Backend: "docker"})
+		case respondRuntimeBackend(w, r, "docker"):
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
 			_ = json.NewEncoder(w).Encode(model.Sandbox{ID: "sbx-tunnel", RuntimeBackend: "docker", Status: model.SandboxStatusRunning})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/sbx-tunnel/exec":
@@ -315,8 +327,7 @@ cleanup: always
 	var execReqs []model.ExecRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtime/health":
-			_ = json.NewEncoder(w).Encode(model.RuntimeHealth{Backend: "docker"})
+		case respondRuntimeBackend(w, r, "docker"):
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
 			_ = json.NewEncoder(w).Encode(model.Sandbox{ID: "sbx-openclaw", RuntimeBackend: "docker", Status: model.SandboxStatusRunning})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/sbx-openclaw/exec":
@@ -416,8 +427,7 @@ cleanup: always
 	var execReqs []model.ExecRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtime/health":
-			_ = json.NewEncoder(w).Encode(model.RuntimeHealth{Backend: "docker"})
+		case respondRuntimeBackend(w, r, "docker"):
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
 			_ = json.NewEncoder(w).Encode(model.Sandbox{ID: "sbx-openclaw", RuntimeBackend: "docker", Status: model.SandboxStatusRunning})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/sbx-openclaw/exec":
@@ -490,8 +500,7 @@ cleanup: always
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtime/health":
-			_ = json.NewEncoder(w).Encode(model.RuntimeHealth{Backend: "docker"})
+		case respondRuntimeBackend(w, r, "docker"):
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
 			_ = json.NewEncoder(w).Encode(model.Sandbox{ID: "sbx-openclaw", RuntimeBackend: "docker", Status: model.SandboxStatusRunning})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/sbx-openclaw/exec":
@@ -542,36 +551,13 @@ sandbox:
 
 func TestRunPresetRunWaitsForQEMUGuestReadyBeforeBootstrapping(t *testing.T) {
 	examplesDir := t.TempDir()
-	writePresetFixture(t, examplesDir, "qemu-tooling", `
-name: qemu-tooling
-runtime:
-  allowed: [qemu]
-  profile: base-guest
-sandbox:
-  image: ${QEMU_GUEST_IMAGE}
-bootstrap:
-  - name: bootstrap
-    command: ["sh", "-lc", "cp /workspace/input.txt /workspace/output.txt"]
-readiness:
-  type: command
-  command: ["sh", "-lc", "test -f /workspace/output.txt"]
-  timeout: 2s
-  interval: 200ms
-files:
-  - path: input.txt
-    content: "qemu-ok"
-artifacts:
-  - remote_path: output.txt
-    local_path: outputs/output.txt
-cleanup: always
-`)
+	writePresetFixture(t, examplesDir, "qemu-tooling", "\nname: qemu-tooling\nruntime:\n  allowed: [qemu]\n  profile: core\nsandbox:\n  image: ${QEMU_GUEST_IMAGE}\nbootstrap:\n  - name: bootstrap\n    command: [\"sh\", \"-lc\", \"cp /workspace/input.txt /workspace/output.txt\"]\nreadiness:\n  type: command\n  command: [\"sh\", \"-lc\", \"test -f /workspace/output.txt\"]\n  timeout: 2s\n  interval: 200ms\nfiles:\n  - path: input.txt\n    content: \"qemu-ok\"\nartifacts:\n  - remote_path: output.txt\n    local_path: outputs/output.txt\ncleanup: always\n")
 
 	inspectCalls := 0
 	guestReady := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtime/health":
-			_ = json.NewEncoder(w).Encode(model.RuntimeHealth{Backend: "qemu"})
+		case respondRuntimeBackend(w, r, "qemu"):
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
 			var req model.CreateSandboxRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -626,20 +612,11 @@ cleanup: always
 
 func TestRunPresetRunFailsWhenQEMUGuestBootFails(t *testing.T) {
 	examplesDir := t.TempDir()
-	writePresetFixture(t, examplesDir, "qemu-fail", `
-name: qemu-fail
-runtime:
-  allowed: [qemu]
-  profile: base-guest
-sandbox:
-  image: ${QEMU_GUEST_IMAGE}
-cleanup: always
-`)
+	writePresetFixture(t, examplesDir, "qemu-fail", "\nname: qemu-fail\nruntime:\n  allowed: [qemu]\n  profile: core\nsandbox:\n  image: ${QEMU_GUEST_IMAGE}\ncleanup: always\n")
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtime/health":
-			_ = json.NewEncoder(w).Encode(model.RuntimeHealth{Backend: "qemu"})
+		case respondRuntimeBackend(w, r, "qemu"):
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
 			_ = json.NewEncoder(w).Encode(model.Sandbox{ID: "sbx-qemu", RuntimeBackend: "qemu", Status: model.SandboxStatusBooting})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sbx-qemu":
@@ -660,27 +637,13 @@ cleanup: always
 
 func TestRunPresetRunSeparatesQEMUGuestAndAppReadiness(t *testing.T) {
 	examplesDir := t.TempDir()
-	writePresetFixture(t, examplesDir, "qemu-app-readiness", `
-name: qemu-app-readiness
-runtime:
-  allowed: [qemu]
-  profile: base-guest
-sandbox:
-  image: ${QEMU_GUEST_IMAGE}
-readiness:
-  type: command
-  command: ["sh", "-lc", "test -f /workspace/ready.txt"]
-  timeout: 600ms
-  interval: 200ms
-cleanup: always
-`)
+	writePresetFixture(t, examplesDir, "qemu-app-readiness", "\nname: qemu-app-readiness\nruntime:\n  allowed: [qemu]\n  profile: core\nsandbox:\n  image: ${QEMU_GUEST_IMAGE}\nreadiness:\n  type: command\n  command: [\"sh\", \"-lc\", \"test -f /workspace/ready.txt\"]\n  timeout: 600ms\n  interval: 200ms\ncleanup: always\n")
 
 	inspectCalls := 0
 	readinessCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/runtime/health":
-			_ = json.NewEncoder(w).Encode(model.RuntimeHealth{Backend: "qemu"})
+		case respondRuntimeBackend(w, r, "qemu"):
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
 			_ = json.NewEncoder(w).Encode(model.Sandbox{ID: "sbx-qemu", RuntimeBackend: "qemu", Status: model.SandboxStatusBooting})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sbx-qemu":

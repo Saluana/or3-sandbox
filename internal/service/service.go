@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"or3-sandbox/internal/config"
+	"or3-sandbox/internal/guestimage"
 	"or3-sandbox/internal/model"
 	"or3-sandbox/internal/repository"
 )
@@ -64,7 +65,7 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		return model.Sandbox{}, err
 	}
 	var err error
-	req, err = s.validateRuntimeCreate(req)
+	req, contract, err := s.validateRuntimeCreate(req)
 	if err != nil {
 		return model.Sandbox{}, err
 	}
@@ -90,43 +91,57 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 	}
 	now := time.Now().UTC()
 	sandbox := model.Sandbox{
-		ID:             id,
-		TenantID:       tenant.ID,
-		Status:         model.SandboxStatusCreating,
-		RuntimeBackend: s.cfg.RuntimeBackend,
-		BaseImageRef:   req.BaseImageRef,
-		CPULimit:       req.CPULimit,
-		MemoryLimitMB:  req.MemoryLimitMB,
-		PIDsLimit:      req.PIDsLimit,
-		DiskLimitMB:    req.DiskLimitMB,
-		NetworkMode:    req.NetworkMode,
-		AllowTunnels:   *req.AllowTunnels,
-		StorageRoot:    storageRoot,
-		WorkspaceRoot:  workspaceRoot,
-		CacheRoot:      cacheRoot,
-		RuntimeID:      id,
-		RuntimeStatus:  string(model.SandboxStatusCreating),
-		CreatedAt:      now,
-		UpdatedAt:      now,
-		LastActiveAt:   now,
+		ID:                       id,
+		TenantID:                 tenant.ID,
+		Status:                   model.SandboxStatusCreating,
+		RuntimeBackend:           s.cfg.RuntimeBackend,
+		BaseImageRef:             req.BaseImageRef,
+		Profile:                  req.Profile,
+		Features:                 model.NormalizeFeatures(req.Features),
+		Capabilities:             append([]string(nil), contract.Capabilities...),
+		ControlMode:              contract.Control.Mode,
+		ControlProtocolVersion:   contract.Control.ProtocolVersion,
+		WorkspaceContractVersion: contract.WorkspaceContractVersion,
+		ImageContractVersion:     contract.ContractVersion,
+		CPULimit:                 req.CPULimit,
+		MemoryLimitMB:            req.MemoryLimitMB,
+		PIDsLimit:                req.PIDsLimit,
+		DiskLimitMB:              req.DiskLimitMB,
+		NetworkMode:              req.NetworkMode,
+		AllowTunnels:             *req.AllowTunnels,
+		StorageRoot:              storageRoot,
+		WorkspaceRoot:            workspaceRoot,
+		CacheRoot:                cacheRoot,
+		RuntimeID:                id,
+		RuntimeStatus:            string(model.SandboxStatusCreating),
+		CreatedAt:                now,
+		UpdatedAt:                now,
+		LastActiveAt:             now,
 	}
 	if err := s.store.CreateSandbox(ctx, sandbox); err != nil {
 		_ = os.RemoveAll(filepath.Join(s.cfg.StorageRoot, id))
 		return model.Sandbox{}, err
 	}
 	spec := model.SandboxSpec{
-		SandboxID:     sandbox.ID,
-		TenantID:      sandbox.TenantID,
-		BaseImageRef:  sandbox.BaseImageRef,
-		CPULimit:      sandbox.CPULimit,
-		MemoryLimitMB: sandbox.MemoryLimitMB,
-		PIDsLimit:     sandbox.PIDsLimit,
-		DiskLimitMB:   sandbox.DiskLimitMB,
-		NetworkMode:   sandbox.NetworkMode,
-		AllowTunnels:  sandbox.AllowTunnels,
-		StorageRoot:   sandbox.StorageRoot,
-		WorkspaceRoot: sandbox.WorkspaceRoot,
-		CacheRoot:     sandbox.CacheRoot,
+		SandboxID:                sandbox.ID,
+		TenantID:                 sandbox.TenantID,
+		BaseImageRef:             sandbox.BaseImageRef,
+		Profile:                  sandbox.Profile,
+		Features:                 append([]string(nil), sandbox.Features...),
+		Capabilities:             append([]string(nil), sandbox.Capabilities...),
+		ControlMode:              sandbox.ControlMode,
+		ControlProtocolVersion:   sandbox.ControlProtocolVersion,
+		WorkspaceContractVersion: sandbox.WorkspaceContractVersion,
+		ImageContractVersion:     sandbox.ImageContractVersion,
+		CPULimit:                 sandbox.CPULimit,
+		MemoryLimitMB:            sandbox.MemoryLimitMB,
+		PIDsLimit:                sandbox.PIDsLimit,
+		DiskLimitMB:              sandbox.DiskLimitMB,
+		NetworkMode:              sandbox.NetworkMode,
+		AllowTunnels:             sandbox.AllowTunnels,
+		StorageRoot:              sandbox.StorageRoot,
+		WorkspaceRoot:            sandbox.WorkspaceRoot,
+		CacheRoot:                sandbox.CacheRoot,
 	}
 	state, err := s.runtime.Create(ctx, spec)
 	if err != nil {
@@ -827,12 +842,15 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 		return model.Snapshot{}, fmt.Errorf("qemu snapshots require the sandbox to be stopped")
 	}
 	snapshot := model.Snapshot{
-		ID:        newID("snap-"),
-		SandboxID: sandbox.ID,
-		TenantID:  tenantID,
-		Name:      req.Name,
-		Status:    model.SnapshotStatusCreating,
-		CreatedAt: time.Now().UTC(),
+		ID:                     newID("snap-"),
+		SandboxID:              sandbox.ID,
+		TenantID:               tenantID,
+		Name:                   req.Name,
+		Status:                 model.SnapshotStatusCreating,
+		Profile:                sandbox.Profile,
+		ImageContractVersion:   sandbox.ImageContractVersion,
+		ControlProtocolVersion: sandbox.ControlProtocolVersion,
+		CreatedAt:              time.Now().UTC(),
 	}
 	if snapshot.Name == "" {
 		snapshot.Name = snapshot.ID
@@ -976,6 +994,10 @@ func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID stri
 	sandbox.RuntimeStatus = string(state.Status)
 	if sandbox.RuntimeBackend != "qemu" {
 		sandbox.BaseImageRef = snapshot.ImageRef
+	} else {
+		sandbox.Profile = snapshot.Profile
+		sandbox.ImageContractVersion = snapshot.ImageContractVersion
+		sandbox.ControlProtocolVersion = snapshot.ControlProtocolVersion
 	}
 	sandbox.UpdatedAt = time.Now().UTC()
 	if err := s.store.UpdateSandboxState(ctx, sandbox); err != nil {
@@ -1156,6 +1178,10 @@ func (s *Service) applyCreateDefaults(req model.CreateSandboxRequest) model.Crea
 			req.BaseImageRef = s.cfg.BaseImageRef
 		}
 	}
+	if req.Profile == "" && s.cfg.RuntimeBackend == "qemu" {
+		req.Profile = model.GuestProfileCore
+	}
+	req.Features = model.NormalizeFeatures(req.Features)
 	if req.CPULimit == 0 {
 		req.CPULimit = s.cfg.DefaultCPULimit
 	}
@@ -1182,6 +1208,9 @@ func validateCreate(req model.CreateSandboxRequest) error {
 	if req.BaseImageRef == "" {
 		return errors.New("base_image_ref is required")
 	}
+	if req.Profile != "" && !req.Profile.IsValid() {
+		return fmt.Errorf("invalid guest profile %q", req.Profile)
+	}
 	if req.CPULimit <= 0 || req.MemoryLimitMB <= 0 || req.PIDsLimit <= 0 || req.DiskLimitMB <= 0 {
 		return errors.New("cpu, memory, pids, and disk limits must be positive")
 	}
@@ -1191,19 +1220,50 @@ func validateCreate(req model.CreateSandboxRequest) error {
 	return nil
 }
 
-func (s *Service) validateRuntimeCreate(req model.CreateSandboxRequest) (model.CreateSandboxRequest, error) {
+func (s *Service) validateRuntimeCreate(req model.CreateSandboxRequest) (model.CreateSandboxRequest, guestimage.Contract, error) {
 	if s.cfg.RuntimeBackend == "qemu" && req.CPULimit.MilliValue()%1000 != 0 {
-		return model.CreateSandboxRequest{}, fmt.Errorf("qemu runtime requires whole CPU cores until fractional throttling is implemented")
+		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("qemu runtime requires whole CPU cores until fractional throttling is implemented")
 	}
 	if s.cfg.RuntimeBackend != "qemu" {
-		return req, nil
+		return req, guestimage.Contract{}, nil
 	}
 	resolved, err := s.resolveQEMUBaseImageRef(req.BaseImageRef)
 	if err != nil {
-		return model.CreateSandboxRequest{}, err
+		return model.CreateSandboxRequest{}, guestimage.Contract{}, err
+	}
+	contract, err := guestimage.Load(resolved)
+	if err != nil {
+		return model.CreateSandboxRequest{}, guestimage.Contract{}, err
+	}
+	if err := guestimage.Validate(resolved, contract); err != nil {
+		return model.CreateSandboxRequest{}, guestimage.Contract{}, err
+	}
+	profile := req.Profile
+	if profile == "" {
+		profile = contract.Profile
+	}
+	if !profile.IsValid() {
+		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("qemu runtime requires a valid guest profile")
+	}
+	if profile != contract.Profile {
+		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("guest image profile %q does not match requested profile %q", contract.Profile, profile)
+	}
+	if !s.cfg.IsAllowedQEMUProfile(profile) {
+		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("guest profile %q is not allowed by policy", profile)
+	}
+	if s.cfg.IsDangerousQEMUProfile(profile) && !s.cfg.QEMUAllowDangerousProfiles {
+		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("guest profile %q is blocked by policy until SANDBOX_QEMU_ALLOW_DANGEROUS_PROFILES=true", profile)
+	}
+	if contract.Control.Mode == model.GuestControlModeSSHCompat && !s.cfg.QEMUAllowSSHCompat {
+		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("ssh-compat guest images are blocked by policy until SANDBOX_QEMU_ALLOW_SSH_COMPAT=true")
+	}
+	if err := guestimage.RequestedFeaturesAllowed(contract, req.Features); err != nil {
+		return model.CreateSandboxRequest{}, guestimage.Contract{}, err
 	}
 	req.BaseImageRef = resolved
-	return req, nil
+	req.Profile = profile
+	req.Features = model.NormalizeFeatures(req.Features)
+	return req, contract, nil
 }
 
 func (s *Service) resolveQEMUBaseImageRef(value string) (string, error) {

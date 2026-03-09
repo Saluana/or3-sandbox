@@ -14,7 +14,7 @@ In this project, the runtime is the engine under the hood.
 | Runtime | Best for | Current status | Main control method |
 | --- | --- | --- | --- |
 | `docker` | local development and trusted setups | most complete today | Docker CLI |
-| `qemu` | production isolation and security-sensitive workloads | newer and still being hardened | QEMU + SSH |
+| `qemu` | production isolation and security-sensitive workloads | newer and still being hardened | QEMU + guest agent |
 
 ## Docker runtime
 
@@ -79,10 +79,12 @@ The QEMU backend:
 - prepares a writable root disk
 - prepares a separate workspace disk
 - boots a guest image with QEMU
-- waits for SSH to become reachable using a pinned guest host key
+- waits for the guest agent to report readiness on agent-first images
 - checks for a readiness marker at `/var/lib/or3/bootstrap.ready`
-- runs commands through SSH
+- runs commands through the guest agent by default
 - manages guest files through the guest boundary
+
+SSH still exists, but only as the explicit compatibility/debug path for `ssh-compat` images.
 
 ### Current limitations
 
@@ -92,13 +94,14 @@ The main ones are:
 
 - setup is more involved than Docker
 - operator-owned guest image prep matters a lot
-- the guest-backed path still needs more long-term hardening than the trusted Docker path
+- Linux/KVM is the supported hostile-production target and still needs host-specific validation before production claims
 
 ### Runtime state signals
 
 The QEMU runtime now exposes more honest status values:
 
 - `booting` means the guest process exists but SSH readiness has not finished yet
+- `booting` means the guest process exists but readiness has not finished yet
 - `running` means the guest is reachable and ready
 - `suspended` means the guest was intentionally paused
 - `degraded` means the guest process is still alive but readiness checks are failing after the boot window
@@ -122,7 +125,7 @@ Choose `qemu` if:
 
 - you need the stronger production isolation boundary
 - you are working on untrusted or security-sensitive workloads
-- you are comfortable preparing guest images and SSH access
+- you are comfortable preparing guest images and validating profile contracts
 
 ## Storage behavior
 
@@ -147,7 +150,7 @@ Choose `qemu` if:
 
 ### QEMU
 
-- guest access is built around loopback forwarding and SSH
+- guest access is agent-first via virtio-serial; SSH remains explicit compatibility/debug only
 - tunnel exposure remains explicit
 - no direct host exposure by default
 

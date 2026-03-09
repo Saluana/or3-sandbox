@@ -98,14 +98,7 @@ func TestListDiscoversPresetDirectories(t *testing.T) {
 func TestLoadManifestNormalizesRuntimeHints(t *testing.T) {
 	root := t.TempDir()
 	manifestPath := filepath.Join(root, "preset.yaml")
-	content := `
-name: sample
-runtime:
-  allowed: [QEMU, docker]
-  profile: browser-guest
-sandbox:
-  image: ${QEMU_GUEST_IMAGE}
-`
+	content := "\nname: sample\nruntime:\n  allowed: [QEMU, docker]\n  profile: browser\nsandbox:\n  image: ${QEMU_GUEST_IMAGE}\n"
 	if err := os.WriteFile(manifestPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -113,10 +106,29 @@ sandbox:
 	if err != nil {
 		t.Fatalf("load manifest: %v", err)
 	}
-	if manifest.Runtime.Profile != "browser-guest" {
+	if manifest.Runtime.Profile != "browser" {
 		t.Fatalf("unexpected runtime profile %q", manifest.Runtime.Profile)
 	}
 	if len(manifest.Runtime.Allowed) != 2 || manifest.Runtime.Allowed[0] != "docker" || manifest.Runtime.Allowed[1] != "qemu" {
 		t.Fatalf("unexpected runtime.allowed normalization: %+v", manifest.Runtime.Allowed)
+	}
+}
+
+func TestLoadManifestRejectsInvalidRuntimeProfile(t *testing.T) {
+	root := t.TempDir()
+	manifestPath := filepath.Join(root, "preset.yaml")
+	content := `
+name: sample
+runtime:
+  profile: browser-guest
+sandbox:
+  image: ${QEMU_GUEST_IMAGE}
+`
+	if err := os.WriteFile(manifestPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadManifest(manifestPath)
+	if err == nil || !strings.Contains(err.Error(), "runtime.profile") {
+		t.Fatalf("expected invalid runtime profile error, got %v", err)
 	}
 }

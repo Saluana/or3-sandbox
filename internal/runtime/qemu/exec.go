@@ -22,6 +22,9 @@ import (
 const execPreviewLimit = 64 * 1024
 
 func (r *Runtime) Exec(ctx context.Context, sandbox model.Sandbox, req model.ExecRequest, streams model.ExecStreams) (model.ExecHandle, error) {
+	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
+		return r.agentExec(ctx, layoutForSandbox(sandbox), req, streams)
+	}
 	command := req.Command
 	if len(command) == 0 {
 		command = []string{"sh", "-lc", "pwd"}
@@ -73,6 +76,9 @@ func (r *Runtime) Exec(ctx context.Context, sandbox model.Sandbox, req model.Exe
 }
 
 func (r *Runtime) AttachTTY(ctx context.Context, sandbox model.Sandbox, req model.TTYRequest) (model.TTYHandle, error) {
+	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
+		return r.agentAttachTTY(ctx, layoutForSandbox(sandbox), req)
+	}
 	command := req.Command
 	if len(command) == 0 {
 		command = []string{"bash"}

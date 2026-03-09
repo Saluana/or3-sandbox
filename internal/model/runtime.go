@@ -7,28 +7,37 @@ import (
 )
 
 type SandboxSpec struct {
-	SandboxID     string
-	TenantID      string
-	BaseImageRef  string
-	CPULimit      CPUQuantity
-	MemoryLimitMB int
-	PIDsLimit     int
-	DiskLimitMB   int
-	NetworkMode   NetworkMode
-	AllowTunnels  bool
-	StorageRoot   string
-	WorkspaceRoot string
-	CacheRoot     string
+	SandboxID                string
+	TenantID                 string
+	BaseImageRef             string
+	Profile                  GuestProfile
+	Features                 []string
+	Capabilities             []string
+	ControlMode              GuestControlMode
+	ControlProtocolVersion   string
+	WorkspaceContractVersion string
+	ImageContractVersion     string
+	CPULimit                 CPUQuantity
+	MemoryLimitMB            int
+	PIDsLimit                int
+	DiskLimitMB              int
+	NetworkMode              NetworkMode
+	AllowTunnels             bool
+	StorageRoot              string
+	WorkspaceRoot            string
+	CacheRoot                string
 }
 
 type RuntimeState struct {
-	RuntimeID string
-	Status    SandboxStatus
-	Running   bool
-	Pid       int
-	IPAddress string
-	StartedAt *time.Time
-	Error     string
+	RuntimeID              string
+	Status                 SandboxStatus
+	Running                bool
+	Pid                    int
+	IPAddress              string
+	ControlMode            GuestControlMode
+	ControlProtocolVersion string
+	StartedAt              *time.Time
+	Error                  string
 }
 
 type ExecResult struct {

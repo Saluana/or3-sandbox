@@ -10,7 +10,7 @@ This preset shows the smallest honest QEMU flow:
 
 Guest profile expectations:
 
-- `runtime.profile: base-guest`
+- `runtime.profile: core`
 - the guest must boot successfully and allow SSH with the host settings used by `sandboxd`
 - the guest must provide `sh`, `cp`, `grep`, and `uname`
 

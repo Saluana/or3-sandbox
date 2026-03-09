@@ -14,6 +14,13 @@ import (
 )
 
 func (r *Runtime) ReadWorkspaceFile(ctx context.Context, sandbox model.Sandbox, relativePath string) (model.FileReadResponse, error) {
+	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
+		output, err := r.agentReadWorkspaceFileBytes(ctx, layoutForSandbox(sandbox), relativePath)
+		if err != nil {
+			return model.FileReadResponse{}, err
+		}
+		return model.FileReadResponse{Path: relativePath, Content: string(output), Size: int64(len(output)), Encoding: "utf-8"}, nil
+	}
 	target, err := workspaceGuestPath(relativePath)
 	if err != nil {
 		return model.FileReadResponse{}, err
@@ -32,6 +39,9 @@ func (r *Runtime) ReadWorkspaceFile(ctx context.Context, sandbox model.Sandbox, 
 }
 
 func (r *Runtime) ReadWorkspaceFileBytes(ctx context.Context, sandbox model.Sandbox, relativePath string) ([]byte, error) {
+	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
+		return r.agentReadWorkspaceFileBytes(ctx, layoutForSandbox(sandbox), relativePath)
+	}
 	target, err := workspaceGuestPath(relativePath)
 	if err != nil {
 		return nil, err
@@ -45,6 +55,9 @@ func (r *Runtime) WriteWorkspaceFile(ctx context.Context, sandbox model.Sandbox,
 }
 
 func (r *Runtime) WriteWorkspaceFileBytes(ctx context.Context, sandbox model.Sandbox, relativePath string, content []byte) error {
+	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
+		return r.agentWriteWorkspaceFileBytes(ctx, layoutForSandbox(sandbox), relativePath, content)
+	}
 	return r.writeWorkspaceFileBytes(ctx, sandbox, relativePath, bytes.NewReader(content))
 }
 
@@ -65,6 +78,9 @@ func (r *Runtime) writeWorkspaceFileBytes(ctx context.Context, sandbox model.San
 }
 
 func (r *Runtime) DeleteWorkspacePath(ctx context.Context, sandbox model.Sandbox, relativePath string) error {
+	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
+		return r.agentDeleteWorkspacePath(ctx, layoutForSandbox(sandbox), relativePath)
+	}
 	target, err := workspaceGuestPath(relativePath)
 	if err != nil {
 		return err
@@ -75,6 +91,9 @@ func (r *Runtime) DeleteWorkspacePath(ctx context.Context, sandbox model.Sandbox
 }
 
 func (r *Runtime) MkdirWorkspace(ctx context.Context, sandbox model.Sandbox, relativePath string) error {
+	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
+		return r.agentMkdirWorkspace(ctx, layoutForSandbox(sandbox), relativePath)
+	}
 	target, err := workspaceGuestPath(relativePath)
 	if err != nil {
 		return err

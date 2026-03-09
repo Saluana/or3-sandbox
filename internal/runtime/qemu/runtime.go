@@ -16,20 +16,23 @@ import (
 	"syscall"
 	"time"
 
+	"or3-sandbox/internal/guestimage"
 	"or3-sandbox/internal/model"
 )
 
 const (
-	defaultSSHBinary     = "ssh"
-	defaultSCPBinary     = "scp"
-	defaultQEMUImgBinary = "qemu-img"
-	readyMarkerPath      = "/var/lib/or3/bootstrap.ready"
-	readyProbeTimeout    = 2 * time.Second
-	defaultPollInterval  = 500 * time.Millisecond
-	qemuRuntimePrefix    = "qemu-"
-	sshPortBase          = 22000
-	sshPortSpan          = 20000
-	serialTailLimit      = 64 * 1024
+	defaultSSHBinary      = "ssh"
+	defaultSCPBinary      = "scp"
+	defaultQEMUImgBinary  = "qemu-img"
+	defaultAgentTransport = "virtio-serial"
+	sshCompatTransport    = "ssh-port-forward"
+	readyMarkerPath       = "/var/lib/or3/bootstrap.ready"
+	readyProbeTimeout     = 2 * time.Second
+	defaultPollInterval   = 500 * time.Millisecond
+	qemuRuntimePrefix     = "qemu-"
+	sshPortBase           = 22000
+	sshPortSpan           = 20000
+	serialTailLimit       = 64 * 1024
 )
 
 var bootFailureMarkers = []string{
@@ -52,6 +55,7 @@ type Options struct {
 	Binary         string
 	Accel          string
 	BaseImagePath  string
+	ControlMode    model.GuestControlMode
 	SSHUser        string
 	SSHKeyPath     string
 	SSHHostKeyPath string
@@ -61,17 +65,19 @@ type Options struct {
 }
 
 type Runtime struct {
-	qemuBinary      string
-	qemuImgBinary   string
-	sshBinary       string
-	scpBinary       string
-	accelerator     string
-	baseImagePath   string
-	sshUser         string
-	sshKeyPath      string
-	sshHostKeyPath  string
-	bootTimeout     time.Duration
-	pollInterval    time.Duration
+	qemuBinary     string
+	qemuImgBinary  string
+	sshBinary      string
+	scpBinary      string
+	accelerator    string
+	baseImagePath  string
+	controlMode    model.GuestControlMode
+	agentTransport string
+	sshUser        string
+	sshKeyPath     string
+	sshHostKeyPath string
+	bootTimeout    time.Duration
+	pollInterval   time.Duration
 
 	runCommand  commandRunner
 	sshReady    sshProbe
@@ -96,6 +102,7 @@ type sandboxLayout struct {
 	workspaceDiskPath string
 	pidPath           string
 	monitorPath       string
+	agentSocketPath   string
 	knownHostsPath    string
 	serialLogPath     string
 }
@@ -113,6 +120,9 @@ func New(opts Options) (*Runtime, error) {
 	if strings.TrimSpace(opts.SCPBinary) == "" {
 		opts.SCPBinary = defaultSCPBinary
 	}
+	if !opts.ControlMode.IsValid() {
+		opts.ControlMode = model.GuestControlModeAgent
+	}
 	accel, err := resolveAccel(opts.Accel, goruntime.GOOS)
 	if err != nil {
 		return nil, err
@@ -128,6 +138,8 @@ func New(opts Options) (*Runtime, error) {
 		scpBinary:      opts.SCPBinary,
 		accelerator:    accel,
 		baseImagePath:  opts.BaseImagePath,
+		controlMode:    opts.ControlMode,
+		agentTransport: defaultAgentTransport,
 		sshUser:        opts.SSHUser,
 		sshKeyPath:     opts.SSHKeyPath,
 		sshHostKeyPath: opts.SSHHostKeyPath,
@@ -148,7 +160,7 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 	if err := os.Remove(layout.pidPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return model.RuntimeState{}, err
 	}
-	baseImagePath, err := r.guestBaseImage(spec.BaseImageRef)
+	baseImagePath, spec, err := r.guestBaseImage(spec)
 	if err != nil {
 		return model.RuntimeState{}, err
 	}
@@ -159,16 +171,19 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 	if err := r.createWorkspaceDisk(ctx, layout.workspaceDiskPath, workspaceBytes); err != nil {
 		return model.RuntimeState{}, err
 	}
-	if err := r.seedKnownHosts(layout.knownHostsPath, sandboxHostKeyAlias(spec.SandboxID)); err != nil {
-		return model.RuntimeState{}, err
+	if r.controlModeForSpec(spec) == model.GuestControlModeSSHCompat {
+		if err := r.seedKnownHosts(layout.knownHostsPath, sandboxHostKeyAlias(spec.SandboxID)); err != nil {
+			return model.RuntimeState{}, err
+		}
 	}
 	if err := touchFile(layout.serialLogPath); err != nil {
 		return model.RuntimeState{}, err
 	}
 	return model.RuntimeState{
-		RuntimeID: qemuRuntimePrefix + spec.SandboxID,
-		Status:    model.SandboxStatusStopped,
-		Running:   false,
+		RuntimeID:   qemuRuntimePrefix + spec.SandboxID,
+		Status:      model.SandboxStatusStopped,
+		Running:     false,
+		ControlMode: r.controlModeForSpec(spec),
 	}, nil
 }
 
@@ -191,7 +206,7 @@ func (r *Runtime) Start(ctx context.Context, sandbox model.Sandbox) (model.Runti
 	if _, err := waitForPID(layout.pidPath, r.bootTimeout); err != nil {
 		return model.RuntimeState{}, err
 	}
-	if err := r.waitForReady(ctx, target, layout.serialLogPath); err != nil {
+	if err := r.waitForReady(ctx, sandboxWithRuntimeID(sandbox, runtimeID), target, layout.serialLogPath); err != nil {
 		_, _ = r.Stop(context.Background(), sandboxWithRuntimeID(sandbox, runtimeID), true)
 		return model.RuntimeState{}, err
 	}
@@ -256,7 +271,7 @@ func (r *Runtime) Resume(ctx context.Context, sandbox model.Sandbox) (model.Runt
 	}
 	_ = os.Remove(suspendedMarkerPath(layout))
 	target := r.sshTarget(sandbox, layout)
-	if err := r.waitForReady(ctx, target, layout.serialLogPath); err != nil {
+	if err := r.waitForReady(ctx, sandbox, target, layout.serialLogPath); err != nil {
 		return model.RuntimeState{}, err
 	}
 	return r.Inspect(ctx, sandbox)
@@ -288,39 +303,43 @@ func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.Run
 	target := r.sshTarget(sandbox, layout)
 	probeCtx, cancel := context.WithTimeout(ctx, readyProbeTimeout)
 	defer cancel()
-	if err := r.sshReady(probeCtx, target); err != nil {
+	if err := r.probeReady(probeCtx, sandbox, layout, target); err != nil {
 		if reason, ok := bootFailureReason(layout.serialLogPath); ok {
 			return model.RuntimeState{
-				RuntimeID: sandbox.RuntimeID,
-				Status:    model.SandboxStatusError,
-				Running:   false,
-				Pid:       pid,
-				Error:     reason,
+				RuntimeID:   sandbox.RuntimeID,
+				Status:      model.SandboxStatusError,
+				Running:     false,
+				Pid:         pid,
+				ControlMode: r.controlModeForSandbox(sandbox),
+				Error:       reason,
 			}, nil
 		}
 		if withinBootWindow(layout.pidPath, r.effectiveBootTimeout()) {
 			return model.RuntimeState{
-				RuntimeID: sandbox.RuntimeID,
-				Status:    model.SandboxStatusBooting,
-				Running:   false,
-				Pid:       pid,
-				Error:     fmt.Sprintf("guest is still booting: %v", err),
+				RuntimeID:   sandbox.RuntimeID,
+				Status:      model.SandboxStatusBooting,
+				Running:     false,
+				Pid:         pid,
+				ControlMode: r.controlModeForSandbox(sandbox),
+				Error:       fmt.Sprintf("guest is still booting: %v", err),
 			}, nil
 		}
 		return model.RuntimeState{
-			RuntimeID: sandbox.RuntimeID,
-			Status:    model.SandboxStatusDegraded,
-			Running:   false,
-			Pid:       pid,
-			Error:     fmt.Sprintf("guest process is alive but not ready: %v", err),
+			RuntimeID:   sandbox.RuntimeID,
+			Status:      model.SandboxStatusDegraded,
+			Running:     false,
+			Pid:         pid,
+			ControlMode: r.controlModeForSandbox(sandbox),
+			Error:       fmt.Sprintf("guest process is alive but not ready: %v", err),
 		}, nil
 	}
 	return model.RuntimeState{
-		RuntimeID: sandbox.RuntimeID,
-		Status:    model.SandboxStatusRunning,
-		Running:   true,
-		Pid:       pid,
-		IPAddress: "127.0.0.1",
+		RuntimeID:   sandbox.RuntimeID,
+		Status:      model.SandboxStatusRunning,
+		Running:     true,
+		Pid:         pid,
+		IPAddress:   "127.0.0.1",
+		ControlMode: r.controlModeForSandbox(sandbox),
 	}, nil
 }
 
@@ -417,17 +436,25 @@ func (r *Runtime) startArgs(sandbox model.Sandbox, layout sandboxLayout, sshPort
 		"-accel", r.accelerator,
 		"-m", strconv.Itoa(defaultInt(sandbox.MemoryLimitMB, 512)),
 		"-smp", strconv.Itoa(defaultVCPUCount(sandbox.CPULimit, 1)),
+		"-device", "virtio-serial",
+		"-chardev", "socket,id=agent0,path=" + layout.agentSocketPath + ",server=on,wait=off",
+		"-device", "virtserialport,chardev=agent0,name=org.or3.guest_agent",
 		"-drive", "if=virtio,file=" + layout.rootDiskPath + ",format=qcow2",
 		"-drive", "if=virtio,file=" + layout.workspaceDiskPath + ",format=raw",
 	}
-	args = append(args, r.networkArgs(sandbox.NetworkMode, sshPort)...)
+	args = append(args, r.networkArgs(sandbox, sshPort)...)
 	return args
 }
 
-func (r *Runtime) networkArgs(mode model.NetworkMode, sshPort int) []string {
-	netdev := fmt.Sprintf("user,id=net0,hostfwd=tcp:127.0.0.1:%d-:22", sshPort)
-	if mode == model.NetworkModeInternetDisabled {
-		netdev = fmt.Sprintf("user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:%d-:22", sshPort)
+func (r *Runtime) networkArgs(sandbox model.Sandbox, sshPort int) []string {
+	netdev := "user,id=net0"
+	if sandbox.NetworkMode == model.NetworkModeInternetDisabled {
+		netdev = "user,id=net0,restrict=on"
+	}
+	transport, err := r.controlTransportForSandbox(sandbox)
+	if err == nil && transport.mode == model.GuestControlModeSSHCompat {
+		hostfwd := fmt.Sprintf(",hostfwd=tcp:127.0.0.1:%d-:22", sshPort)
+		netdev += hostfwd
 	}
 	return []string{
 		"-netdev", netdev,
@@ -455,9 +482,15 @@ func (r *Runtime) sshTarget(sandbox model.Sandbox, layout sandboxLayout) sshTarg
 }
 
 func (r *Runtime) startTarget(sandbox model.Sandbox, layout sandboxLayout) (sshTarget, string, error) {
+	transport, err := r.controlTransportForSandbox(sandbox)
+	if err != nil {
+		return sshTarget{}, "", err
+	}
+	if transport.mode != model.GuestControlModeSSHCompat {
+		return sshTarget{}, qemuRuntimePrefix + sandbox.ID, nil
+	}
 	port, ok := sshPortFromRuntimeID(sandbox.RuntimeID)
 	if !ok || !isTCPPortAvailable(port) {
-		var err error
 		port, err = allocateSSHPort()
 		if err != nil {
 			return sshTarget{}, "", err
@@ -490,14 +523,14 @@ func (r *Runtime) baseSSHArgs(target sshTarget, tty bool) []string {
 	return append(args, r.sshUser+"@127.0.0.1")
 }
 
-func (r *Runtime) waitForReady(ctx context.Context, target sshTarget, serialLogPath string) error {
+func (r *Runtime) waitForReady(ctx context.Context, sandbox model.Sandbox, target sshTarget, serialLogPath string) error {
 	timeoutCtx, cancel := context.WithTimeout(ctx, r.effectiveBootTimeout())
 	defer cancel()
 	ticker := time.NewTicker(r.effectivePollInterval())
 	defer ticker.Stop()
 	var lastErr error
 	for {
-		if err := r.sshReady(timeoutCtx, target); err == nil {
+		if err := r.probeReady(timeoutCtx, sandbox, layoutForSandbox(sandbox), target); err == nil {
 			return nil
 		} else {
 			lastErr = err
@@ -580,15 +613,69 @@ func (r *Runtime) defaultSSHProbe(ctx context.Context, target sshTarget) error {
 	return err
 }
 
-func (r *Runtime) guestBaseImage(specBaseImageRef string) (string, error) {
-	path := strings.TrimSpace(specBaseImageRef)
+func (r *Runtime) guestBaseImage(spec model.SandboxSpec) (string, model.SandboxSpec, error) {
+	path := strings.TrimSpace(spec.BaseImageRef)
 	if path == "" {
 		path = r.baseImagePath
 	}
 	if !isReadableFile(path) {
-		return "", fmt.Errorf("qemu base image path %q is not readable", path)
+		return "", model.SandboxSpec{}, fmt.Errorf("qemu base image path %q is not readable", path)
 	}
-	return filepath.Clean(path), nil
+	path = filepath.Clean(path)
+	contract, err := guestimage.Load(path)
+	if err != nil {
+		return "", model.SandboxSpec{}, err
+	}
+	if err := guestimage.Validate(path, contract); err != nil {
+		return "", model.SandboxSpec{}, err
+	}
+	if spec.Profile == "" {
+		spec.Profile = contract.Profile
+	}
+	if !spec.ControlMode.IsValid() {
+		spec.ControlMode = contract.Control.Mode
+	}
+	if strings.TrimSpace(spec.ControlProtocolVersion) == "" {
+		spec.ControlProtocolVersion = contract.Control.ProtocolVersion
+	}
+	if strings.TrimSpace(spec.WorkspaceContractVersion) == "" {
+		spec.WorkspaceContractVersion = contract.WorkspaceContractVersion
+	}
+	if strings.TrimSpace(spec.ImageContractVersion) == "" {
+		spec.ImageContractVersion = contract.ContractVersion
+	}
+	if spec.Profile != "" && contract.Profile != spec.Profile {
+		return "", model.SandboxSpec{}, fmt.Errorf("guest image profile %q does not match sandbox profile %q", contract.Profile, spec.Profile)
+	}
+	if spec.ControlMode.IsValid() && contract.Control.Mode != spec.ControlMode {
+		return "", model.SandboxSpec{}, fmt.Errorf("guest image control mode %q does not match sandbox control mode %q", contract.Control.Mode, spec.ControlMode)
+	}
+	transport, err := r.controlTransportForSpec(spec)
+	if err != nil {
+		return "", model.SandboxSpec{}, err
+	}
+	if contract.Control.Mode == model.GuestControlModeAgent && len(contract.Control.SupportedTransports) > 0 {
+		supported := false
+		for _, candidate := range contract.Control.SupportedTransports {
+			if strings.EqualFold(strings.TrimSpace(candidate), transport.name) {
+				supported = true
+				break
+			}
+		}
+		if !supported {
+			return "", model.SandboxSpec{}, fmt.Errorf("guest image does not support runtime agent transport %q", transport.name)
+		}
+	}
+	if strings.TrimSpace(spec.ControlProtocolVersion) != "" && contract.Control.ProtocolVersion != spec.ControlProtocolVersion {
+		return "", model.SandboxSpec{}, fmt.Errorf("guest image control protocol %q does not match sandbox control protocol %q", contract.Control.ProtocolVersion, spec.ControlProtocolVersion)
+	}
+	if strings.TrimSpace(spec.WorkspaceContractVersion) != "" && contract.WorkspaceContractVersion != spec.WorkspaceContractVersion {
+		return "", model.SandboxSpec{}, fmt.Errorf("guest image workspace contract version %q does not match sandbox workspace contract version %q", contract.WorkspaceContractVersion, spec.WorkspaceContractVersion)
+	}
+	if strings.TrimSpace(spec.ImageContractVersion) != "" && contract.ContractVersion != spec.ImageContractVersion {
+		return "", model.SandboxSpec{}, fmt.Errorf("guest image contract version %q does not match sandbox contract version %q", contract.ContractVersion, spec.ImageContractVersion)
+	}
+	return path, spec, nil
 }
 
 func (r *Runtime) effectiveBootTimeout() time.Duration {
@@ -648,24 +735,37 @@ func validateHost(opts Options, qemuImgBinary, accel string, probe hostProbe) er
 	if strings.TrimSpace(opts.BaseImagePath) == "" {
 		return errors.New("qemu base image path is required")
 	}
-	if strings.TrimSpace(opts.SSHUser) == "" {
-		return errors.New("qemu ssh user is required")
+	if !opts.ControlMode.IsValid() {
+		opts.ControlMode = model.GuestControlModeAgent
 	}
-	if strings.TrimSpace(opts.SSHKeyPath) == "" {
-		return errors.New("qemu ssh key path is required")
-	}
-	if strings.TrimSpace(opts.SSHHostKeyPath) == "" {
-		return errors.New("qemu ssh host key path is required")
+	if opts.ControlMode == model.GuestControlModeSSHCompat {
+		if strings.TrimSpace(opts.SSHUser) == "" {
+			return errors.New("qemu ssh user is required")
+		}
+		if strings.TrimSpace(opts.SSHKeyPath) == "" {
+			return errors.New("qemu ssh key path is required")
+		}
+		if strings.TrimSpace(opts.SSHHostKeyPath) == "" {
+			return errors.New("qemu ssh host key path is required")
+		}
 	}
 	if opts.BootTimeout <= 0 {
 		return errors.New("qemu boot timeout must be positive")
 	}
-	for _, command := range []string{opts.Binary, qemuImgBinary, opts.SSHBinary, opts.SCPBinary, "ps"} {
+	requiredCommands := []string{opts.Binary, qemuImgBinary, "ps"}
+	if opts.ControlMode == model.GuestControlModeSSHCompat {
+		requiredCommands = append(requiredCommands, opts.SSHBinary, opts.SCPBinary)
+	}
+	for _, command := range requiredCommands {
 		if err := probe.commandExists(command); err != nil {
 			return fmt.Errorf("required host command %q is unavailable: %w", command, err)
 		}
 	}
-	for _, path := range []string{opts.BaseImagePath, opts.SSHKeyPath, opts.SSHHostKeyPath} {
+	requiredFiles := []string{opts.BaseImagePath}
+	if opts.ControlMode == model.GuestControlModeSSHCompat {
+		requiredFiles = append(requiredFiles, opts.SSHKeyPath, opts.SSHHostKeyPath)
+	}
+	for _, path := range requiredFiles {
 		if err := probe.fileReadable(path); err != nil {
 			return fmt.Errorf("required file %q is unavailable: %w", path, err)
 		}
@@ -744,6 +844,7 @@ func layoutForSpec(spec model.SandboxSpec) sandboxLayout {
 		workspaceDiskPath: filepath.Join(spec.WorkspaceRoot, "workspace.img"),
 		pidPath:           filepath.Join(baseDir, ".runtime", "qemu.pid"),
 		monitorPath:       filepath.Join(baseDir, ".runtime", "monitor.sock"),
+		agentSocketPath:   filepath.Join(baseDir, ".runtime", "agent.sock"),
 		knownHostsPath:    filepath.Join(baseDir, ".runtime", "ssh-known-hosts"),
 		serialLogPath:     filepath.Join(baseDir, ".runtime", "serial.log"),
 	}
@@ -752,10 +853,75 @@ func layoutForSpec(spec model.SandboxSpec) sandboxLayout {
 func layoutForSandbox(sandbox model.Sandbox) sandboxLayout {
 	return layoutForSpec(model.SandboxSpec{
 		SandboxID:     sandbox.ID,
+		ControlMode:   sandbox.ControlMode,
 		StorageRoot:   sandbox.StorageRoot,
 		WorkspaceRoot: sandbox.WorkspaceRoot,
 		CacheRoot:     sandbox.CacheRoot,
 	})
+}
+
+func (r *Runtime) controlModeForSandbox(sandbox model.Sandbox) model.GuestControlMode {
+	if sandbox.ControlMode.IsValid() {
+		return sandbox.ControlMode
+	}
+	if path := strings.TrimSpace(sandbox.BaseImageRef); path != "" {
+		if contract, err := guestimage.Load(path); err == nil && contract.Control.Mode.IsValid() {
+			return contract.Control.Mode
+		}
+	}
+	if r.controlMode.IsValid() {
+		return r.controlMode
+	}
+	return model.GuestControlModeAgent
+}
+
+func (r *Runtime) controlModeForSpec(spec model.SandboxSpec) model.GuestControlMode {
+	if spec.ControlMode.IsValid() {
+		return spec.ControlMode
+	}
+	if r.controlMode.IsValid() {
+		return r.controlMode
+	}
+	return model.GuestControlModeAgent
+}
+
+type controlTransport struct {
+	mode model.GuestControlMode
+	name string
+}
+
+func (r *Runtime) controlTransportForSandbox(sandbox model.Sandbox) (controlTransport, error) {
+	return r.controlTransport(r.controlModeForSandbox(sandbox))
+}
+
+func (r *Runtime) controlTransportForSpec(spec model.SandboxSpec) (controlTransport, error) {
+	return r.controlTransport(r.controlModeForSpec(spec))
+}
+
+func (r *Runtime) controlTransport(mode model.GuestControlMode) (controlTransport, error) {
+	switch mode {
+	case model.GuestControlModeAgent:
+		transport := strings.TrimSpace(r.agentTransport)
+		if transport == "" {
+			transport = defaultAgentTransport
+		}
+		return controlTransport{mode: mode, name: transport}, nil
+	case model.GuestControlModeSSHCompat:
+		return controlTransport{mode: mode, name: sshCompatTransport}, nil
+	default:
+		return controlTransport{}, fmt.Errorf("unsupported control mode %q", mode)
+	}
+}
+
+func (r *Runtime) probeReady(ctx context.Context, sandbox model.Sandbox, layout sandboxLayout, target sshTarget) error {
+	transport, err := r.controlTransportForSandbox(sandbox)
+	if err != nil {
+		return err
+	}
+	if transport.mode == model.GuestControlModeAgent {
+		return r.agentReady(ctx, layout)
+	}
+	return r.sshReady(ctx, target)
 }
 
 func ensureLayout(layout sandboxLayout) error {

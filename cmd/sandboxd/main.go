@@ -94,6 +94,7 @@ func buildRuntime(cfg config.Config) (model.RuntimeManager, error) {
 			Binary:         cfg.QEMUBinary,
 			Accel:          cfg.QEMUAccel,
 			BaseImagePath:  cfg.QEMUBaseImagePath,
+			ControlMode:    cfg.QEMUControlMode,
 			SSHUser:        cfg.QEMUSSHUser,
 			SSHKeyPath:     cfg.QEMUSSHPrivateKeyPath,
 			SSHHostKeyPath: cfg.QEMUSSHHostKeyPath,

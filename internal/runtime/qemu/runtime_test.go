@@ -2,7 +2,10 @@ package qemu
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"or3-sandbox/internal/guestimage"
 	"or3-sandbox/internal/model"
+	"or3-sandbox/internal/runtime/qemu/agentproto"
 )
 
 func TestResolveAccel(t *testing.T) {
@@ -65,6 +70,7 @@ func TestStartArgsIncludeNetworkingAndDisks(t *testing.T) {
 		CPULimit:      model.CPUCores(2),
 		MemoryLimitMB: 768,
 		NetworkMode:   model.NetworkModeInternetDisabled,
+		ControlMode:   model.GuestControlModeSSHCompat,
 	}
 	args := r.startArgs(sandbox, layout, 2222)
 	joined := strings.Join(args, " ")
@@ -90,6 +96,7 @@ func TestStartArgsKeepHostExposureLoopbackOnly(t *testing.T) {
 		MemoryLimitMB: 512,
 		CPULimit:      model.CPUCores(1),
 		NetworkMode:   model.NetworkModeInternetEnabled,
+		ControlMode:   model.GuestControlModeSSHCompat,
 	}, sandboxLayout{
 		pidPath:           "/tmp/qemu.pid",
 		monitorPath:       "/tmp/monitor.sock",
@@ -105,6 +112,32 @@ func TestStartArgsKeepHostExposureLoopbackOnly(t *testing.T) {
 	}
 }
 
+func TestStartArgsAgentModeUsesVirtioSerialWithoutSSHForward(t *testing.T) {
+	r := &Runtime{qemuBinary: "qemu-system-x86_64", accelerator: "kvm", controlMode: model.GuestControlModeAgent}
+	args := strings.Join(r.startArgs(model.Sandbox{
+		ID:            "sbx-agent",
+		MemoryLimitMB: 512,
+		CPULimit:      model.CPUCores(1),
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		ControlMode:   model.GuestControlModeAgent,
+	}, sandboxLayout{
+		pidPath:           "/tmp/qemu.pid",
+		monitorPath:       "/tmp/monitor.sock",
+		agentSocketPath:   "/tmp/agent.sock",
+		serialLogPath:     "/tmp/serial.log",
+		rootDiskPath:      "/tmp/root.qcow2",
+		workspaceDiskPath: "/tmp/workspace.img",
+	}, 2233), " ")
+	for _, snippet := range []string{"virtio-serial", "virtserialport", "agent.sock"} {
+		if !strings.Contains(args, snippet) {
+			t.Fatalf("expected %q in args: %s", snippet, args)
+		}
+	}
+	if strings.Contains(args, "hostfwd=tcp:127.0.0.1:2233-:22") {
+		t.Fatalf("did not expect ssh forwarding in agent mode args: %s", args)
+	}
+}
+
 func TestWaitForReadyTimesOut(t *testing.T) {
 	r := &Runtime{
 		bootTimeout:  200 * time.Millisecond,
@@ -113,9 +146,134 @@ func TestWaitForReadyTimesOut(t *testing.T) {
 			return errors.New("still booting")
 		},
 	}
-	err := r.waitForReady(context.Background(), sshTarget{port: 2222}, "")
+	err := r.waitForReady(context.Background(), model.Sandbox{ControlMode: model.GuestControlModeSSHCompat}, sshTarget{port: 2222}, "")
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("expected timeout error, got %v", err)
+	}
+}
+
+func TestCreateRejectsGuestContractProfileMismatch(t *testing.T) {
+	spec := model.SandboxSpec{
+		SandboxID:                "sbx-mismatch",
+		BaseImageRef:             writeTestQEMUBaseImage(t),
+		Profile:                  model.GuestProfileBrowser,
+		ControlMode:              model.GuestControlModeAgent,
+		ControlProtocolVersion:   model.DefaultGuestControlProtocolVersion,
+		WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
+		ImageContractVersion:     model.DefaultImageContractVersion,
+		StorageRoot:              filepath.Join(t.TempDir(), "rootfs"),
+		WorkspaceRoot:            filepath.Join(t.TempDir(), "workspace"),
+		CacheRoot:                filepath.Join(t.TempDir(), "cache"),
+		DiskLimitMB:              16,
+	}
+	r := &Runtime{}
+	_, err := r.Create(context.Background(), spec)
+	if err == nil || !strings.Contains(err.Error(), "does not match sandbox profile") {
+		t.Fatalf("expected profile mismatch error, got %v", err)
+	}
+}
+
+func TestCreateUsesGuestContractControlModeWhenSpecOmitsIt(t *testing.T) {
+	imagePath := writeTestQEMUBaseImage(t)
+	r := &Runtime{controlMode: model.GuestControlModeSSHCompat}
+	state, err := r.Create(context.Background(), model.SandboxSpec{
+		SandboxID:     "sbx-contract-mode",
+		BaseImageRef:  imagePath,
+		StorageRoot:   filepath.Join(t.TempDir(), "rootfs"),
+		WorkspaceRoot: filepath.Join(t.TempDir(), "workspace"),
+		CacheRoot:     filepath.Join(t.TempDir(), "cache"),
+		DiskLimitMB:   16,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	if state.ControlMode != model.GuestControlModeAgent {
+		t.Fatalf("expected agent control mode from guest contract, got %q", state.ControlMode)
+	}
+}
+
+func TestAgentHandshakeRejectsProtocolMismatch(t *testing.T) {
+	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("or3-agent-%d.sock", time.Now().UnixNano()))
+	defer os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = agentproto.ReadMessage(conn)
+		result, _ := json.Marshal(agentproto.HelloResult{ProtocolVersion: "999", WorkspaceContractVersion: model.DefaultWorkspaceContractVersion})
+		_ = agentproto.WriteMessage(conn, agentproto.Message{Op: agentproto.OpHello, OK: true, Result: result})
+	}()
+	r := &Runtime{}
+	_, err = r.agentHandshake(context.Background(), sandboxLayout{agentSocketPath: socketPath})
+	if err == nil || !strings.Contains(err.Error(), "protocol mismatch") {
+		t.Fatalf("expected protocol mismatch error, got %v", err)
+	}
+}
+
+func TestControlTransportUsesVirtioSerialForAgentMode(t *testing.T) {
+	r := &Runtime{controlMode: model.GuestControlModeAgent}
+	transport, err := r.controlTransportForSandbox(model.Sandbox{ControlMode: model.GuestControlModeAgent})
+	if err != nil {
+		t.Fatalf("control transport: %v", err)
+	}
+	if transport.mode != model.GuestControlModeAgent {
+		t.Fatalf("unexpected transport mode %q", transport.mode)
+	}
+	if transport.name != defaultAgentTransport {
+		t.Fatalf("unexpected transport name %q", transport.name)
+	}
+}
+
+func TestControlModeForSandboxUsesGuestContractWhenUnset(t *testing.T) {
+	imagePath := writeTestQEMUBaseImage(t)
+	r := &Runtime{controlMode: model.GuestControlModeSSHCompat}
+	mode := r.controlModeForSandbox(model.Sandbox{BaseImageRef: imagePath})
+	if mode != model.GuestControlModeAgent {
+		t.Fatalf("expected guest contract control mode, got %q", mode)
+	}
+}
+
+func TestCreateRejectsUnsupportedAgentTransport(t *testing.T) {
+	imagePath := writeTestQEMUBaseImage(t)
+	payload, err := os.ReadFile(guestimage.SidecarPath(imagePath))
+	if err != nil {
+		t.Fatalf("read sidecar: %v", err)
+	}
+	var contract guestimage.Contract
+	if err := json.Unmarshal(payload, &contract); err != nil {
+		t.Fatalf("unmarshal sidecar: %v", err)
+	}
+	contract.Control.SupportedTransports = []string{"vsock"}
+	payload, err = json.Marshal(contract)
+	if err != nil {
+		t.Fatalf("marshal sidecar: %v", err)
+	}
+	if err := os.WriteFile(guestimage.SidecarPath(imagePath), payload, 0o644); err != nil {
+		t.Fatalf("rewrite sidecar: %v", err)
+	}
+	spec := model.SandboxSpec{
+		SandboxID:                "sbx-unsupported-transport",
+		BaseImageRef:             imagePath,
+		Profile:                  model.GuestProfileCore,
+		ControlMode:              model.GuestControlModeAgent,
+		ControlProtocolVersion:   model.DefaultGuestControlProtocolVersion,
+		WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
+		ImageContractVersion:     model.DefaultImageContractVersion,
+		StorageRoot:              filepath.Join(t.TempDir(), "rootfs"),
+		WorkspaceRoot:            filepath.Join(t.TempDir(), "workspace"),
+		CacheRoot:                filepath.Join(t.TempDir(), "cache"),
+		DiskLimitMB:              16,
+	}
+	r := &Runtime{agentTransport: defaultAgentTransport}
+	if _, err := r.Create(context.Background(), spec); err == nil || !strings.Contains(err.Error(), "does not support runtime agent transport") {
+		t.Fatalf("expected unsupported transport error, got %v", err)
 	}
 }
 
@@ -165,7 +323,7 @@ func TestCreateAndSnapshotArtifacts(t *testing.T) {
 		t.Fatalf("unexpected create status: %s", state.Status)
 	}
 	layout := layoutForSpec(spec)
-	for _, path := range []string{layout.rootDiskPath, layout.workspaceDiskPath, layout.knownHostsPath, layout.serialLogPath} {
+	for _, path := range []string{layout.rootDiskPath, layout.workspaceDiskPath, layout.serialLogPath} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected artifact %s: %v", path, err)
 		}
@@ -218,6 +376,7 @@ func TestInspectReportsBootingWhenGuestIsAliveButNotReadyWithinBootWindow(t *tes
 	sandbox := model.Sandbox{
 		ID:            "sbx-inspect",
 		RuntimeID:     "qemu-sbx-inspect",
+		ControlMode:   model.GuestControlModeSSHCompat,
 		StorageRoot:   filepath.Join(base, "rootfs"),
 		WorkspaceRoot: filepath.Join(base, "workspace"),
 		CacheRoot:     filepath.Join(base, "cache"),
@@ -264,6 +423,7 @@ func TestInspectReportsDegradedWhenGuestIsAliveButNotReadyAfterBootWindow(t *tes
 	sandbox := model.Sandbox{
 		ID:            "sbx-inspect-degraded",
 		RuntimeID:     "qemu-sbx-inspect-degraded",
+		ControlMode:   model.GuestControlModeSSHCompat,
 		StorageRoot:   filepath.Join(base, "rootfs"),
 		WorkspaceRoot: filepath.Join(base, "workspace"),
 		CacheRoot:     filepath.Join(base, "cache"),
@@ -288,6 +448,7 @@ func TestSuspendResumeAndInspectRoundTrip(t *testing.T) {
 	sandbox := model.Sandbox{
 		ID:            "sbx-suspend",
 		RuntimeID:     "qemu-sbx-suspend@2222",
+		ControlMode:   model.GuestControlModeSSHCompat,
 		StorageRoot:   filepath.Join(base, "rootfs"),
 		WorkspaceRoot: filepath.Join(base, "workspace"),
 		CacheRoot:     filepath.Join(base, "cache"),
@@ -346,6 +507,7 @@ func TestStopClearsSuspendedMarker(t *testing.T) {
 	sandbox := model.Sandbox{
 		ID:            "sbx-stop-suspended",
 		RuntimeID:     "qemu-sbx-stop-suspended@2222",
+		ControlMode:   model.GuestControlModeSSHCompat,
 		StorageRoot:   filepath.Join(base, "rootfs"),
 		WorkspaceRoot: filepath.Join(base, "workspace"),
 		CacheRoot:     filepath.Join(base, "cache"),
@@ -378,6 +540,7 @@ func TestStartUsesRunnerAndReadinessProbe(t *testing.T) {
 	sandbox := model.Sandbox{
 		ID:            "sbx-start",
 		RuntimeID:     "qemu-sbx-start",
+		ControlMode:   model.GuestControlModeSSHCompat,
 		StorageRoot:   filepath.Join(base, "rootfs"),
 		WorkspaceRoot: filepath.Join(base, "workspace"),
 		CacheRoot:     filepath.Join(base, "cache"),
@@ -419,6 +582,7 @@ func TestStartCleansUpFailedBoot(t *testing.T) {
 	sandbox := model.Sandbox{
 		ID:            "sbx-failed-start",
 		RuntimeID:     "qemu-sbx-failed-start",
+		ControlMode:   model.GuestControlModeSSHCompat,
 		StorageRoot:   filepath.Join(base, "rootfs"),
 		WorkspaceRoot: filepath.Join(base, "workspace"),
 		CacheRoot:     filepath.Join(base, "cache"),
@@ -536,6 +700,27 @@ func writeTestQEMUBaseImage(t *testing.T) string {
 	path := filepath.Join(t.TempDir(), "base.qcow2")
 	if err := os.WriteFile(path, []byte("qcow2"), 0o644); err != nil {
 		t.Fatalf("write test qemu base image: %v", err)
+	}
+	sha, err := guestimage.ComputeSHA256(path)
+	if err != nil {
+		t.Fatalf("compute test qemu base image sha: %v", err)
+	}
+	contract, err := json.Marshal(guestimage.Contract{
+		ContractVersion:          model.DefaultImageContractVersion,
+		ImagePath:                path,
+		ImageSHA256:              sha,
+		BuildVersion:             "test",
+		Profile:                  model.GuestProfileCore,
+		Capabilities:             []string{"exec", "files", "pty"},
+		Control:                  guestimage.ControlContract{Mode: model.GuestControlModeAgent, ProtocolVersion: model.DefaultGuestControlProtocolVersion, SupportedTransports: []string{"virtio-serial"}},
+		WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
+		SSHPresent:               false,
+	})
+	if err != nil {
+		t.Fatalf("marshal test qemu contract: %v", err)
+	}
+	if err := os.WriteFile(guestimage.SidecarPath(path), contract, 0o644); err != nil {
+		t.Fatalf("write test qemu contract: %v", err)
 	}
 	return path
 }

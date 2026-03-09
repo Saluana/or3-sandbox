@@ -27,7 +27,7 @@ Inspect:
 - `/v1/runtime/health` for `booting`, `degraded`, and `error` sandboxes
 - service audit events such as `sandbox.start`, `sandbox.stop`, `sandbox.resume`, `snapshot.restore`, and `sandbox.reconcile`
 - host disk and memory pressure
-- guest image reachability and SSH bootstrap material
+- guest image reachability, guest-agent handshake state, and SSH bootstrap material only when using `ssh-compat`
 
 ## Auth incidents
 
@@ -68,6 +68,8 @@ Inspect:
 
 If the daemon cannot restart cleanly, restore from backup and follow the restore guide.
 
+See also [Daemon Restart Recovery](daemon-restart-recovery.md).
+
 ## Runbook: guest boot failure
 
 1. Check `/v1/runtime/health` for sandboxes stuck in `booting`, `degraded`, or `error`.
@@ -75,6 +77,8 @@ If the daemon cannot restart cleanly, restore from backup and follow the restore
 3. Verify the QEMU binary, accelerator, guest image path, SSH user, and SSH key still match the deployment.
 4. Confirm host disk and memory are sufficient for the requested guest size.
 5. Recreate the sandbox only after preserving any needed snapshot artifacts.
+
+See also [Guest Won't Boot](guest-wont-boot.md) and [Guest-Agent Handshake Failure](guest-agent-handshake-failure.md).
 
 ## Runbook: disk exhaustion
 
@@ -85,6 +89,8 @@ If the daemon cannot restart cleanly, restore from backup and follow the restore
 5. Free disk, then retry the blocked operation.
 
 Host integration coverage already exercises disk-full behavior for the QEMU guest path; use that test as the reference drill described in [Production Verification](verification.md).
+
+See also [Host Disk Full](host-disk-full.md).
 
 ## Runbook: expired credentials
 
@@ -101,3 +107,5 @@ Host integration coverage already exercises disk-full behavior for the QEMU gues
 3. If local files are missing, check whether `export_location` is populated and whether the export bundle still exists.
 4. Attempt restore on a non-critical target first.
 5. If both local and exported artifacts are missing or corrupt, restore from backup.
+
+See also [Snapshot Failed](snapshot-failed.md), [Sandbox Degraded](sandbox-degraded.md), [Tunnel Abuse](tunnel-abuse.md), and [Dangerous Profile Misuse](dangerous-profile-misuse.md).

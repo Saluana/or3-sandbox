@@ -1,0 +1,21 @@
+{
+  "extends": "runtime",
+  "profile": "browser",
+  "description": "Agent-based profile with browser-supporting system libraries for headless UI workloads.",
+  "capabilities": [
+    "browser"
+  ],
+  "packages": [
+    "libasound2",
+    "libatk-bridge2.0-0",
+    "libcups2",
+    "libdrm2",
+    "libgbm1",
+    "libgtk-3-0",
+    "libnss3",
+    "libxdamage1",
+    "libxkbcommon0",
+    "libxrandr2",
+    "xvfb"
+  ]
+}

@@ -3,13 +3,16 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"or3-sandbox/internal/config"
 	"or3-sandbox/internal/model"
 )
 
@@ -157,4 +160,92 @@ func compactJSON(value string) string {
 		return value
 	}
 	return buf.String()
+}
+
+func TestRunDoctorRequiresProductionQEMUFlag(t *testing.T) {
+	err := runDoctor(nil)
+	if err == nil || !strings.Contains(err.Error(), "usage: sandboxctl doctor --production-qemu") {
+		t.Fatalf("expected usage error, got %v", err)
+	}
+}
+
+func TestProductionQEMUDoctorReportsConfigFailures(t *testing.T) {
+	t.Setenv("SANDBOX_RUNTIME", "docker")
+	t.Setenv("SANDBOX_TRUSTED_DOCKER_RUNTIME", "true")
+	t.Setenv("SANDBOX_AUTH_MODE", "static")
+	t.Setenv("SANDBOX_TOKENS", "dev-token=tenant-dev")
+	t.Setenv("SANDBOX_DB_PATH", filepath.Join(t.TempDir(), "sandbox.db"))
+	t.Setenv("SANDBOX_STORAGE_ROOT", t.TempDir())
+	t.Setenv("SANDBOX_SNAPSHOT_ROOT", t.TempDir())
+	summary := runProductionQEMUDoctor()
+	if len(summary.Checks) == 0 {
+		t.Fatal("expected doctor checks")
+	}
+	foundRuntimeFailure := false
+	for _, check := range summary.Checks {
+		if check.Name == "runtime" && check.Level == "fail" {
+			foundRuntimeFailure = true
+			break
+		}
+	}
+	if !foundRuntimeFailure {
+		t.Fatalf("expected runtime failure in doctor summary, got %#v", summary.Checks)
+	}
+}
+
+func TestProductionQEMUDoctorFailsOnUnsupportedHostOS(t *testing.T) {
+	originalHostOS := doctorHostOS
+	doctorHostOS = "darwin"
+	defer func() { doctorHostOS = originalHostOS }()
+
+	t.Setenv("SANDBOX_RUNTIME", "qemu")
+	t.Setenv("SANDBOX_AUTH_MODE", "jwt-hs256")
+	t.Setenv("SANDBOX_QEMU_BINARY", "/usr/bin/false")
+	t.Setenv("SANDBOX_DB_PATH", filepath.Join(t.TempDir(), "sandbox.db"))
+	t.Setenv("SANDBOX_STORAGE_ROOT", t.TempDir())
+	t.Setenv("SANDBOX_SNAPSHOT_ROOT", t.TempDir())
+
+	summary := runProductionQEMUDoctor()
+	for _, check := range summary.Checks {
+		if check.Name == "host-os" {
+			if check.Level != "fail" {
+				t.Fatalf("expected host-os failure, got %#v", check)
+			}
+			return
+		}
+	}
+	t.Fatalf("expected host-os check, got %#v", summary.Checks)
+}
+
+func TestProductionQEMUDoctorAccumulatesChecksAfterConfigLoadFailure(t *testing.T) {
+	originalLoader := doctorConfigLoader
+	originalHostOS := doctorHostOS
+	doctorConfigLoader = func([]string) (config.Config, error) {
+		return config.Config{}, errors.New("boom")
+	}
+	doctorHostOS = "darwin"
+	defer func() {
+		doctorConfigLoader = originalLoader
+		doctorHostOS = originalHostOS
+	}()
+
+	t.Setenv("SANDBOX_RUNTIME", "docker")
+	t.Setenv("SANDBOX_AUTH_MODE", "static")
+	t.Setenv("SANDBOX_DB_PATH", filepath.Join(t.TempDir(), "sandbox.db"))
+	t.Setenv("SANDBOX_STORAGE_ROOT", t.TempDir())
+	t.Setenv("SANDBOX_SNAPSHOT_ROOT", t.TempDir())
+
+	summary := runProductionQEMUDoctor()
+	if len(summary.Checks) < 4 {
+		t.Fatalf("expected multiple checks after config failure, got %#v", summary.Checks)
+	}
+	seen := map[string]bool{}
+	for _, check := range summary.Checks {
+		seen[check.Name] = true
+	}
+	for _, name := range []string{"config", "runtime", "auth", "host-os"} {
+		if !seen[name] {
+			t.Fatalf("expected %s check after config failure, got %#v", name, summary.Checks)
+		}
+	}
 }

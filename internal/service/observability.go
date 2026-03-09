@@ -23,13 +23,15 @@ type TenantQuotaView struct {
 }
 
 type CapacityReport struct {
-	Backend         string                        `json:"backend"`
-	CheckedAt       time.Time                     `json:"checked_at"`
-	QuotaView       TenantQuotaView               `json:"quota_view"`
-	StatusCounts    map[string]int                `json:"status_counts"`
-	SnapshotCounts  map[model.SnapshotStatus]int  `json:"snapshot_counts,omitempty"`
-	ExecutionCounts map[model.ExecutionStatus]int `json:"execution_counts,omitempty"`
-	Alerts          []string                      `json:"alerts,omitempty"`
+	Backend          string                        `json:"backend"`
+	CheckedAt        time.Time                     `json:"checked_at"`
+	QuotaView        TenantQuotaView               `json:"quota_view"`
+	StatusCounts     map[string]int                `json:"status_counts"`
+	ProfileCounts    map[string]int                `json:"profile_counts,omitempty"`
+	CapabilityCounts map[string]int                `json:"capability_counts,omitempty"`
+	SnapshotCounts   map[model.SnapshotStatus]int  `json:"snapshot_counts,omitempty"`
+	ExecutionCounts  map[model.ExecutionStatus]int `json:"execution_counts,omitempty"`
+	Alerts           []string                      `json:"alerts,omitempty"`
 }
 
 func buildTenantQuotaView(quota model.TenantQuota, usage repository.TenantUsage) TenantQuotaView {
@@ -77,8 +79,18 @@ func (s *Service) CapacityReport(ctx context.Context, tenantID string) (Capacity
 		return CapacityReport{}, err
 	}
 	statusCounts := make(map[string]int)
+	profileCounts := make(map[string]int)
+	capabilityCounts := make(map[string]int)
 	for _, sandbox := range sandboxes {
 		statusCounts[string(sandbox.Status)]++
+		if profile := strings.TrimSpace(string(sandbox.Profile)); profile != "" {
+			profileCounts[profile]++
+		}
+		for _, capability := range sandbox.Capabilities {
+			if trimmed := strings.TrimSpace(capability); trimmed != "" {
+				capabilityCounts[trimmed]++
+			}
+		}
 	}
 	snapshotCounts, err := s.store.SnapshotCounts(ctx, tenantID)
 	if err != nil {
@@ -90,13 +102,15 @@ func (s *Service) CapacityReport(ctx context.Context, tenantID string) (Capacity
 	}
 	quotaView := buildTenantQuotaView(quota, usage)
 	report := CapacityReport{
-		Backend:         s.cfg.RuntimeBackend,
-		CheckedAt:       time.Now().UTC(),
-		QuotaView:       quotaView,
-		StatusCounts:    statusCounts,
-		SnapshotCounts:  snapshotCounts,
-		ExecutionCounts: executionCounts,
-		Alerts:          append([]string(nil), quotaView.Alerts...),
+		Backend:          s.cfg.RuntimeBackend,
+		CheckedAt:        time.Now().UTC(),
+		QuotaView:        quotaView,
+		StatusCounts:     statusCounts,
+		ProfileCounts:    profileCounts,
+		CapabilityCounts: capabilityCounts,
+		SnapshotCounts:   snapshotCounts,
+		ExecutionCounts:  executionCounts,
+		Alerts:           append([]string(nil), quotaView.Alerts...),
 	}
 	if statusCounts[string(model.SandboxStatusDegraded)] > 0 {
 		report.Alerts = append(report.Alerts, "one or more sandboxes are degraded")
@@ -133,6 +147,12 @@ func (s *Service) MetricsReport(ctx context.Context, tenantID string) (string, e
 	)
 	for _, status := range sortedStringKeys(health.StatusCounts) {
 		lines = append(lines, fmt.Sprintf("or3_sandbox_runtime_status_count{status=%q} %d", status, health.StatusCounts[status]))
+	}
+	for _, profile := range sortedStringKeys(report.ProfileCounts) {
+		lines = append(lines, fmt.Sprintf("or3_sandbox_profile_count{profile=%q} %d", profile, report.ProfileCounts[profile]))
+	}
+	for _, capability := range sortedStringKeys(report.CapabilityCounts) {
+		lines = append(lines, fmt.Sprintf("or3_sandbox_capability_count{capability=%q} %d", capability, report.CapabilityCounts[capability]))
 	}
 	for _, status := range sortedSnapshotStatuses(report.SnapshotCounts) {
 		lines = append(lines, fmt.Sprintf("or3_sandbox_snapshots_count{status=%q} %d", status, report.SnapshotCounts[status]))

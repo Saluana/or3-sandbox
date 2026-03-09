@@ -11,7 +11,7 @@ What it does:
 
 Guest profile expectations:
 
-- `runtime.profile: browser-guest`
+- `runtime.profile: browser`
 - the guest image supplied as `QEMU_GUEST_IMAGE` must include one of `chromium`, `chromium-browser`, `google-chrome`, or `google-chrome-stable`
 - the guest must have enough RAM and disk for browser startup
 

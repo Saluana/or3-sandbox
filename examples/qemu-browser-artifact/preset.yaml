@@ -2,7 +2,7 @@ name: qemu-browser-artifact
 description: Capture a screenshot-like browser artifact from a browser-capable QEMU guest profile.
 runtime:
   allowed: [qemu]
-  profile: browser-guest
+  profile: browser
 sandbox:
   image: ${QEMU_GUEST_IMAGE}
   cpu: "2"

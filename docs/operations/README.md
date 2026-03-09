@@ -5,10 +5,22 @@ These guides cover the supported production and operator workflow for `or3-sandb
 Read them in this order:
 
 1. [Production Deployment](production-deployment.md)
-2. [Backup And Restore](backup-and-restore.md)
-3. [Upgrade Guide](upgrades.md)
-4. [Incident Runbooks](incidents.md)
-5. [Production Verification](verification.md)
+2. [QEMU Production Threat Model](qemu-production-threat-model.md)
+3. [Backup And Restore](backup-and-restore.md)
+4. [Upgrade Guide](upgrades.md)
+5. [Incident Runbooks](incidents.md)
+6. [Production Verification](verification.md)
+
+Focused runbooks:
+
+- [Guest-Agent Handshake Failure](guest-agent-handshake-failure.md)
+- [Guest Won't Boot](guest-wont-boot.md)
+- [Sandbox Degraded](sandbox-degraded.md)
+- [Snapshot Failed](snapshot-failed.md)
+- [Host Disk Full](host-disk-full.md)
+- [Tunnel Abuse](tunnel-abuse.md)
+- [Dangerous Profile Misuse](dangerous-profile-misuse.md)
+- [Daemon Restart Recovery](daemon-restart-recovery.md)
 
 Important truth:
 

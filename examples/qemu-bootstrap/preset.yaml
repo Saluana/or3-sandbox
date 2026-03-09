@@ -2,7 +2,7 @@ name: qemu-bootstrap
 description: Bootstrap a documented QEMU guest profile and download guest-produced text artifacts.
 runtime:
   allowed: [qemu]
-  profile: base-guest
+  profile: core
 sandbox:
   image: ${QEMU_GUEST_IMAGE}
   cpu: "1"

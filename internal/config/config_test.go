@@ -25,14 +25,16 @@ func TestValidateRuntimeConfigDockerRequiresTrustedFlag(t *testing.T) {
 
 func TestValidateRuntimeConfigQEMUOnLinux(t *testing.T) {
 	cfg := Config{
-		RuntimeBackend:          "qemu",
-		QEMUBinary:              "qemu-system-x86_64",
-		QEMUAccel:               "auto",
-		QEMUBaseImagePath:       "/images/base.qcow2",
-		QEMUSSHUser:             "sandbox",
-		QEMUSSHPrivateKeyPath:   "/keys/id_ed25519",
-		QEMUSSHHostKeyPath:      "/keys/guest_host_ed25519.pub",
-		QEMUBootTimeout:         90 * time.Second,
+		RuntimeBackend:            "qemu",
+		QEMUBinary:                "qemu-system-x86_64",
+		QEMUAccel:                 "auto",
+		QEMUBaseImagePath:         "/images/base.qcow2",
+		QEMUControlMode:           model.GuestControlModeAgent,
+		QEMUAllowedProfiles:       []model.GuestProfile{model.GuestProfileCore},
+		QEMUSSHUser:               "sandbox",
+		QEMUSSHPrivateKeyPath:     "/keys/id_ed25519",
+		QEMUSSHHostKeyPath:        "/keys/guest_host_ed25519.pub",
+		QEMUBootTimeout:           90 * time.Second,
 		QEMUAllowedBaseImagePaths: []string{"/images/extra.qcow2"},
 	}
 	probe := runtimeValidationProbe{
@@ -53,6 +55,8 @@ func TestValidateRuntimeConfigQEMUOnDarwin(t *testing.T) {
 		QEMUBinary:            "qemu-system-aarch64",
 		QEMUAccel:             "auto",
 		QEMUBaseImagePath:     "/images/base.qcow2",
+		QEMUControlMode:       model.GuestControlModeAgent,
+		QEMUAllowedProfiles:   []model.GuestProfile{model.GuestProfileCore},
 		QEMUSSHUser:           "sandbox",
 		QEMUSSHPrivateKeyPath: "/keys/id_ed25519",
 		QEMUSSHHostKeyPath:    "/keys/guest_host_ed25519.pub",
@@ -76,6 +80,8 @@ func TestValidateRuntimeConfigQEMUMissingPrerequisites(t *testing.T) {
 		QEMUBinary:            "qemu-system-x86_64",
 		QEMUAccel:             "kvm",
 		QEMUBaseImagePath:     "/images/base.qcow2",
+		QEMUControlMode:       model.GuestControlModeAgent,
+		QEMUAllowedProfiles:   []model.GuestProfile{model.GuestProfileCore},
 		QEMUSSHUser:           "sandbox",
 		QEMUSSHPrivateKeyPath: "/keys/id_ed25519",
 		QEMUSSHHostKeyPath:    "/keys/guest_host_ed25519.pub",
@@ -244,6 +250,8 @@ func TestValidateRejectsFractionalQEMUDefaultCPU(t *testing.T) {
 		QEMUBinary:            "qemu-system-x86_64",
 		QEMUAccel:             "kvm",
 		QEMUBaseImagePath:     "/images/base.qcow2",
+		QEMUControlMode:       model.GuestControlModeAgent,
+		QEMUAllowedProfiles:   []model.GuestProfile{model.GuestProfileCore},
 		QEMUSSHUser:           "sandbox",
 		QEMUSSHPrivateKeyPath: "/keys/id_ed25519",
 		QEMUSSHHostKeyPath:    "/keys/guest_host_ed25519.pub",
@@ -263,6 +271,28 @@ func TestValidateRejectsFractionalQEMUDefaultCPU(t *testing.T) {
 	err = cfg.Validate()
 	if err == nil || !strings.Contains(err.Error(), "whole-core default cpu") {
 		t.Fatalf("expected fractional qemu default rejection, got %v", err)
+	}
+}
+
+func TestValidateRuntimeConfigQEMUAgentModeDoesNotRequireSSHMaterial(t *testing.T) {
+	cfg := Config{
+		RuntimeBackend:      "qemu",
+		QEMUBinary:          "qemu-system-x86_64",
+		QEMUAccel:           "auto",
+		QEMUBaseImagePath:   "/images/base.qcow2",
+		QEMUControlMode:     model.GuestControlModeAgent,
+		QEMUAllowedProfiles: []model.GuestProfile{model.GuestProfileCore},
+		QEMUBootTimeout:     time.Minute,
+	}
+	probe := runtimeValidationProbe{
+		goos:          "linux",
+		commandExists: func(string) error { return nil },
+		fileReadable:  func(string) error { return nil },
+		kvmAvailable:  func() error { return nil },
+		hvfAvailable:  func() error { return nil },
+	}
+	if err := validateRuntimeConfig(cfg, probe); err != nil {
+		t.Fatalf("expected agent-mode qemu config to validate without ssh material, got %v", err)
 	}
 }
 
