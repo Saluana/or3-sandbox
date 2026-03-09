@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,19 +27,74 @@ import (
 
 const previewLimit = 64 * 1024
 
-type Runtime struct {
-	binary string
+const (
+	defaultUser                    = "10001:10001"
+	defaultTmpfsSizeMB             = 64
+	dockerCapabilityElevatedUser   = "docker.elevated-user"
+	dockerCapabilityExtraCapPrefix = "docker.extra-cap:"
+)
+
+type Options struct {
+	Binary                  string
+	HostOS                  string
+	User                    string
+	TmpfsSizeMB             int
+	SeccompProfile          string
+	AppArmorProfile         string
+	SELinuxLabel            string
+	AllowDangerousOverrides bool
 }
 
-func New() *Runtime {
-	return &Runtime{binary: "docker"}
+type Runtime struct {
+	binary                  string
+	hostOS                  string
+	user                    string
+	tmpfsSizeMB             int
+	seccompProfile          string
+	appArmorProfile         string
+	selinuxLabel            string
+	allowDangerousOverrides bool
+}
+
+func New(options ...Options) *Runtime {
+	resolved := Options{
+		Binary:      "docker",
+		HostOS:      goruntime.GOOS,
+		User:        defaultUser,
+		TmpfsSizeMB: defaultTmpfsSizeMB,
+	}
+	if len(options) > 0 {
+		if strings.TrimSpace(options[0].Binary) != "" {
+			resolved.Binary = options[0].Binary
+		}
+		if strings.TrimSpace(options[0].HostOS) != "" {
+			resolved.HostOS = options[0].HostOS
+		}
+		if strings.TrimSpace(options[0].User) != "" {
+			resolved.User = options[0].User
+		}
+		if options[0].TmpfsSizeMB > 0 {
+			resolved.TmpfsSizeMB = options[0].TmpfsSizeMB
+		}
+		resolved.SeccompProfile = strings.TrimSpace(options[0].SeccompProfile)
+		resolved.AppArmorProfile = strings.TrimSpace(options[0].AppArmorProfile)
+		resolved.SELinuxLabel = strings.TrimSpace(options[0].SELinuxLabel)
+		resolved.AllowDangerousOverrides = options[0].AllowDangerousOverrides
+	}
+	return &Runtime{
+		binary:                  resolved.Binary,
+		hostOS:                  resolved.HostOS,
+		user:                    resolved.User,
+		tmpfsSizeMB:             resolved.TmpfsSizeMB,
+		seccompProfile:          resolved.SeccompProfile,
+		appArmorProfile:         resolved.AppArmorProfile,
+		selinuxLabel:            resolved.SELinuxLabel,
+		allowDangerousOverrides: resolved.AllowDangerousOverrides,
+	}
 }
 
 func NewWithBinary(binary string) *Runtime {
-	if binary == "" {
-		binary = "docker"
-	}
-	return &Runtime{binary: binary}
+	return New(Options{Binary: binary})
 }
 
 func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.RuntimeState, error) {
@@ -61,6 +118,13 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 	if err != nil {
 		return model.RuntimeState{}, err
 	}
+	security, warnings, err := r.resolveSecurityOptions(spec)
+	if err != nil {
+		return model.RuntimeState{}, err
+	}
+	for _, warning := range warnings {
+		slog.Warn("docker runtime hardening warning", "runtime", "docker", "sandbox_id", spec.SandboxID, "detail", warning)
+	}
 	args := []string{
 		"create",
 		"--name", containerName(spec.SandboxID),
@@ -71,7 +135,18 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 		"--cpus", spec.CPULimit.String(),
 		"--memory", fmt.Sprintf("%dm", spec.MemoryLimitMB),
 		"--pids-limit", strconv.Itoa(spec.PIDsLimit),
+		"--user", security.User,
+		"--cap-drop", "ALL",
+		"--read-only",
+		"--tmpfs", security.TmpfsMount,
+		"--security-opt", "no-new-privileges:true",
 		"-v", fmt.Sprintf("%s:/workspace", workspaceMount),
+	}
+	for _, opt := range security.SecurityOpts {
+		args = append(args, "--security-opt", opt)
+	}
+	for _, capAdd := range security.CapAdd {
+		args = append(args, "--cap-add", capAdd)
 	}
 	if spec.CacheRoot != "" {
 		cacheMount, err := absoluteHostPath(spec.CacheRoot)
@@ -102,13 +177,84 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 
 func absoluteHostPath(path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
-		return "", nil
+		return "", errors.New("host path is empty")
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
 	return filepath.Clean(abs), nil
+}
+
+type dockerSecurityOptions struct {
+	User         string
+	TmpfsMount   string
+	SecurityOpts []string
+	CapAdd       []string
+}
+
+func (r *Runtime) resolveSecurityOptions(spec model.SandboxSpec) (dockerSecurityOptions, []string, error) {
+	options := dockerSecurityOptions{
+		User:       r.user,
+		TmpfsMount: fmt.Sprintf("/tmp:rw,nosuid,nodev,noexec,size=%dm", r.tmpfsSizeMB),
+	}
+	var warnings []string
+	if r.hostOS == "linux" {
+		if r.seccompProfile != "" {
+			options.SecurityOpts = append(options.SecurityOpts, "seccomp="+r.seccompProfile)
+		}
+		if r.appArmorProfile != "" {
+			options.SecurityOpts = append(options.SecurityOpts, "apparmor="+r.appArmorProfile)
+		}
+		if r.selinuxLabel != "" {
+			options.SecurityOpts = append(options.SecurityOpts, "label="+r.selinuxLabel)
+		}
+	} else {
+		if r.seccompProfile != "" {
+			warnings = append(warnings, fmt.Sprintf("seccomp profile %q requested but host OS %q cannot enforce Linux seccomp here", r.seccompProfile, r.hostOS))
+		}
+		if r.appArmorProfile != "" {
+			warnings = append(warnings, fmt.Sprintf("AppArmor profile %q requested but host OS %q cannot enforce Linux AppArmor here", r.appArmorProfile, r.hostOS))
+		}
+		if r.selinuxLabel != "" {
+			warnings = append(warnings, fmt.Sprintf("SELinux label %q requested but host OS %q cannot enforce Linux SELinux here", r.selinuxLabel, r.hostOS))
+		}
+	}
+	for _, capability := range spec.Capabilities {
+		switch {
+		case capability == dockerCapabilityElevatedUser:
+			if !r.allowDangerousOverrides {
+				return dockerSecurityOptions{}, warnings, fmt.Errorf("docker capability %q requires dangerous override support", capability)
+			}
+			options.User = "0:0"
+		case strings.HasPrefix(capability, dockerCapabilityExtraCapPrefix):
+			if !r.allowDangerousOverrides {
+				return dockerSecurityOptions{}, warnings, fmt.Errorf("docker capability %q requires dangerous override support", capability)
+			}
+			name := normalizeDockerLinuxCapability(strings.TrimPrefix(capability, dockerCapabilityExtraCapPrefix))
+			if name == "" {
+				return dockerSecurityOptions{}, warnings, fmt.Errorf("docker capability %q is invalid", capability)
+			}
+			options.CapAdd = append(options.CapAdd, name)
+		default:
+			return dockerSecurityOptions{}, warnings, fmt.Errorf("docker capability %q is unsupported", capability)
+		}
+	}
+	return options, warnings, nil
+}
+
+func normalizeDockerLinuxCapability(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.ToUpper(strings.ReplaceAll(value, "-", "_"))
+	for _, r := range value {
+		if (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' {
+			return ""
+		}
+	}
+	return value
 }
 
 func (r *Runtime) Start(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {

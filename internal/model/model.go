@@ -123,6 +123,7 @@ type CreateSandboxRequest struct {
 	BaseImageRef  string       `json:"base_image_ref"`
 	Profile       GuestProfile `json:"profile,omitempty"`
 	Features      []string     `json:"features,omitempty"`
+	Capabilities  []string     `json:"capabilities,omitempty"`
 	CPULimit      CPUQuantity  `json:"cpu_limit"`
 	MemoryLimitMB int          `json:"memory_limit_mb"`
 	PIDsLimit     int          `json:"pids_limit"`

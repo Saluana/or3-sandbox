@@ -99,7 +99,7 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		BaseImageRef:             req.BaseImageRef,
 		Profile:                  req.Profile,
 		Features:                 model.NormalizeFeatures(req.Features),
-		Capabilities:             append([]string(nil), contract.Capabilities...),
+		Capabilities:             s.resolvedCapabilities(req, contract),
 		ControlMode:              contract.Control.Mode,
 		ControlProtocolVersion:   contract.Control.ProtocolVersion,
 		WorkspaceContractVersion: contract.WorkspaceContractVersion,
@@ -1187,6 +1187,7 @@ func (s *Service) applyCreateDefaults(req model.CreateSandboxRequest) model.Crea
 		req.Profile = model.GuestProfileCore
 	}
 	req.Features = model.NormalizeFeatures(req.Features)
+	req.Capabilities = model.NormalizeCapabilities(req.Capabilities)
 	if req.CPULimit == 0 {
 		req.CPULimit = s.cfg.DefaultCPULimit
 	}
@@ -1226,11 +1227,15 @@ func validateCreate(req model.CreateSandboxRequest) error {
 }
 
 func (s *Service) validateRuntimeCreate(req model.CreateSandboxRequest) (model.CreateSandboxRequest, guestimage.Contract, error) {
+	req.Capabilities = model.NormalizeCapabilities(req.Capabilities)
 	if s.cfg.RuntimeBackend == "qemu" && req.CPULimit.MilliValue()%1000 != 0 {
 		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("qemu runtime requires whole CPU cores until fractional throttling is implemented")
 	}
 	if s.cfg.RuntimeBackend != "qemu" {
 		return req, guestimage.Contract{}, nil
+	}
+	if len(req.Capabilities) > 0 {
+		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("qemu runtime does not accept requested capability overrides")
 	}
 	resolved, err := s.resolveQEMUBaseImageRef(req.BaseImageRef)
 	if err != nil {
@@ -1269,6 +1274,13 @@ func (s *Service) validateRuntimeCreate(req model.CreateSandboxRequest) (model.C
 	req.Profile = profile
 	req.Features = model.NormalizeFeatures(req.Features)
 	return req, contract, nil
+}
+
+func (s *Service) resolvedCapabilities(req model.CreateSandboxRequest, contract guestimage.Contract) []string {
+	if s.cfg.RuntimeBackend == "qemu" {
+		return append([]string(nil), contract.Capabilities...)
+	}
+	return append([]string(nil), model.NormalizeCapabilities(req.Capabilities)...)
 }
 
 func (s *Service) resolveQEMUBaseImageRef(value string) (string, error) {

@@ -137,3 +137,10 @@ func snapshotAuditDetail(snapshot model.Snapshot) string {
 		auditKV("exported", snapshot.ExportLocation != ""),
 	)
 }
+
+func dockerOverrideAuditDetail(features, capabilities []string) string {
+	return auditDetail(
+		auditKV("docker_features", strings.Join(features, ",")),
+		auditKV("docker_capabilities", strings.Join(capabilities, ",")),
+	)
+}

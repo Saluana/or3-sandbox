@@ -18,8 +18,32 @@ func TestValidateRuntimeConfigDockerRequiresTrustedFlag(t *testing.T) {
 	}
 
 	cfg.TrustedDockerRuntime = true
+	cfg.DockerUser = "10001:10001"
+	cfg.DockerTmpfsSizeMB = 64
 	if err := validateRuntimeConfig(cfg, runtimeValidationProbe{}); err != nil {
 		t.Fatalf("expected docker config to validate, got %v", err)
+	}
+}
+
+func TestValidateRuntimeConfigDockerSecurityProfile(t *testing.T) {
+	profile := filepath.Join(t.TempDir(), "seccomp.json")
+	if err := os.WriteFile(profile, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		RuntimeBackend:       "docker",
+		TrustedDockerRuntime: true,
+		DockerUser:           "10001:10001",
+		DockerTmpfsSizeMB:    64,
+		DockerSeccompProfile: profile,
+	}
+	if err := validateRuntimeConfig(cfg, runtimeValidationProbe{fileReadable: requireReadableFile}); err != nil {
+		t.Fatalf("expected docker seccomp config to validate, got %v", err)
+	}
+	cfg.DockerTmpfsSizeMB = -1
+	err := validateRuntimeConfig(cfg, runtimeValidationProbe{fileReadable: requireReadableFile})
+	if err == nil || !strings.Contains(err.Error(), "SANDBOX_DOCKER_TMPFS_MB") {
+		t.Fatalf("expected tmpfs validation error, got %v", err)
 	}
 }
 

@@ -24,55 +24,61 @@ type TenantConfig struct {
 }
 
 type Config struct {
-	DeploymentMode             string
-	ListenAddress              string
-	DatabasePath               string
-	StorageRoot                string
-	SnapshotRoot               string
-	BaseImageRef               string
-	RuntimeBackend             string
-	AuthMode                   string
-	AuthJWTIssuer              string
-	AuthJWTAudience            string
-	AuthJWTSecretPaths         []string
-	TLSCertPath                string
-	TLSKeyPath                 string
-	TrustedProxyHeaders        bool
-	TrustedDockerRuntime       bool
-	PolicyAllowedImages        []string
-	PolicyAllowPublicTunnels   bool
-	PolicyMaxSandboxLifetime   time.Duration
-	PolicyMaxIdleTimeout       time.Duration
-	DefaultCPULimit            model.CPUQuantity
-	DefaultMemoryLimitMB       int
-	DefaultPIDsLimit           int
-	DefaultDiskLimitMB         int
-	DefaultNetworkMode         model.NetworkMode
-	DefaultAllowTunnels        bool
-	RequestRatePerMinute       int
-	RequestBurst               int
-	DefaultQuota               model.TenantQuota
-	GracefulShutdown           time.Duration
-	ReconcileInterval          time.Duration
-	CleanupInterval            time.Duration
-	OperatorHost               string
-	TunnelSigningKey           string
-	TunnelSigningKeyPath       string
-	Tenants                    []TenantConfig
-	OptionalSnapshotExport     string
-	QEMUBinary                 string
-	QEMUAccel                  string
-	QEMUBaseImagePath          string
-	QEMUAllowedBaseImagePaths  []string
-	QEMUControlMode            model.GuestControlMode
-	QEMUAllowedProfiles        []model.GuestProfile
-	QEMUDangerousProfiles      []model.GuestProfile
-	QEMUAllowDangerousProfiles bool
-	QEMUAllowSSHCompat         bool
-	QEMUSSHUser                string
-	QEMUSSHPrivateKeyPath      string
-	QEMUSSHHostKeyPath         string
-	QEMUBootTimeout            time.Duration
+	DeploymentMode                string
+	ListenAddress                 string
+	DatabasePath                  string
+	StorageRoot                   string
+	SnapshotRoot                  string
+	BaseImageRef                  string
+	RuntimeBackend                string
+	AuthMode                      string
+	AuthJWTIssuer                 string
+	AuthJWTAudience               string
+	AuthJWTSecretPaths            []string
+	TLSCertPath                   string
+	TLSKeyPath                    string
+	TrustedProxyHeaders           bool
+	TrustedDockerRuntime          bool
+	PolicyAllowedImages           []string
+	PolicyAllowPublicTunnels      bool
+	PolicyMaxSandboxLifetime      time.Duration
+	PolicyMaxIdleTimeout          time.Duration
+	DockerUser                    string
+	DockerTmpfsSizeMB             int
+	DockerSeccompProfile          string
+	DockerAppArmorProfile         string
+	DockerSELinuxLabel            string
+	DockerAllowDangerousOverrides bool
+	DefaultCPULimit               model.CPUQuantity
+	DefaultMemoryLimitMB          int
+	DefaultPIDsLimit              int
+	DefaultDiskLimitMB            int
+	DefaultNetworkMode            model.NetworkMode
+	DefaultAllowTunnels           bool
+	RequestRatePerMinute          int
+	RequestBurst                  int
+	DefaultQuota                  model.TenantQuota
+	GracefulShutdown              time.Duration
+	ReconcileInterval             time.Duration
+	CleanupInterval               time.Duration
+	OperatorHost                  string
+	TunnelSigningKey              string
+	TunnelSigningKeyPath          string
+	Tenants                       []TenantConfig
+	OptionalSnapshotExport        string
+	QEMUBinary                    string
+	QEMUAccel                     string
+	QEMUBaseImagePath             string
+	QEMUAllowedBaseImagePaths     []string
+	QEMUControlMode               model.GuestControlMode
+	QEMUAllowedProfiles           []model.GuestProfile
+	QEMUDangerousProfiles         []model.GuestProfile
+	QEMUAllowDangerousProfiles    bool
+	QEMUAllowSSHCompat            bool
+	QEMUSSHUser                   string
+	QEMUSSHPrivateKeyPath         string
+	QEMUSSHHostKeyPath            string
+	QEMUBootTimeout               time.Duration
 }
 
 func Load(args []string) (Config, error) {
@@ -98,6 +104,13 @@ func Load(args []string) (Config, error) {
 	fs.BoolVar(&policyAllowPublicTunnels, "policy-allow-public-tunnels", policyAllowPublicTunnels, "allow public tunnels")
 	fs.DurationVar(&cfg.PolicyMaxSandboxLifetime, "policy-max-sandbox-lifetime", envDuration("SANDBOX_POLICY_MAX_SANDBOX_LIFETIME", 0), "maximum sandbox lifetime before policy denial; 0 disables")
 	fs.DurationVar(&cfg.PolicyMaxIdleTimeout, "policy-max-idle-timeout", envDuration("SANDBOX_POLICY_MAX_IDLE_TIMEOUT", 0), "maximum sandbox idle time before policy denial; 0 disables")
+	fs.StringVar(&cfg.DockerUser, "docker-user", env("SANDBOX_DOCKER_USER", "10001:10001"), "docker user or uid:gid for trusted-docker sandboxes")
+	fs.IntVar(&cfg.DockerTmpfsSizeMB, "docker-tmpfs-mb", envInt("SANDBOX_DOCKER_TMPFS_MB", 64), "docker tmpfs size for /tmp in megabytes")
+	fs.StringVar(&cfg.DockerSeccompProfile, "docker-seccomp-profile", env("SANDBOX_DOCKER_SECCOMP_PROFILE", ""), "optional docker seccomp profile path")
+	fs.StringVar(&cfg.DockerAppArmorProfile, "docker-apparmor-profile", env("SANDBOX_DOCKER_APPARMOR_PROFILE", ""), "optional docker AppArmor profile name")
+	fs.StringVar(&cfg.DockerSELinuxLabel, "docker-selinux-label", env("SANDBOX_DOCKER_SELINUX_LABEL", ""), "optional docker SELinux label security option")
+	dockerAllowDangerousOverrides := strings.EqualFold(env("SANDBOX_DOCKER_ALLOW_DANGEROUS_OVERRIDES", "false"), "true")
+	fs.BoolVar(&dockerAllowDangerousOverrides, "docker-allow-dangerous-overrides", dockerAllowDangerousOverrides, "allow explicit dangerous docker capability overrides in trusted environments")
 	fs.StringVar(&cfg.QEMUBinary, "qemu-binary", env("SANDBOX_QEMU_BINARY", defaultQEMUBinary()), "qemu system binary")
 	fs.StringVar(&cfg.QEMUAccel, "qemu-accel", env("SANDBOX_QEMU_ACCEL", "auto"), "qemu accelerator selection")
 	fs.StringVar(&cfg.QEMUBaseImagePath, "qemu-base-image-path", env("SANDBOX_QEMU_BASE_IMAGE_PATH", ""), "qemu base guest image path")
@@ -154,6 +167,7 @@ func Load(args []string) (Config, error) {
 	cfg.AuthJWTSecretPaths = parseCommaSeparated(authJWTSecretPaths)
 	cfg.PolicyAllowedImages = parseCommaSeparated(policyAllowedImages)
 	cfg.PolicyAllowPublicTunnels = policyAllowPublicTunnels
+	cfg.DockerAllowDangerousOverrides = dockerAllowDangerousOverrides
 	cfg.OptionalSnapshotExport = env("SANDBOX_S3_EXPORT_URI", "")
 	cfg.QEMUAllowedBaseImagePaths = parseCommaSeparated(qemuAllowedBaseImagePaths)
 	cfg.QEMUControlMode = model.GuestControlMode(strings.ToLower(strings.TrimSpace(qemuControlMode)))
@@ -336,6 +350,20 @@ func validateRuntimeConfig(c Config, probe runtimeValidationProbe) error {
 	case "docker":
 		if !c.TrustedDockerRuntime {
 			return errors.New("docker runtime requires SANDBOX_TRUSTED_DOCKER_RUNTIME=true because it is shared-kernel and not a production multi-tenant boundary")
+		}
+		if strings.TrimSpace(c.DockerUser) == "" {
+			c.DockerUser = defaultDockerUser()
+		}
+		if c.DockerTmpfsSizeMB == 0 {
+			c.DockerTmpfsSizeMB = defaultDockerTmpfsSizeMB()
+		}
+		if c.DockerTmpfsSizeMB < 0 {
+			return errors.New("docker runtime requires SANDBOX_DOCKER_TMPFS_MB to be positive")
+		}
+		if strings.TrimSpace(c.DockerSeccompProfile) != "" {
+			if err := probe.fileReadable(c.DockerSeccompProfile); err != nil {
+				return fmt.Errorf("docker seccomp profile is not readable: %w", err)
+			}
 		}
 		return nil
 	case "qemu":
@@ -621,4 +649,12 @@ func parseCommaSeparated(raw string) []string {
 		values = append(values, entry)
 	}
 	return values
+}
+
+func defaultDockerUser() string {
+	return "10001:10001"
+}
+
+func defaultDockerTmpfsSizeMB() int {
+	return 64
 }

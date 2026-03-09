@@ -16,6 +16,11 @@ func (s *Service) enforceCreatePolicy(ctx context.Context, tenantID string, req 
 		s.recordAudit(ctx, tenantID, "", "policy.create", req.BaseImageRef, "denied", message)
 		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
 	}
+	if s.cfg.RuntimeBackend == "docker" {
+		if err := s.enforceDockerCreatePolicy(ctx, tenantID, "", req.Features, req.Capabilities, "policy.create"); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -41,6 +46,11 @@ func (s *Service) enforceLifecyclePolicy(ctx context.Context, sandbox model.Sand
 		message := fmt.Sprintf("sandbox image %q is no longer allowed by policy", sandbox.BaseImageRef)
 		s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.BaseImageRef, "denied", message)
 		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	if sandbox.RuntimeBackend == "docker" {
+		if err := s.enforceDockerCreatePolicy(ctx, sandbox.TenantID, sandbox.ID, sandbox.Features, sandbox.Capabilities, "policy."+action); err != nil {
+			return err
+		}
 	}
 	if sandbox.RuntimeBackend == "qemu" {
 		if sandbox.Profile != "" && !s.cfg.IsAllowedQEMUProfile(sandbox.Profile) {
@@ -108,4 +118,48 @@ func (s *Service) runtimeImageAllowed(runtimeBackend, imageRef string) bool {
 		return false
 	}
 	return s.imageAllowed(imageRef)
+}
+
+var deniedDockerFeatures = map[string]string{
+	"docker.host-ipc":            "host IPC sharing is blocked by policy",
+	"docker.host-network":        "host network sharing is blocked by policy",
+	"docker.host-pid":            "host PID namespace sharing is blocked by policy",
+	"docker.mount-docker-socket": "mounting the Docker socket is blocked by policy",
+	"docker.privileged":          "privileged Docker mode is blocked by policy",
+}
+
+func (s *Service) enforceDockerCreatePolicy(ctx context.Context, tenantID, sandboxID string, features, capabilities []string, action string) error {
+	features = model.NormalizeFeatures(features)
+	capabilities = model.NormalizeCapabilities(capabilities)
+	for _, feature := range features {
+		if message, ok := deniedDockerFeatures[feature]; ok {
+			s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, dockerOverrideAuditDetail(features, capabilities)))
+			return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+		}
+	}
+	dangerous := false
+	for _, capability := range capabilities {
+		switch {
+		case capability == "docker.elevated-user":
+			dangerous = true
+		case strings.HasPrefix(capability, "docker.extra-cap:"):
+			dangerous = true
+		default:
+			message := fmt.Sprintf("docker capability %q is not supported", capability)
+			s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, dockerOverrideAuditDetail(features, capabilities)))
+			return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+		}
+	}
+	if dangerous && !s.cfg.DockerAllowDangerousOverrides {
+		message := "dangerous Docker capability overrides are blocked until SANDBOX_DOCKER_ALLOW_DANGEROUS_OVERRIDES=true"
+		s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, dockerOverrideAuditDetail(features, capabilities)))
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	if dangerous && action == "policy.create" {
+		s.recordAudit(ctx, tenantID, sandboxID, "policy.create.override", sandboxID, "ok", auditDetail(
+			"dangerous Docker override explicitly allowed",
+			dockerOverrideAuditDetail(features, capabilities),
+		))
+	}
+	return nil
 }

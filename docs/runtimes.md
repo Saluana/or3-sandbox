@@ -62,6 +62,23 @@ It currently supports:
 - snapshots
 - restart reconciliation
 
+Its default trusted posture now aims for least privilege:
+
+- explicit non-root execution via `SANDBOX_DOCKER_USER` (default `10001:10001`)
+- `--cap-drop=ALL`
+- `--security-opt no-new-privileges:true`
+- read-only root filesystem
+- writable `/workspace` and optional `/cache` only
+- bounded tmpfs-backed `/tmp`
+
+Where the host can enforce them, the Docker runtime can also apply:
+
+- `SANDBOX_DOCKER_SECCOMP_PROFILE`
+- `SANDBOX_DOCKER_APPARMOR_PROFILE`
+- `SANDBOX_DOCKER_SELINUX_LABEL`
+
+On macOS and other non-Linux developer hosts, those Linux kernel controls are best-effort only. The runtime warns instead of pretending they were enforced.
+
 ### How it works
 
 For each sandbox, the Docker runtime:
@@ -69,6 +86,7 @@ For each sandbox, the Docker runtime:
 - creates a container
 - mounts a persistent `/workspace`
 - optionally mounts `/cache`
+- keeps the root filesystem read-only and uses tmpfs for `/tmp`
 - creates a dedicated network for internet-enabled sandboxes
 - uses `none` networking for internet-disabled sandboxes
 
@@ -87,6 +105,20 @@ That setting is the project's way of saying:
 > "Yes, I understand this is trusted mode."
 
 Docker resolves to the `trusted-docker` runtime class. `SANDBOX_MODE=production` will reject it at startup because `trusted-docker` is not VM-backed.
+
+Dangerous Docker behaviors are denied by default:
+
+- privileged mode equivalents
+- host namespace sharing
+- Docker socket mounts
+- elevated-user and `cap-add` overrides unless `SANDBOX_DOCKER_ALLOW_DANGEROUS_OVERRIDES=true`
+
+If you do allow an explicit override, model it through the small capability set carried on sandbox metadata:
+
+- `docker.elevated-user`
+- `docker.extra-cap:NET_BIND_SERVICE`
+
+Those overrides are intended for trusted operator workflows only and are audit-visible.
 
 ## QEMU runtime
 

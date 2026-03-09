@@ -662,6 +662,94 @@ func TestCreateSandboxPolicyAllowsAndDeniesImages(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxRejectsDangerousDockerFeaturesByDefault(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "base-image",
+		Features:      []string{"docker.host-network"},
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if !errors.Is(err, auth.ErrForbidden) {
+		t.Fatalf("expected docker feature denial, got %v", err)
+	}
+	events, err := store.ListAuditEvents(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	if len(events) == 0 || events[len(events)-1].Action != "policy.create" || events[len(events)-1].Outcome != "denied" {
+		t.Fatalf("expected docker policy denial audit event, got %+v", events)
+	}
+}
+
+func TestCreateSandboxRejectsDangerousDockerCapabilityOverrideByDefault(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "base-image",
+		Capabilities:  []string{"docker.elevated-user"},
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if !errors.Is(err, auth.ErrForbidden) {
+		t.Fatalf("expected docker capability denial, got %v", err)
+	}
+}
+
+func TestCreateSandboxAuditsAllowedDockerCapabilityOverride(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+	svc.cfg.DockerAllowDangerousOverrides = true
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "base-image",
+		Capabilities:  []string{"docker.elevated-user", "docker.extra-cap:net_bind_service"},
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("create sandbox with allowed docker override: %v", err)
+	}
+	if got := runtime.createdSpec.Capabilities; len(got) != 2 || got[0] != "docker.elevated-user" {
+		t.Fatalf("expected normalized docker capabilities in runtime spec, got %#v", got)
+	}
+	if len(sandbox.Capabilities) != 2 {
+		t.Fatalf("expected persisted docker capabilities, got %#v", sandbox.Capabilities)
+	}
+	events, err := store.ListAuditEvents(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Action == "policy.create.override" && event.Outcome == "ok" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected policy.create.override audit event, got %+v", events)
+	}
+}
+
 func TestQEMULifecyclePolicyAllowsLegacyDefaultImageAlias(t *testing.T) {
 	ctx := context.Background()
 	runtime := newStubRuntime()

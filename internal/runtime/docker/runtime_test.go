@@ -4,12 +4,26 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"or3-sandbox/internal/model"
 )
+
+func newFakeDocker(t *testing.T) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	argsLog := filepath.Join(root, "docker-args.txt")
+	fakeDocker := filepath.Join(root, "docker")
+	script := "#!/bin/sh\nprintf '%s\n' \"$@\" > \"$DOCKER_ARGS_LOG\"\nprintf 'container-id\\n'\n"
+	if err := os.WriteFile(fakeDocker, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_ARGS_LOG", argsLog)
+	return fakeDocker, argsLog
+}
 
 func TestArchiveRoundTrip(t *testing.T) {
 	src := t.TempDir()
@@ -42,14 +56,7 @@ func TestArchiveRoundTrip(t *testing.T) {
 }
 
 func TestCreateUsesAbsoluteHostPathsForBindMounts(t *testing.T) {
-	root := t.TempDir()
-	argsLog := filepath.Join(root, "docker-args.txt")
-	fakeDocker := filepath.Join(root, "docker")
-	script := "#!/bin/sh\nprintf '%s\n' \"$@\" > \"$DOCKER_ARGS_LOG\"\nprintf 'container-id\\n'\n"
-	if err := os.WriteFile(fakeDocker, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("DOCKER_ARGS_LOG", argsLog)
+	fakeDocker, argsLog := newFakeDocker(t)
 	runtime := NewWithBinary(fakeDocker)
 	wd, err := os.Getwd()
 	if err != nil {
@@ -95,6 +102,73 @@ func TestCreateUsesAbsoluteHostPathsForBindMounts(t *testing.T) {
 	}
 	if !strings.Contains(text, cacheMount) {
 		t.Fatalf("expected absolute cache mount %q in args %q", cacheMount, text)
+	}
+	for _, expected := range []string{"--user", defaultUser, "--cap-drop", "ALL", "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m", "--security-opt", "no-new-privileges:true"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected hardened docker arg %q in args %q", expected, text)
+		}
+	}
+}
+
+func TestResolveSecurityOptionsAddsLinuxProfilesAndOverrides(t *testing.T) {
+	runtime := New(Options{
+		HostOS:                  "linux",
+		User:                    defaultUser,
+		TmpfsSizeMB:             32,
+		SeccompProfile:          "/profiles/seccomp.json",
+		AppArmorProfile:         "or3-sandbox",
+		SELinuxLabel:            "type:or3_t",
+		AllowDangerousOverrides: true,
+	})
+	options, warnings, err := runtime.resolveSecurityOptions(model.SandboxSpec{
+		Capabilities: []string{"docker.elevated-user", "docker.extra-cap:net_bind_service"},
+	})
+	if err != nil {
+		t.Fatalf("resolve security options: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings on linux, got %#v", warnings)
+	}
+	if options.User != "0:0" {
+		t.Fatalf("expected elevated user override, got %q", options.User)
+	}
+	if options.TmpfsMount != "/tmp:rw,nosuid,nodev,noexec,size=32m" {
+		t.Fatalf("unexpected tmpfs mount %q", options.TmpfsMount)
+	}
+	for _, expected := range []string{"seccomp=/profiles/seccomp.json", "apparmor=or3-sandbox", "label=type:or3_t"} {
+		if !slices.Contains(options.SecurityOpts, expected) {
+			t.Fatalf("expected security option %q in %#v", expected, options.SecurityOpts)
+		}
+	}
+	if !slices.Contains(options.CapAdd, "NET_BIND_SERVICE") {
+		t.Fatalf("expected NET_BIND_SERVICE cap add, got %#v", options.CapAdd)
+	}
+}
+
+func TestResolveSecurityOptionsWarnsWhenLinuxProfilesUnsupported(t *testing.T) {
+	runtime := New(Options{
+		HostOS:          "darwin",
+		SeccompProfile:  "/profiles/seccomp.json",
+		AppArmorProfile: "or3-sandbox",
+		SELinuxLabel:    "type:or3_t",
+	})
+	options, warnings, err := runtime.resolveSecurityOptions(model.SandboxSpec{})
+	if err != nil {
+		t.Fatalf("resolve security options: %v", err)
+	}
+	if len(options.SecurityOpts) != 0 {
+		t.Fatalf("expected no linux security opts on darwin, got %#v", options.SecurityOpts)
+	}
+	if len(warnings) != 3 {
+		t.Fatalf("expected 3 warnings, got %#v", warnings)
+	}
+}
+
+func TestResolveSecurityOptionsRejectsDangerousOverridesWithoutSupport(t *testing.T) {
+	runtime := New(Options{HostOS: "linux"})
+	_, _, err := runtime.resolveSecurityOptions(model.SandboxSpec{Capabilities: []string{"docker.extra-cap:net_bind_service"}})
+	if err == nil || !strings.Contains(err.Error(), "dangerous override support") {
+		t.Fatalf("expected dangerous override rejection, got %v", err)
 	}
 }
 
@@ -169,7 +243,7 @@ func TestDockerRuntimeLifecycle(t *testing.T) {
 	}
 
 	handle, err := runtime.Exec(ctx, sandbox, model.ExecRequest{
-		Command: []string{"sh", "-lc", "echo ok > /workspace/health && cat /workspace/health"},
+		Command: []string{"sh", "-lc", "uid=$(id -u); gid=$(id -g); printf '%s:%s\n' \"$uid\" \"$gid\" > /workspace/identity && echo ok > /workspace/health && if touch /etc/or3-readonly 2>/dev/null; then exit 90; fi; cat /workspace/health"},
 		Cwd:     "/workspace",
 		Timeout: 10 * time.Second,
 	}, model.ExecStreams{})
@@ -179,6 +253,13 @@ func TestDockerRuntimeLifecycle(t *testing.T) {
 	result := handle.Wait()
 	if result.Status != model.ExecutionStatusSucceeded {
 		t.Fatalf("unexpected exec status: %+v", result)
+	}
+	identity, err := os.ReadFile(filepath.Join(workspace, "identity"))
+	if err != nil {
+		t.Fatalf("read identity file: %v", err)
+	}
+	if strings.HasPrefix(strings.TrimSpace(string(identity)), "0:") {
+		t.Fatalf("expected non-root execution identity, got %q", string(identity))
 	}
 
 	snapshot, err := runtime.CreateSnapshot(ctx, sandbox, "snap-"+spec.SandboxID)
