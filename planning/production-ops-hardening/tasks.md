@@ -10,38 +10,38 @@
 
 - [ ] Add deterministic admission checks in `internal/service/service.go` for create/start operations based on current usage and pressure.
 - [ ] Extend existing capacity or usage calculations to include node-pressure signals that matter for this repo.
-- [ ] Add clear, auditable denial reasons rather than generic capacity failures.
-- [ ] Keep the first implementation synchronous and local; do not add a distributed queue.
+- [x] Add clear, auditable denial reasons rather than generic capacity failures.
+- [x] Keep the first implementation synchronous and local; do not add a distributed queue.
 
 ## 3. Tighten per-tenant fairness (Req 2, 3, 8)
 
 - [ ] Add small per-tenant concurrent-start or heavy-operation limits in config and service policy if current quotas are insufficient.
-- [ ] Record admission denials and retryable pressure events in `internal/service/audit.go`.
+- [x] Record admission denials and retryable pressure events in `internal/service/audit.go`.
 - [ ] Add service tests proving a bursty tenant cannot monopolize starts when limits are configured.
 
 ## 4. Harden restart recovery and orphan cleanup (Req 4, 8)
 
-- [ ] Review and extend reconcile behavior in `internal/service/service.go` for partial create, partial delete, and runtime-crash cases.
-- [ ] Add conservative orphan cleanup rules for runtime artifacts and storage roots where ownership is clear.
+- [x] Review and extend reconcile behavior in `internal/service/service.go` for partial create, partial delete, and runtime-crash cases.
+- [x] Add conservative orphan cleanup rules for runtime artifacts and storage roots where ownership is clear.
 - [ ] Extend `scripts/qemu-recovery-drill.sh` to cover daemon restart, orphan cleanup, tunnel recovery, and partial snapshot failures.
-- [ ] Add regression tests for reconcile behavior after interrupted lifecycle operations.
+- [x] Add regression tests for reconcile behavior after interrupted lifecycle operations.
 
 ## 5. Expand abuse testing and release gates (Req 5, 8)
 
 - [ ] Extend `scripts/qemu-resource-abuse.sh` with startup-spam and fairness scenarios in addition to OOM, PID, disk, and stdout pressure.
 - [ ] Update release guidance so runtime-affecting changes run the bounded abuse and recovery scripts before production signoff.
-- [ ] Keep all scripts self-cleaning and explicit about host prerequisites.
+- [x] Keep all scripts self-cleaning and explicit about host prerequisites.
 
 ## 6. Promote security telemetry and audit coverage (Req 5, 6, 8)
 
 - [ ] Review `internal/service/observability.go` and add only the counters needed for lifecycle failures, storage pressure, OOM, PID exhaustion, snapshot operations, exec/TTY attach, and tunnel exposure changes.
 - [ ] Extend `internal/service/audit.go` so dangerous profile use, elevated capabilities, and admission denials are easy to query.
-- [ ] Update API integration tests for metrics, health, and audit-relevant denial behavior where appropriate.
+- [x] Update API integration tests for metrics, health, and audit-relevant denial behavior where appropriate.
 
 ## 7. Tighten image supply-chain policy in the control plane (Req 6, 7, 8)
 
-- [ ] Strengthen allowed-image policy handling in `internal/config/config.go` and `internal/service/policy.go` so production flows prefer curated pinned images.
-- [ ] Surface image metadata validation failures before runtime create.
+- [x] Strengthen allowed-image policy handling in `internal/config/config.go` and `internal/service/policy.go` so production flows prefer curated pinned images.
+- [x] Surface image metadata validation failures before runtime create.
 - [ ] Update operator docs with rebuild cadence, digest pinning expectations, and approval workflow for curated images.
 
 ## 8. Update operator docs and drills (Req 1, 4, 5, 6, 7)

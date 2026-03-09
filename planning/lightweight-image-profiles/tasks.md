@@ -2,8 +2,8 @@
 
 ## 1. Standardize curated profile semantics across runtimes (Req 1, 2, 5, 7)
 
-- [ ] Confirm `core`, `runtime`, `browser`, `container`, and `debug` as the only curated profile names in code and docs.
-- [ ] Reuse `internal/model.GuestProfile` and avoid introducing a second image-profile vocabulary.
+- [x] Confirm `core`, `runtime`, `browser`, `container`, and `debug` as the only curated profile names in code and docs.
+- [x] Reuse `internal/model.GuestProfile` and avoid introducing a second image-profile vocabulary.
 - [ ] Update `internal/service/service.go` and related helpers so profile validation follows the same policy semantics for Docker and QEMU.
 
 ## 2. Shrink the default image path (Req 1, 4, 6)
@@ -17,14 +17,14 @@
 
 - [ ] Keep browser tooling only in `browser` images and examples.
 - [ ] Remove Docker-in-container from normal curated images and keep it only in the `container` profile.
-- [ ] Ensure `debug` remains a separate non-default troubleshooting profile.
+- [x] Ensure `debug` remains a separate non-default troubleshooting profile.
 - [ ] Update `examples/openclaw`, `examples/playwright`, and any other presets to request the smallest required profile explicitly.
 
 ## 4. Add lightweight image metadata validation (Req 2, 5, 6, 7)
 
 - [ ] Define lightweight Docker image metadata using OCI labels or a small curated mapping in Go.
 - [ ] Extend the Docker runtime or service validation path to load that metadata before sandbox creation.
-- [ ] Reuse existing guest-image contract validation for QEMU-backed profiles.
+- [x] Reuse existing guest-image contract validation for QEMU-backed profiles.
 - [ ] Reject sandbox-create requests when requested profile, image metadata, and dangerous-profile policy do not align.
 
 ## 5. Tighten policy and allowed-image handling (Req 5, 6, 7)
@@ -38,7 +38,7 @@
 - [ ] Add service tests for profile mismatch, missing metadata, and dangerous-profile denial.
 - [ ] Add Docker runtime tests for image metadata parsing or curated mapping.
 - [ ] Add preset tests ensuring browser and container examples do not fall back to the default lightweight image by mistake.
-- [ ] Add API integration tests for create-time validation errors.
+- [x] Add API integration tests for create-time validation errors.
 
 ## 7. Update documentation and examples (Req 2, 3, 4, 6)
 

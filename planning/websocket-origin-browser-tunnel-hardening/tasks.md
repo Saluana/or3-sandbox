@@ -8,9 +8,9 @@
 
 ## 2. Browser tunnel capability hardening (Req 2, 3)
 
-- [ ] Review tunnel bootstrap cookie issuance in `internal/api/router.go` and tighten low-risk attributes like `HttpOnly`, `SameSite`, `Secure`, path scoping, and expiry handling.
-- [ ] Keep the current signed URL + tunnel cookie capability model; do not add a general browser session system.
-- [ ] Add focused tests for cookie bootstrap, tunnel-scoped reuse, and access failure after revoke/expiry.
+- [x] Review tunnel bootstrap cookie issuance in `internal/api/router.go` and tighten low-risk attributes like `HttpOnly`, `SameSite`, `Secure`, path scoping, and expiry handling.
+- [x] Keep the current signed URL + tunnel cookie capability model; do not add a general browser session system.
+- [x] Add focused tests for cookie bootstrap, tunnel-scoped reuse, and access failure after revoke/expiry.
 
 ## 3. Clarify the security model (Req 3)
 
