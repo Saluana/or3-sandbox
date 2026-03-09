@@ -1,0 +1,1 @@
+bunx repomix --style markdown --ignore=.github,planning,.vscode,examples,docs,\*\*/\*_test.go
