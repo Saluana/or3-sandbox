@@ -16,8 +16,11 @@ func (s *Service) enforceCreatePolicy(ctx context.Context, tenantID string, req 
 		s.recordAudit(ctx, tenantID, "", "policy.create", req.BaseImageRef, "denied", message)
 		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
 	}
+	if err := s.enforceGuestProfilePolicy(ctx, tenantID, "", s.cfg.RuntimeBackend, req.Profile, "policy.create"); err != nil {
+		return err
+	}
 	if s.cfg.RuntimeBackend == "docker" {
-		if err := s.enforceDockerCreatePolicy(ctx, tenantID, "", req.Features, req.Capabilities, "policy.create"); err != nil {
+		if err := s.enforceDockerCreatePolicy(ctx, tenantID, "", req.Profile, req.Features, req.Capabilities, "policy.create"); err != nil {
 			return err
 		}
 	}
@@ -48,21 +51,29 @@ func (s *Service) enforceLifecyclePolicy(ctx context.Context, sandbox model.Sand
 		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
 	}
 	if sandbox.RuntimeBackend == "docker" {
-		if err := s.enforceDockerCreatePolicy(ctx, sandbox.TenantID, sandbox.ID, sandbox.Features, sandbox.Capabilities, "policy."+action); err != nil {
+		if err := s.enforceDockerCreatePolicy(ctx, sandbox.TenantID, sandbox.ID, sandbox.Profile, sandbox.Features, sandbox.Capabilities, "policy."+action); err != nil {
 			return err
 		}
 	}
-	if sandbox.RuntimeBackend == "qemu" {
-		if sandbox.Profile != "" && !s.cfg.IsAllowedQEMUProfile(sandbox.Profile) {
-			message := fmt.Sprintf("sandbox profile %q is no longer allowed by policy", sandbox.Profile)
-			s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.ID, "denied", message)
-			return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
-		}
-		if sandbox.Profile != "" && s.cfg.IsDangerousQEMUProfile(sandbox.Profile) && !s.cfg.QEMUAllowDangerousProfiles {
-			message := fmt.Sprintf("sandbox profile %q is blocked by dangerous-profile policy", sandbox.Profile)
-			s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.ID, "denied", message)
-			return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
-		}
+	if err := s.enforceGuestProfilePolicy(ctx, sandbox.TenantID, sandbox.ID, sandbox.RuntimeBackend, sandbox.Profile, "policy."+action); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) enforceGuestProfilePolicy(ctx context.Context, tenantID, sandboxID, runtimeBackend string, profile model.GuestProfile, action string) error {
+	if profile == "" {
+		return nil
+	}
+	if !s.cfg.IsAllowedGuestProfile(runtimeBackend, profile) {
+		message := fmt.Sprintf("sandbox profile %q is not allowed by policy", profile)
+		s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, auditKV("runtime", runtimeBackend)))
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	if s.cfg.IsDangerousGuestProfile(runtimeBackend, profile) && !s.cfg.AllowsDangerousGuestProfiles(runtimeBackend) {
+		message := fmt.Sprintf("sandbox profile %q is blocked by dangerous-profile policy until SANDBOX_ALLOW_DANGEROUS_PROFILES=true", profile)
+		s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, auditKV("runtime", runtimeBackend)))
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
 	}
 	return nil
 }
@@ -128,9 +139,14 @@ var deniedDockerFeatures = map[string]string{
 	"docker.privileged":          "privileged Docker mode is blocked by policy",
 }
 
-func (s *Service) enforceDockerCreatePolicy(ctx context.Context, tenantID, sandboxID string, features, capabilities []string, action string) error {
+func (s *Service) enforceDockerCreatePolicy(ctx context.Context, tenantID, sandboxID string, profile model.GuestProfile, features, capabilities []string, action string) error {
 	features = model.NormalizeFeatures(features)
 	capabilities = model.NormalizeCapabilities(capabilities)
+	if profile != "" && s.cfg.IsDangerousGuestProfile("docker", profile) && !s.cfg.AllowsDangerousGuestProfiles("docker") {
+		message := fmt.Sprintf("docker profile %q is blocked by dangerous-profile policy", profile)
+		s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, dockerOverrideAuditDetail(features, capabilities)))
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
 	for _, feature := range features {
 		if message, ok := deniedDockerFeatures[feature]; ok {
 			s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, dockerOverrideAuditDetail(features, capabilities)))

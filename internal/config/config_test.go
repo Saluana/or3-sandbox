@@ -228,6 +228,90 @@ func TestLoadParsesFractionalCPUDefaultsAndQuota(t *testing.T) {
 	if cfg.PolicyMaxIdleTimeout != 90*time.Minute {
 		t.Fatalf("unexpected idle timeout policy %v", cfg.PolicyMaxIdleTimeout)
 	}
+	if cfg.BaseImageRef != "alpine:3.20" {
+		t.Fatalf("expected lightweight default base image, got %q", cfg.BaseImageRef)
+	}
+}
+
+func TestValidateRuntimeConfigUsesGenericGuestProfileDefaults(t *testing.T) {
+	cfg := Config{
+		RuntimeBackend:        "qemu",
+		QEMUBinary:            "qemu-system-x86_64",
+		QEMUAccel:             "kvm",
+		QEMUBaseImagePath:     "/images/base.qcow2",
+		QEMUControlMode:       model.GuestControlModeAgent,
+		AllowedGuestProfiles:  []model.GuestProfile{model.GuestProfileCore, model.GuestProfileDebug},
+		QEMUBootTimeout:       time.Minute,
+		QEMUSSHUser:           "sandbox",
+		QEMUSSHPrivateKeyPath: "/keys/id_ed25519",
+		QEMUSSHHostKeyPath:    "/keys/guest_host_ed25519.pub",
+	}
+	probe := runtimeValidationProbe{
+		goos:          "linux",
+		commandExists: func(string) error { return nil },
+		fileReadable:  func(string) error { return nil },
+		kvmAvailable:  func() error { return nil },
+		hvfAvailable:  func() error { return nil },
+	}
+	if err := validateRuntimeConfig(cfg, probe); err != nil {
+		t.Fatalf("expected qemu config to accept generic guest profiles, got %v", err)
+	}
+	if !cfg.IsAllowedGuestProfile("qemu", model.GuestProfileDebug) {
+		t.Fatal("expected debug profile to be allowed via generic guest profile list")
+	}
+}
+
+func TestLoadKeepsQEMUProfileFlagsScopedToQEMU(t *testing.T) {
+	t.Setenv("SANDBOX_RUNTIME", "docker")
+	t.Setenv("SANDBOX_TRUSTED_DOCKER_RUNTIME", "true")
+	t.Setenv("SANDBOX_TOKENS", "token-a=tenant-a")
+
+	cfg, err := Load([]string{
+		"--qemu-allowed-profiles=core",
+		"--qemu-dangerous-profiles=debug",
+		"--qemu-allow-dangerous-profiles=true",
+	})
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.IsAllowedGuestProfile("qemu", model.GuestProfileCore) || cfg.IsAllowedGuestProfile("qemu", model.GuestProfileBrowser) {
+		t.Fatalf("expected qemu flag policy to allow only core, got %#v", cfg.QEMUAllowedProfiles)
+	}
+	if !cfg.IsAllowedGuestProfile("docker", model.GuestProfileBrowser) {
+		t.Fatal("expected docker policy to keep default profile allowances")
+	}
+	if cfg.IsDangerousGuestProfile("qemu", model.GuestProfileContainer) || !cfg.IsDangerousGuestProfile("qemu", model.GuestProfileDebug) {
+		t.Fatalf("expected qemu dangerous-profile flag to apply, got %#v", cfg.QEMUDangerousProfiles)
+	}
+	if cfg.AllowsDangerousGuestProfiles("docker") || !cfg.AllowsDangerousGuestProfiles("qemu") {
+		t.Fatal("expected dangerous-profile allow flag to stay scoped to qemu")
+	}
+}
+
+func TestLoadKeepsLegacyQEMUProfileEnvOutOfDockerPolicy(t *testing.T) {
+	t.Setenv("SANDBOX_RUNTIME", "docker")
+	t.Setenv("SANDBOX_TRUSTED_DOCKER_RUNTIME", "true")
+	t.Setenv("SANDBOX_TOKENS", "token-a=tenant-a")
+	t.Setenv("SANDBOX_QEMU_ALLOWED_PROFILES", "core")
+	t.Setenv("SANDBOX_QEMU_DANGEROUS_PROFILES", "debug")
+	t.Setenv("SANDBOX_QEMU_ALLOW_DANGEROUS_PROFILES", "true")
+
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.IsAllowedGuestProfile("qemu", model.GuestProfileBrowser) {
+		t.Fatal("expected legacy qemu env to keep browser blocked for qemu")
+	}
+	if !cfg.IsAllowedGuestProfile("docker", model.GuestProfileBrowser) {
+		t.Fatal("expected legacy qemu env to leave docker profile policy unchanged")
+	}
+	if cfg.AllowsDangerousGuestProfiles("docker") {
+		t.Fatal("expected qemu dangerous-profile env to stay out of docker policy")
+	}
+	if !cfg.AllowsDangerousGuestProfiles("qemu") {
+		t.Fatal("expected qemu dangerous-profile env to apply to qemu")
+	}
 }
 
 func TestValidateRejectsNonPositiveCPUValues(t *testing.T) {

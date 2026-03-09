@@ -43,6 +43,9 @@ type Config struct {
 	PolicyAllowPublicTunnels      bool
 	PolicyMaxSandboxLifetime      time.Duration
 	PolicyMaxIdleTimeout          time.Duration
+	AllowedGuestProfiles          []model.GuestProfile
+	DangerousGuestProfiles        []model.GuestProfile
+	AllowDangerousProfiles        bool
 	DockerUser                    string
 	DockerTmpfsSizeMB             int
 	DockerSeccompProfile          string
@@ -89,7 +92,7 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.DatabasePath, "db", env("SANDBOX_DB_PATH", "./data/sandbox.db"), "SQLite path")
 	fs.StringVar(&cfg.StorageRoot, "storage-root", env("SANDBOX_STORAGE_ROOT", "./data/storage"), "storage root")
 	fs.StringVar(&cfg.SnapshotRoot, "snapshot-root", env("SANDBOX_SNAPSHOT_ROOT", "./data/snapshots"), "snapshot root")
-	fs.StringVar(&cfg.BaseImageRef, "base-image", env("SANDBOX_BASE_IMAGE", "mcr.microsoft.com/playwright:v1.51.1-noble"), "default base image")
+	fs.StringVar(&cfg.BaseImageRef, "base-image", env("SANDBOX_BASE_IMAGE", "alpine:3.20"), "default base image")
 	fs.StringVar(&cfg.RuntimeBackend, "runtime", env("SANDBOX_RUNTIME", "docker"), "runtime backend")
 	fs.StringVar(&cfg.AuthMode, "auth-mode", env("SANDBOX_AUTH_MODE", "static"), "auth mode")
 	fs.StringVar(&cfg.AuthJWTIssuer, "auth-jwt-issuer", env("SANDBOX_AUTH_JWT_ISSUER", ""), "jwt issuer")
@@ -116,13 +119,19 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.QEMUBaseImagePath, "qemu-base-image-path", env("SANDBOX_QEMU_BASE_IMAGE_PATH", ""), "qemu base guest image path")
 	qemuAllowedBaseImagePaths := env("SANDBOX_QEMU_ALLOWED_BASE_IMAGE_PATHS", "")
 	fs.StringVar(&qemuAllowedBaseImagePaths, "qemu-allowed-base-image-paths", qemuAllowedBaseImagePaths, "comma-separated qemu guest image paths tenants may request")
-	qemuAllowedProfiles := env("SANDBOX_QEMU_ALLOWED_PROFILES", "core,runtime,browser,container")
+	allowedGuestProfiles := env("SANDBOX_ALLOWED_PROFILES", "")
+	qemuAllowedProfiles := env("SANDBOX_QEMU_ALLOWED_PROFILES", "core,runtime,browser,container,debug")
 	fs.StringVar(&qemuAllowedProfiles, "qemu-allowed-profiles", qemuAllowedProfiles, "comma-separated qemu guest profiles allowed for sandbox creation")
+	dangerousGuestProfiles := env("SANDBOX_DANGEROUS_PROFILES", "")
 	qemuDangerousProfiles := env("SANDBOX_QEMU_DANGEROUS_PROFILES", "container,debug")
 	fs.StringVar(&qemuDangerousProfiles, "qemu-dangerous-profiles", qemuDangerousProfiles, "comma-separated qemu guest profiles treated as dangerous and blocked unless explicitly allowed")
 	qemuControlMode := env("SANDBOX_QEMU_CONTROL_MODE", string(model.GuestControlModeAgent))
 	fs.StringVar(&qemuControlMode, "qemu-control-mode", qemuControlMode, "qemu control mode: agent or ssh-compat")
-	qemuAllowDangerousProfiles := strings.EqualFold(env("SANDBOX_QEMU_ALLOW_DANGEROUS_PROFILES", "false"), "true")
+	allowDangerousProfiles := strings.EqualFold(env("SANDBOX_ALLOW_DANGEROUS_PROFILES", ""), "true")
+	qemuAllowDangerousProfiles := allowDangerousProfiles
+	if !qemuAllowDangerousProfiles {
+		qemuAllowDangerousProfiles = strings.EqualFold(env("SANDBOX_QEMU_ALLOW_DANGEROUS_PROFILES", "false"), "true")
+	}
 	fs.BoolVar(&qemuAllowDangerousProfiles, "qemu-allow-dangerous-profiles", qemuAllowDangerousProfiles, "allow dangerous qemu guest profiles such as container and debug")
 	qemuAllowSSHCompat := strings.EqualFold(env("SANDBOX_QEMU_ALLOW_SSH_COMPAT", "false"), "true")
 	fs.BoolVar(&qemuAllowSSHCompat, "qemu-allow-ssh-compat", qemuAllowSSHCompat, "allow ssh-compat qemu image contracts in production validation and policy")
@@ -171,6 +180,9 @@ func Load(args []string) (Config, error) {
 	cfg.OptionalSnapshotExport = env("SANDBOX_S3_EXPORT_URI", "")
 	cfg.QEMUAllowedBaseImagePaths = parseCommaSeparated(qemuAllowedBaseImagePaths)
 	cfg.QEMUControlMode = model.GuestControlMode(strings.ToLower(strings.TrimSpace(qemuControlMode)))
+	cfg.AllowedGuestProfiles = parseGuestProfiles(allowedGuestProfiles)
+	cfg.DangerousGuestProfiles = parseGuestProfiles(dangerousGuestProfiles)
+	cfg.AllowDangerousProfiles = allowDangerousProfiles
 	cfg.QEMUAllowedProfiles = parseGuestProfiles(qemuAllowedProfiles)
 	cfg.QEMUDangerousProfiles = parseGuestProfiles(qemuDangerousProfiles)
 	cfg.QEMUAllowDangerousProfiles = qemuAllowDangerousProfiles
@@ -387,7 +399,7 @@ func validateQEMUConfig(c Config, probe runtimeValidationProbe) error {
 	if !c.QEMUControlMode.IsValid() {
 		return fmt.Errorf("qemu runtime requires SANDBOX_QEMU_CONTROL_MODE to be one of %q or %q", model.GuestControlModeAgent, model.GuestControlModeSSHCompat)
 	}
-	if len(c.QEMUAllowedProfiles) == 0 {
+	if len(c.effectiveAllowedGuestProfiles("qemu")) == 0 {
 		return errors.New("qemu runtime requires at least one allowed guest profile")
 	}
 	if c.QEMUControlMode == model.GuestControlModeSSHCompat {
@@ -471,7 +483,11 @@ func NormalizeQEMUBaseImagePath(path string) string {
 }
 
 func (c Config) IsAllowedQEMUProfile(profile model.GuestProfile) bool {
-	for _, allowed := range c.QEMUAllowedProfiles {
+	return c.IsAllowedGuestProfile("qemu", profile)
+}
+
+func (c Config) IsAllowedGuestProfile(runtimeBackend string, profile model.GuestProfile) bool {
+	for _, allowed := range c.effectiveAllowedGuestProfiles(runtimeBackend) {
 		if allowed == profile {
 			return true
 		}
@@ -480,12 +496,46 @@ func (c Config) IsAllowedQEMUProfile(profile model.GuestProfile) bool {
 }
 
 func (c Config) IsDangerousQEMUProfile(profile model.GuestProfile) bool {
-	for _, dangerous := range c.QEMUDangerousProfiles {
+	return c.IsDangerousGuestProfile("qemu", profile)
+}
+
+func (c Config) IsDangerousGuestProfile(runtimeBackend string, profile model.GuestProfile) bool {
+	for _, dangerous := range c.effectiveDangerousGuestProfiles(runtimeBackend) {
 		if dangerous == profile {
 			return true
 		}
 	}
 	return false
+}
+
+func (c Config) AllowsDangerousGuestProfiles(runtimeBackend string) bool {
+	return c.AllowDangerousProfiles || (runtimeBackend == "qemu" && c.QEMUAllowDangerousProfiles)
+}
+
+func (c Config) effectiveAllowedGuestProfiles(runtimeBackend string) []model.GuestProfile {
+	if len(c.AllowedGuestProfiles) > 0 {
+		return c.AllowedGuestProfiles
+	}
+	if runtimeBackend == "qemu" && len(c.QEMUAllowedProfiles) > 0 {
+		return c.QEMUAllowedProfiles
+	}
+	return []model.GuestProfile{
+		model.GuestProfileCore,
+		model.GuestProfileRuntime,
+		model.GuestProfileBrowser,
+		model.GuestProfileContainer,
+		model.GuestProfileDebug,
+	}
+}
+
+func (c Config) effectiveDangerousGuestProfiles(runtimeBackend string) []model.GuestProfile {
+	if len(c.DangerousGuestProfiles) > 0 {
+		return c.DangerousGuestProfiles
+	}
+	if runtimeBackend == "qemu" && len(c.QEMUDangerousProfiles) > 0 {
+		return c.QEMUDangerousProfiles
+	}
+	return []model.GuestProfile{model.GuestProfileContainer, model.GuestProfileDebug}
 }
 
 func parseGuestProfiles(raw string) []model.GuestProfile {

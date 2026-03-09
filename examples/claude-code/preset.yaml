@@ -2,6 +2,7 @@ name: claude-code
 description: Install Claude Code in a Node sandbox and run a one-shot prompt.
 runtime:
   allowed: [docker]
+  profile: runtime
 sandbox:
   image: node:22-bookworm
   cpu: "1"

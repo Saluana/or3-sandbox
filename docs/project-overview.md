@@ -98,6 +98,8 @@ The project supports two runtime backends, each with a **runtime class** that ex
 - **not** the hostile multi-tenant production boundary
 - resolves to the `trusted-docker` runtime class
 - `SANDBOX_MODE=production` rejects it at startup because it is not VM-backed
+- now uses a lightweight default `core` image posture instead of shipping browser tooling in every sandbox
+- keeps heavier `browser`, `container`, and `debug` profiles explicit so operators can allowlist or block them separately
 
 ### QEMU runtime (`vm` class)
 

@@ -2,6 +2,8 @@
 
 This preset uses the Playwright Docker image to capture a screenshot and download it locally.
 
+It explicitly selects the `browser` profile so browser tooling stays opt-in instead of riding along with the default lightweight image.
+
 ## Run
 
 ```bash
@@ -22,3 +24,4 @@ Downloaded artifact:
 
 - The screenshot download relies on the new binary-safe file transfer mode.
 - Docker is the initial path for this preset because the Playwright image is already packaged for container execution.
+- This preset should stay on an explicit browser image; it should never fall back to the default lightweight `core` image.

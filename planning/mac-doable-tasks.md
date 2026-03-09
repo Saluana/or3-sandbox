@@ -36,26 +36,26 @@ Design: [trusted-docker-hardening/design.md](trusted-docker-hardening/design.md)
 
 Design: [lightweight-image-profiles/design.md](lightweight-image-profiles/design.md)
 
-- [ ] Update `internal/service/service.go` and related helpers so profile validation follows the same policy semantics for Docker and QEMU.
-- [ ] Change the default `SANDBOX_BASE_IMAGE` posture in `internal/config/config.go` away from the broad Playwright image.
-- [ ] Build or document a smaller curated `core` or `runtime` Docker image in `images/base/Dockerfile` or adjacent build assets.
-- [ ] Verify a default sandbox can still create, start, and exec using the smaller image.
-- [ ] Update docs in `docs/configuration.md` and `docs/usage.md` to reflect the new default.
-- [ ] Keep browser tooling only in `browser` images and examples.
-- [ ] Remove Docker-in-container from normal curated images and keep it only in the `container` profile.
-- [ ] Update `examples/openclaw`, `examples/playwright`, and any other presets to request the smallest required profile explicitly.
-- [ ] Define lightweight Docker image metadata using OCI labels or a small curated mapping in Go.
-- [ ] Extend the Docker runtime or service validation path to load that metadata before sandbox creation.
-- [ ] Reject sandbox-create requests when requested profile, image metadata, and dangerous-profile policy do not align.
-- [ ] Update `internal/service/policy.go` so dangerous profiles such as `container` and `debug` are blocked by default in production.
-- [ ] Strengthen `SANDBOX_POLICY_ALLOWED_IMAGES` usage in docs and tests so production examples prefer pinned curated image refs.
-- [ ] Add config tests that cover minimal default images and allowed-image restriction behavior.
-- [ ] Add service tests for profile mismatch, missing metadata, and dangerous-profile denial.
-- [ ] Add Docker runtime tests for image metadata parsing or curated mapping.
-- [ ] Add preset tests ensuring browser and container examples do not fall back to the default lightweight image by mistake.
-- [ ] Update `docs/project-overview.md`, `docs/configuration.md`, and `docs/usage.md` with the curated image/profile story.
-- [ ] Update example READMEs so they explain why a given example needs `browser` or `container`.
-- [ ] Document the operator process for rebuilding and rolling curated images without silent drift.
+- [x] Update `internal/service/service.go` and related helpers so profile validation follows the same policy semantics for Docker and QEMU.
+- [x] Change the default `SANDBOX_BASE_IMAGE` posture in `internal/config/config.go` away from the broad Playwright image.
+- [x] Build or document a smaller curated `core` or `runtime` Docker image in `images/base/Dockerfile` or adjacent build assets.
+- [x] Verify a default sandbox can still create, start, and exec using the smaller image.
+- [x] Update docs in `docs/configuration.md` and `docs/usage.md` to reflect the new default.
+- [x] Keep browser tooling only in `browser` images and examples.
+- [x] Remove Docker-in-container from normal curated images and keep it only in the `container` profile.
+- [x] Update `examples/openclaw`, `examples/playwright`, and any other presets to request the smallest required profile explicitly.
+- [x] Define lightweight Docker image metadata using OCI labels or a small curated mapping in Go.
+- [x] Extend the Docker runtime or service validation path to load that metadata before sandbox creation.
+- [x] Reject sandbox-create requests when requested profile, image metadata, and dangerous-profile policy do not align.
+- [x] Update `internal/service/policy.go` so dangerous profiles such as `container` and `debug` are blocked by default in production.
+- [x] Strengthen `SANDBOX_POLICY_ALLOWED_IMAGES` usage in docs and tests so production examples prefer pinned curated image refs.
+- [x] Add config tests that cover minimal default images and allowed-image restriction behavior.
+- [x] Add service tests for profile mismatch, missing metadata, and dangerous-profile denial.
+- [x] Add Docker runtime tests for image metadata parsing or curated mapping.
+- [x] Add preset tests ensuring browser and container examples do not fall back to the default lightweight image by mistake.
+- [x] Update `docs/project-overview.md`, `docs/configuration.md`, and `docs/usage.md` with the curated image/profile story.
+- [x] Update example READMEs so they explain why a given example needs `browser` or `container`.
+- [x] Document the operator process for rebuilding and rolling curated images without silent drift.
 
 ## Phase 3: tighten persistence and exposure controls
 

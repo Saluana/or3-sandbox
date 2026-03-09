@@ -65,7 +65,7 @@ These values are used when a request does not provide its own values.
 
 | Setting | Default |
 | --- | --- |
-| `SANDBOX_BASE_IMAGE` | `mcr.microsoft.com/playwright:v1.51.1-noble` |
+| `SANDBOX_BASE_IMAGE` | `alpine:3.20` |
 | `SANDBOX_DEFAULT_CPU` | `2` |
 | `SANDBOX_DEFAULT_MEMORY_MB` | `2048` |
 | `SANDBOX_DEFAULT_PIDS` | `512` |
@@ -177,6 +177,14 @@ Important truth:
 - quotas answer "how much can this tenant use?"
 - policy answers "what is the operator willing to allow at all?"
 - policy denials happen before risky actions continue, and the API returns a clear error message instead of silently changing the request
+
+Curated image/profile guidance:
+
+- the default Docker path now uses a lightweight `core` image posture instead of a browser-heavy image
+- `images/base/Dockerfile` documents a larger curated `runtime` image you can build locally with `docker build -t or3-sandbox/base:runtime images/base`
+- browser tooling should stay on explicit `browser` images such as the Playwright example
+- production operators should prefer digest-pinned curated refs in `SANDBOX_POLICY_ALLOWED_IMAGES`, for example `or3-sandbox/base@sha256:...` or `mcr.microsoft.com/playwright@sha256:...`
+- dangerous profiles such as `container` and `debug` stay blocked unless `SANDBOX_ALLOW_DANGEROUS_PROFILES=true`
 
 ## Timing settings
 

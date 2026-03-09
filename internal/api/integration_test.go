@@ -261,6 +261,23 @@ func TestCreateSandboxRejectsFractionalCPUOnQEMU(t *testing.T) {
 	}, http.StatusBadRequest)
 }
 
+func TestCreateSandboxRejectsDockerProfileMismatch(t *testing.T) {
+	h := newHarness(t)
+	defer h.close()
+
+	h.expectStatus(t, "token-a", http.MethodPost, "/v1/sandboxes", map[string]any{
+		"base_image_ref":  "alpine:3.20",
+		"profile":         "browser",
+		"cpu_limit":       1,
+		"memory_limit_mb": 256,
+		"pids_limit":      128,
+		"disk_limit_mb":   512,
+		"network_mode":    model.NetworkModeInternetDisabled,
+		"allow_tunnels":   false,
+		"start":           false,
+	}, http.StatusBadRequest)
+}
+
 func TestAllowTunnelsFalseIsRespected(t *testing.T) {
 	h := newHarness(t)
 	defer h.close()

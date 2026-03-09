@@ -62,6 +62,7 @@ name: demo
 description: demo preset
 runtime:
   allowed: [docker]
+  profile: runtime
 sandbox:
   image: alpine:3.20
   cpu: "1"
@@ -135,6 +136,9 @@ cleanup: always
 	}
 	if createReq.BaseImageRef != "busybox:1.36" {
 		t.Fatalf("expected image override, got %+v", createReq)
+	}
+	if createReq.Profile != model.GuestProfileRuntime {
+		t.Fatalf("expected runtime profile to be forwarded, got %+v", createReq)
 	}
 	if writeReq.Content != "hello super-secret" {
 		t.Fatalf("unexpected write payload: %+v", writeReq)

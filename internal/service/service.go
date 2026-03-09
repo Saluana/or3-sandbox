@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"or3-sandbox/internal/config"
+	"or3-sandbox/internal/dockerimage"
 	"or3-sandbox/internal/guestimage"
 	"or3-sandbox/internal/model"
 	"or3-sandbox/internal/repository"
@@ -65,7 +66,7 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		return model.Sandbox{}, err
 	}
 	var err error
-	req, contract, err := s.validateRuntimeCreate(req)
+	req, contract, err := s.validateRuntimeCreate(ctx, req)
 	if err != nil {
 		return model.Sandbox{}, err
 	}
@@ -1226,10 +1227,31 @@ func validateCreate(req model.CreateSandboxRequest) error {
 	return nil
 }
 
-func (s *Service) validateRuntimeCreate(req model.CreateSandboxRequest) (model.CreateSandboxRequest, guestimage.Contract, error) {
+func (s *Service) validateRuntimeCreate(ctx context.Context, req model.CreateSandboxRequest) (model.CreateSandboxRequest, guestimage.Contract, error) {
 	req.Capabilities = model.NormalizeCapabilities(req.Capabilities)
 	if s.cfg.RuntimeBackend == "qemu" && req.CPULimit.MilliValue()%1000 != 0 {
 		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("qemu runtime requires whole CPU cores until fractional throttling is implemented")
+	}
+	if s.cfg.RuntimeBackend == "docker" {
+		metadata, err := dockerimage.ResolveWithDockerLabels(ctx, req.BaseImageRef)
+		profile := req.Profile
+		switch {
+		case err == nil && profile == "":
+			profile = metadata.Profile
+		case err == nil && profile != metadata.Profile:
+			return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("docker image profile %q does not match requested profile %q", metadata.Profile, profile)
+		case err != nil && !errors.Is(err, dockerimage.ErrMetadataUnavailable):
+			return model.CreateSandboxRequest{}, guestimage.Contract{}, err
+		}
+		if err != nil && profile == "" {
+			return model.CreateSandboxRequest{}, guestimage.Contract{}, err
+		}
+		if !profile.IsValid() {
+			return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("docker runtime requires a valid guest profile")
+		}
+		req.Profile = profile
+		req.Features = model.NormalizeFeatures(req.Features)
+		return req, guestimage.Contract{}, nil
 	}
 	if s.cfg.RuntimeBackend != "qemu" {
 		return req, guestimage.Contract{}, nil
@@ -1257,12 +1279,6 @@ func (s *Service) validateRuntimeCreate(req model.CreateSandboxRequest) (model.C
 	}
 	if profile != contract.Profile {
 		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("guest image profile %q does not match requested profile %q", contract.Profile, profile)
-	}
-	if !s.cfg.IsAllowedQEMUProfile(profile) {
-		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("guest profile %q is not allowed by policy", profile)
-	}
-	if s.cfg.IsDangerousQEMUProfile(profile) && !s.cfg.QEMUAllowDangerousProfiles {
-		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("guest profile %q is blocked by policy until SANDBOX_QEMU_ALLOW_DANGEROUS_PROFILES=true", profile)
 	}
 	if contract.Control.Mode == model.GuestControlModeSSHCompat && !s.cfg.QEMUAllowSSHCompat {
 		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("ssh-compat guest images are blocked by policy until SANDBOX_QEMU_ALLOW_SSH_COMPAT=true")

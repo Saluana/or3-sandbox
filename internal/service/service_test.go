@@ -16,6 +16,7 @@ import (
 	"or3-sandbox/internal/auth"
 	"or3-sandbox/internal/config"
 	"or3-sandbox/internal/db"
+	"or3-sandbox/internal/dockerimage"
 	"or3-sandbox/internal/guestimage"
 	"or3-sandbox/internal/model"
 	"or3-sandbox/internal/repository"
@@ -668,7 +669,7 @@ func TestCreateSandboxRejectsDangerousDockerFeaturesByDefault(t *testing.T) {
 	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
 
 	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
-		BaseImageRef:  "base-image",
+		BaseImageRef:  "alpine:3.20",
 		Features:      []string{"docker.host-network"},
 		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 512,
@@ -695,7 +696,7 @@ func TestCreateSandboxRejectsDangerousDockerCapabilityOverrideByDefault(t *testi
 	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
 
 	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
-		BaseImageRef:  "base-image",
+		BaseImageRef:  "alpine:3.20",
 		Capabilities:  []string{"docker.elevated-user"},
 		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 512,
@@ -716,7 +717,7 @@ func TestCreateSandboxAuditsAllowedDockerCapabilityOverride(t *testing.T) {
 	svc.cfg.DockerAllowDangerousOverrides = true
 
 	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
-		BaseImageRef:  "base-image",
+		BaseImageRef:  "alpine:3.20",
 		Capabilities:  []string{"docker.elevated-user", "docker.extra-cap:net_bind_service"},
 		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 512,
@@ -747,6 +748,106 @@ func TestCreateSandboxAuditsAllowedDockerCapabilityOverride(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected policy.create.override audit event, got %+v", events)
+	}
+}
+
+func TestCreateSandboxRejectsDockerProfileMismatch(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "alpine:3.20",
+		Profile:       model.GuestProfileBrowser,
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not match requested profile") {
+		t.Fatalf("expected docker profile mismatch, got %v", err)
+	}
+}
+
+func TestCreateSandboxRejectsDockerImageMissingMetadata(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "registry.example.com/custom/app:1",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing curated profile metadata") {
+		t.Fatalf("expected missing metadata error, got %v", err)
+	}
+}
+
+func TestCreateSandboxAcceptsCustomDockerImageWithExplicitProfile(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "registry.example.com/custom/app:1",
+		Profile:       model.GuestProfileRuntime,
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("expected explicit profile to allow custom docker image, got %v", err)
+	}
+	if sandbox.Profile != model.GuestProfileRuntime {
+		t.Fatalf("expected runtime profile to persist, got %+v", sandbox)
+	}
+}
+
+func TestCreateSandboxRejectsDangerousDockerProfileByDefault(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+	svc.cfg.AllowedGuestProfiles = []model.GuestProfile{model.GuestProfileCore, model.GuestProfileContainer, model.GuestProfileDebug}
+	svc.cfg.DangerousGuestProfiles = []model.GuestProfile{model.GuestProfileContainer, model.GuestProfileDebug}
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "or3-sandbox/base-container:latest",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if !errors.Is(err, auth.ErrForbidden) {
+		t.Fatalf("expected dangerous profile denial, got %v", err)
+	}
+	events, err := store.ListAuditEvents(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	if len(events) == 0 || !strings.Contains(events[len(events)-1].Message, "dangerous-profile") {
+		t.Fatalf("expected dangerous profile audit detail, got %+v", events)
+	}
+}
+
+func TestDockerCuratedMetadataFixtureStaysInSync(t *testing.T) {
+	metadata, err := dockerimage.Resolve("or3-sandbox/base-container:latest")
+	if err != nil {
+		t.Fatalf("resolve container metadata: %v", err)
+	}
+	if metadata.Profile != model.GuestProfileContainer || !metadata.Dangerous {
+		t.Fatalf("unexpected metadata %+v", metadata)
 	}
 }
 

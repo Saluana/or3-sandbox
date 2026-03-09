@@ -2,6 +2,7 @@ name: openclaw
 description: Start an OpenClaw-style gateway service in a Docker sandbox and expose it through a tunnel.
 runtime:
   allowed: [docker]
+  profile: runtime
 sandbox:
   image: ghcr.io/openclaw/openclaw:latest
   cpu: "1"
