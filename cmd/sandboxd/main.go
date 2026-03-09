@@ -64,7 +64,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
-		log.Info("daemon listening", "event", "daemon.listen", "addr", cfg.ListenAddress, "runtime", cfg.RuntimeBackend, "mode", cfg.DeploymentMode, "auth_mode", cfg.AuthMode, "tls_enabled", cfg.TLSCertPath != "", "trusted_proxy", cfg.TrustedProxyHeaders)
+		log.Info("daemon listening", "event", "daemon.listen", "addr", cfg.ListenAddress, "runtime", cfg.RuntimeBackend, "runtime_class", string(cfg.RuntimeClass()), "mode", cfg.DeploymentMode, "auth_mode", cfg.AuthMode, "tls_enabled", cfg.TLSCertPath != "", "trusted_proxy", cfg.TrustedProxyHeaders)
 		var err error
 		if cfg.TLSCertPath != "" {
 			err = server.ListenAndServeTLS(cfg.TLSCertPath, cfg.TLSKeyPath)

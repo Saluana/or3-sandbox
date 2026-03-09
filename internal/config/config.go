@@ -228,8 +228,8 @@ func (c Config) Validate() error {
 		problems = append(problems, "at least one tenant token is required")
 	}
 	if c.DeploymentMode == "production" {
-		if c.RuntimeBackend != "qemu" {
-			problems = append(problems, "production mode requires SANDBOX_RUNTIME=qemu")
+		if !model.BackendToRuntimeClass(c.RuntimeBackend).IsVMBacked() {
+			problems = append(problems, fmt.Sprintf("production mode requires a VM-backed runtime class; %q resolves to class %q which is not VM-backed", c.RuntimeBackend, model.BackendToRuntimeClass(c.RuntimeBackend)))
 		}
 		if c.AuthMode == "static" {
 			problems = append(problems, "production mode requires SANDBOX_AUTH_MODE=jwt-hs256")
@@ -406,6 +406,11 @@ func validateQEMUConfig(c Config, probe runtimeValidationProbe) error {
 		return errors.New("production qemu mode rejects ssh-compat images unless SANDBOX_QEMU_ALLOW_SSH_COMPAT=true")
 	}
 	return nil
+}
+
+// RuntimeClass returns the runtime class derived from the configured backend.
+func (c Config) RuntimeClass() model.RuntimeClass {
+	return model.BackendToRuntimeClass(c.RuntimeBackend)
 }
 
 func (c Config) EffectiveQEMUAllowedBaseImagePaths() []string {

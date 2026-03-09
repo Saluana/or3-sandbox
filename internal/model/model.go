@@ -92,6 +92,7 @@ type Sandbox struct {
 	TenantID                 string           `json:"tenant_id"`
 	Status                   SandboxStatus    `json:"status"`
 	RuntimeBackend           string           `json:"runtime_backend"`
+	RuntimeClass             RuntimeClass     `json:"runtime_class,omitempty"`
 	BaseImageRef             string           `json:"base_image_ref"`
 	Profile                  GuestProfile     `json:"profile,omitempty"`
 	Features                 []string         `json:"features,omitempty"`
@@ -264,6 +265,7 @@ type RuntimeHealth struct {
 
 type RuntimeInfo struct {
 	Backend string `json:"backend"`
+	Class   string `json:"class,omitempty"`
 }
 
 type RuntimeSandboxHealth struct {

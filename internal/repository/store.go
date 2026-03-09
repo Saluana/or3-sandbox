@@ -21,6 +21,13 @@ func New(db *sql.DB) *Store {
 	return &Store{db: db}
 }
 
+// DB returns the underlying *sql.DB. This is intended for use in tests that
+// need direct database access (e.g. to simulate legacy rows without a
+// runtime_class column value).
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
 func (s *Store) WithTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -172,14 +179,14 @@ func (s *Store) CreateSandbox(ctx context.Context, sandbox model.Sandbox) error 
 	return s.WithTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO sandboxes(
-				sandbox_id, tenant_id, status, runtime_backend, base_image_ref,
+				sandbox_id, tenant_id, status, runtime_backend, runtime_class, base_image_ref,
 				profile, feature_set, capability_set, control_mode, control_protocol_version, workspace_contract_version, image_contract_version,
 				cpu_limit, cpu_limit_millis, memory_limit_mb, pids_limit, disk_limit_mb,
 				network_mode, allow_tunnels, storage_root, workspace_root, cache_root,
 				created_at, updated_at, last_active_at, deleted_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-		`, sandbox.ID, sandbox.TenantID, string(sandbox.Status), sandbox.RuntimeBackend, sandbox.BaseImageRef,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+		`, sandbox.ID, sandbox.TenantID, string(sandbox.Status), sandbox.RuntimeBackend, string(sandbox.RuntimeClass), sandbox.BaseImageRef,
 			string(sandbox.Profile), joinStringList(sandbox.Features), joinStringList(sandbox.Capabilities), string(sandbox.ControlMode), sandbox.ControlProtocolVersion, sandbox.WorkspaceContractVersion, sandbox.ImageContractVersion,
 			sandbox.CPULimit.VCPUCount(), sandbox.CPULimit.MilliValue(), sandbox.MemoryLimitMB, sandbox.PIDsLimit, sandbox.DiskLimitMB,
 			string(sandbox.NetworkMode), boolToInt(sandbox.AllowTunnels), sandbox.StorageRoot, sandbox.WorkspaceRoot, sandbox.CacheRoot,
@@ -245,7 +252,7 @@ func (s *Store) UpdateRuntimeState(ctx context.Context, sandboxID string, state 
 
 func (s *Store) GetSandbox(ctx context.Context, tenantID, sandboxID string) (model.Sandbox, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
+		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.runtime_class, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
 		       s.memory_limit_mb, s.pids_limit, s.disk_limit_mb, s.network_mode, s.allow_tunnels,
 		       s.storage_root, s.workspace_root, s.cache_root,
 		       s.created_at, s.updated_at, s.last_active_at, s.deleted_at,
@@ -263,7 +270,7 @@ func (s *Store) GetSandbox(ctx context.Context, tenantID, sandboxID string) (mod
 
 func (s *Store) ListSandboxes(ctx context.Context, tenantID string) ([]model.Sandbox, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
+		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.runtime_class, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
 		       s.memory_limit_mb, s.pids_limit, s.disk_limit_mb, s.network_mode, s.allow_tunnels,
 		       s.storage_root, s.workspace_root, s.cache_root,
 		       s.created_at, s.updated_at, s.last_active_at, s.deleted_at,
@@ -298,7 +305,7 @@ func (s *Store) ListNonDeletedSandboxesByTenant(ctx context.Context, tenantID st
 
 func (s *Store) listNonDeletedSandboxes(ctx context.Context, tenantID string) ([]model.Sandbox, error) {
 	query := `
-		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
+		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.runtime_class, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
 		       s.memory_limit_mb, s.pids_limit, s.disk_limit_mb, s.network_mode, s.allow_tunnels,
 		       s.storage_root, s.workspace_root, s.cache_root,
 		       s.created_at, s.updated_at, s.last_active_at, s.deleted_at,
@@ -691,8 +698,9 @@ func scanSandbox(scanner interface{ Scan(...any) error }) (model.Sandbox, error)
 	var allowTunnels int
 	var profile, featureSet, capabilitySet, controlMode, controlProtocolVersion, workspaceContractVersion, imageContractVersion string
 	var cpuLimitMillis int64
+	var runtimeClass string
 	if err := scanner.Scan(
-		&sandbox.ID, &sandbox.TenantID, &sandbox.Status, &sandbox.RuntimeBackend, &sandbox.BaseImageRef, &profile, &featureSet, &capabilitySet, &controlMode, &controlProtocolVersion, &workspaceContractVersion, &imageContractVersion,
+		&sandbox.ID, &sandbox.TenantID, &sandbox.Status, &sandbox.RuntimeBackend, &runtimeClass, &sandbox.BaseImageRef, &profile, &featureSet, &capabilitySet, &controlMode, &controlProtocolVersion, &workspaceContractVersion, &imageContractVersion,
 		&cpuLimitMillis, &sandbox.MemoryLimitMB, &sandbox.PIDsLimit, &sandbox.DiskLimitMB, &sandbox.NetworkMode,
 		&allowTunnels, &sandbox.StorageRoot, &sandbox.WorkspaceRoot, &sandbox.CacheRoot,
 		&created, &updated, &lastActive, &deleted,
@@ -712,6 +720,12 @@ func scanSandbox(scanner interface{ Scan(...any) error }) (model.Sandbox, error)
 	sandbox.WorkspaceContractVersion = workspaceContractVersion
 	sandbox.ImageContractVersion = imageContractVersion
 	sandbox.AllowTunnels = allowTunnels == 1
+	// Derive runtime class from backend when the stored value is empty (legacy rows).
+	if runtimeClass == "" {
+		sandbox.RuntimeClass = model.BackendToRuntimeClass(sandbox.RuntimeBackend)
+	} else {
+		sandbox.RuntimeClass = model.RuntimeClass(runtimeClass)
+	}
 	createdAt, err := parseTime(created)
 	if err != nil {
 		return model.Sandbox{}, err

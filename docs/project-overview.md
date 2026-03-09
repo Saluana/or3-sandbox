@@ -89,25 +89,29 @@ That is why the code stores both **control-plane state** and **runtime state**.
 
 ## Security model in plain language
 
-The project supports two runtime styles:
+The project supports two runtime backends, each with a **runtime class** that expresses its isolation posture:
 
-### Docker runtime
+### Docker runtime (`trusted-docker` class)
 
 - easiest path today
 - best for local development, demos, and trusted environments
-- **not** described as a strong hostile multi-tenant production barrier
+- **not** the hostile multi-tenant production boundary
+- resolves to the `trusted-docker` runtime class
+- `SANDBOX_MODE=production` rejects it at startup because it is not VM-backed
 
-### QEMU runtime
+### QEMU runtime (`vm` class)
 
 - more production-like because each sandbox is a guest machine
 - uses a small in-guest agent for the production-default control path
 - keeps SSH only for explicit compatibility/debug images
 - still under active development and validation
+- resolves to the `vm` runtime class
+- the only class eligible for `SANDBOX_MODE=production`
 
 A simple way to remember it:
 
-- Docker = easier now
-- QEMU = stronger long-term direction
+- Docker (`trusted-docker`) = easier now, trusted mode only
+- QEMU (`vm`) = stronger long-term direction, required for production
 
 ## Networking in plain language
 

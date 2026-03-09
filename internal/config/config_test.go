@@ -150,7 +150,7 @@ func TestValidateProductionModeRejectsUnsafeSettings(t *testing.T) {
 		Tenants:            []TenantConfig{{ID: "tenant-a", Name: "Tenant A", Token: "token-a"}},
 	}
 	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "SANDBOX_RUNTIME=qemu") || !strings.Contains(err.Error(), "SANDBOX_AUTH_MODE=jwt-hs256") || !strings.Contains(err.Error(), "SANDBOX_TRUST_PROXY_HEADERS=true") {
+	if err == nil || !strings.Contains(err.Error(), "VM-backed runtime class") || !strings.Contains(err.Error(), "SANDBOX_AUTH_MODE=jwt-hs256") || !strings.Contains(err.Error(), "SANDBOX_TRUST_PROXY_HEADERS=true") {
 		t.Fatalf("expected production mode validation errors, got %v", err)
 	}
 }
@@ -304,6 +304,53 @@ func TestEffectiveQEMUAllowedBaseImagePathsIncludesDefaultAndDeduplicates(t *tes
 	got := cfg.EffectiveQEMUAllowedBaseImagePaths()
 	if len(got) != 2 || got[0] != "/images/extra.qcow2" || got[1] != "/images/base.qcow2" {
 		t.Fatalf("unexpected allowed qemu images %#v", got)
+	}
+}
+
+func TestProductionModeRejectsNonVMClass(t *testing.T) {
+	base := Config{
+		ListenAddress:        ":8080",
+		DatabasePath:         "/tmp/test.db",
+		StorageRoot:          t.TempDir(),
+		SnapshotRoot:         t.TempDir(),
+		BaseImageRef:         "alpine:3.20",
+		TrustedDockerRuntime: true,
+		DeploymentMode:       "production",
+		AuthMode:             "jwt-hs256",
+		AuthJWTIssuer:        "issuer.example",
+		AuthJWTAudience:      "sandbox-api",
+		TrustedProxyHeaders:  true,
+		OperatorHost:         "https://sandbox.example",
+		DefaultCPULimit:      model.CPUCores(1),
+		DefaultQuota:         model.TenantQuota{MaxCPUCores: model.CPUCores(4)},
+		DefaultNetworkMode:   model.NetworkModeInternetEnabled,
+		Tenants:              []TenantConfig{{ID: "tenant-a", Name: "Tenant A", Token: "token-a"}},
+	}
+
+	// docker backend (trusted-docker class) must fail in production mode
+	dockerCfg := base
+	dockerCfg.RuntimeBackend = "docker"
+	err := dockerCfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "VM-backed runtime class") {
+		t.Fatalf("expected production to reject docker (non-VM class), got %v", err)
+	}
+}
+
+func TestRuntimeClassMethodDerivesFromBackend(t *testing.T) {
+	tests := []struct {
+		backend string
+		want    string
+	}{
+		{"docker", "trusted-docker"},
+		{"qemu", "vm"},
+		{"unknown", ""},
+	}
+	for _, tt := range tests {
+		cfg := Config{RuntimeBackend: tt.backend}
+		got := string(cfg.RuntimeClass())
+		if got != tt.want {
+			t.Errorf("backend %q: RuntimeClass() = %q, want %q", tt.backend, got, tt.want)
+		}
 	}
 }
 

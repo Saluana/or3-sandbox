@@ -67,8 +67,8 @@ func (s *Service) enforceTunnelPolicy(ctx context.Context, sandbox model.Sandbox
 }
 
 func (s *Service) enforceAdminInspectionPolicy(ctx context.Context, tenantID, action string) error {
-	if s.cfg.DeploymentMode == "production" && s.cfg.RuntimeBackend != "qemu" {
-		message := "admin inspection requires the qemu production boundary in production mode"
+	if s.cfg.DeploymentMode == "production" && !model.BackendToRuntimeClass(s.cfg.RuntimeBackend).IsVMBacked() {
+		message := "admin inspection requires a VM-backed runtime class in production mode"
 		s.recordAudit(ctx, tenantID, "", "policy."+action, action, "denied", message)
 		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
 	}

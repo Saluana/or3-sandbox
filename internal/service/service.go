@@ -95,6 +95,7 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		TenantID:                 tenant.ID,
 		Status:                   model.SandboxStatusCreating,
 		RuntimeBackend:           s.cfg.RuntimeBackend,
+		RuntimeClass:             model.BackendToRuntimeClass(s.cfg.RuntimeBackend),
 		BaseImageRef:             req.BaseImageRef,
 		Profile:                  req.Profile,
 		Features:                 model.NormalizeFeatures(req.Features),
@@ -213,6 +214,10 @@ func (s *Service) GetSandbox(ctx context.Context, tenantID, sandboxID string) (m
 
 func (s *Service) RuntimeBackend() string {
 	return s.cfg.RuntimeBackend
+}
+
+func (s *Service) RuntimeClass() model.RuntimeClass {
+	return s.cfg.RuntimeClass()
 }
 
 func (s *Service) ListSandboxes(ctx context.Context, tenantID string) ([]model.Sandbox, error) {

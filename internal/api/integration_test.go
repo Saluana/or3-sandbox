@@ -333,6 +333,9 @@ func TestRuntimeInfoIsTenantReadable(t *testing.T) {
 	if info.Backend != "qemu" {
 		t.Fatalf("unexpected runtime info %+v", info)
 	}
+	if info.Class != string(model.RuntimeClassVM) {
+		t.Fatalf("expected runtime class %q, got %q", model.RuntimeClassVM, info.Class)
+	}
 }
 
 func TestRuntimeHealthEndpoint(t *testing.T) {

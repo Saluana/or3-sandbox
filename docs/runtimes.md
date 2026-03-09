@@ -9,12 +9,38 @@ In this project, the runtime is the engine under the hood.
 - `docker`
 - `qemu`
 
+## Runtime classes
+
+Each backend maps to a **runtime class** that describes its isolation posture:
+
+| Backend | Runtime class | Production eligible |
+| --- | --- | --- |
+| `docker` | `trusted-docker` | No – shared-kernel only |
+| `qemu` | `vm` | Yes – VM-backed isolation |
+
+The runtime class is used by policy decisions throughout the system. Setting `SANDBOX_MODE=production` fails closed: it rejects any backend whose runtime class is not `vm`.
+
+Docker is intentionally documented and validated as `trusted-docker`. It is not the hostile multi-tenant production boundary. It remains available for local development, image compatibility checks, and explicitly trusted operator environments.
+
+Future VM-compatible backends (such as Kata Containers) would also map to the `vm` class when they are supported.
+
+The current backend and its resolved class are visible through `GET /v1/runtime/info`:
+
+```json
+{
+  "backend": "qemu",
+  "class": "vm"
+}
+```
+
+The `sandboxctl doctor --production-qemu` command also reports the resolved class and flags non-VM production posture as blocking.
+
 ## Quick comparison
 
-| Runtime | Best for | Current status | Main control method |
+| Runtime | Best for | Runtime class | Main control method |
 | --- | --- | --- | --- |
-| `docker` | local development and trusted setups | most complete today | Docker CLI |
-| `qemu` | production isolation and security-sensitive workloads | newer and still being hardened | QEMU + guest agent |
+| `docker` | local development and trusted setups | `trusted-docker` | Docker CLI |
+| `qemu` | production isolation and security-sensitive workloads | `vm` | QEMU + guest agent |
 
 ## Docker runtime
 
@@ -60,6 +86,8 @@ That setting is the project's way of saying:
 
 > "Yes, I understand this is trusted mode."
 
+Docker resolves to the `trusted-docker` runtime class. `SANDBOX_MODE=production` will reject it at startup because `trusted-docker` is not VM-backed.
+
 ## QEMU runtime
 
 ### Why it exists
@@ -71,6 +99,8 @@ It is the higher-isolation option when security matters more than density.
 Instead of a container, each sandbox becomes a guest machine.
 
 That gives a clearer isolation boundary than Docker's shared-kernel model, but it still needs host-specific verification before you call a deployment production-ready.
+
+QEMU resolves to the `vm` runtime class and is the only currently supported production boundary.
 
 ### How it works
 
@@ -100,7 +130,6 @@ The main ones are:
 
 The QEMU runtime now exposes more honest status values:
 
-- `booting` means the guest process exists but SSH readiness has not finished yet
 - `booting` means the guest process exists but readiness has not finished yet
 - `running` means the guest is reachable and ready
 - `suspended` means the guest was intentionally paused
@@ -162,5 +191,5 @@ Then, once the project makes sense to you, read `images/guest/README.md` and try
 
 For production planning, remember the simple rule:
 
-- choose Docker to save money when the workload is trusted
-- choose QEMU when the security boundary matters more than density
+- Docker (`trusted-docker` class): choose when the workload is trusted and density matters
+- QEMU (`vm` class): required when the security boundary matters more than density, and the only class eligible for `SANDBOX_MODE=production`

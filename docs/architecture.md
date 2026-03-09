@@ -144,6 +144,26 @@ That interface lets the rest of the system say things like:
 
 Because of this interface, the control plane code does not need to know the low-level details of Docker or QEMU.
 
+### Runtime classes and the adapter layer
+
+Each backend maps to a **runtime class** that expresses its isolation posture:
+
+- `docker` → `trusted-docker` (shared-kernel, development/trusted only)
+- `qemu` → `vm` (VM-backed, the only production-eligible class)
+
+The `internal/runtime/adapter` package provides lightweight request types
+(`AdapterCreateRequest`, `SandboxAttachment`, `NetworkAttachment`) that describe
+sandbox intent in terms of lifecycle, storage, and network — rather than in
+Docker CLI terms. This boundary means:
+
+- adding a future VM-backed adapter does not require threading Docker-specific
+  assumptions through service or API code
+- the adapter layer is intentionally small: no Kubernetes, no containerd, no
+  scheduler; it lives inside the existing Go process
+
+The production policy gate is backed by runtime class, not by ad hoc backend
+name checks. `SANDBOX_MODE=production` fails closed to VM-backed classes only.
+
 ## 6. Docker runtime
 
 The Docker runtime is the easiest current backend.

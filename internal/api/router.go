@@ -131,7 +131,10 @@ func (rt *Router) handleRuntimeInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = tenantCtx
-	writeJSON(w, http.StatusOK, model.RuntimeInfo{Backend: rt.service.RuntimeBackend()})
+	writeJSON(w, http.StatusOK, model.RuntimeInfo{
+		Backend: rt.service.RuntimeBackend(),
+		Class:   string(rt.service.RuntimeClass()),
+	})
 }
 
 func (rt *Router) handleRuntimeCapacity(w http.ResponseWriter, r *http.Request) {

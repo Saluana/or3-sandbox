@@ -5,12 +5,19 @@ This guide describes the supported single-node production deployment shape for `
 ## Supported production boundary
 
 - use `SANDBOX_MODE=production`
-- use `SANDBOX_RUNTIME=qemu`
+- use `SANDBOX_RUNTIME=qemu` (the only backend whose runtime class is VM-backed)
 - use the agent-based `core` guest profile unless there is an explicitly approved reason to use a heavier profile
 - use JWT auth, not static bearer tokens
 - terminate TLS either inside `sandboxd` or at a trusted reverse proxy
 
 `docker` is not the hostile multi-tenant production boundary in this repo.
+
+The production gate is enforced through **runtime classes**, not through ad-hoc backend name checks. `SANDBOX_MODE=production` rejects any backend that does not resolve to the `vm` runtime class. `docker` resolves to `trusted-docker` and is therefore always rejected in production mode.
+
+| Backend | Runtime class | Production eligible |
+| --- | --- | --- |
+| `docker` | `trusted-docker` | No |
+| `qemu` | `vm` | Yes |
 
 The supported hostile-production target is Linux with KVM-backed QEMU. macOS remains useful for development and local validation, but it is not the production reference posture.
 
@@ -158,7 +165,7 @@ Common production startup failures are:
 
 - missing or unreadable JWT secret files
 - missing TLS key or certificate when using in-process TLS
-- unsupported runtime choice in production mode
+- unsupported runtime class in production mode (e.g. `docker` resolves to `trusted-docker`, which is not VM-backed)
 - missing QEMU binary, guest image, sidecar contract, or KVM support
 - use of `ssh-compat` or `debug` images without the explicit allow flags
 - unreadable storage or snapshot roots

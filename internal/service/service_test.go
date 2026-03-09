@@ -1328,6 +1328,89 @@ func assertActualStorage(t *testing.T, store *repository.Store, tenantID string,
 	}
 }
 
+// TestCreateSandboxStampsRuntimeClass verifies that the service stamps the
+// correct RuntimeClass on sandbox creation for each backend.
+func TestCreateSandboxStampsRuntimeClass(t *testing.T) {
+	tests := []struct {
+		backend   string
+		wantClass model.RuntimeClass
+	}{
+		{"docker", model.RuntimeClassTrustedDocker},
+		{"qemu", model.RuntimeClassVM},
+	}
+	for _, tt := range tests {
+		t.Run(tt.backend, func(t *testing.T) {
+			ctx := context.Background()
+			runtime := newStubRuntime()
+			svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, tt.backend)
+			var imageRef string
+			if tt.backend == "qemu" {
+				imageRef = "guest-base.qcow2"
+			} else {
+				imageRef = "alpine:3.20"
+			}
+			sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+				BaseImageRef:  imageRef,
+				CPULimit:      model.CPUCores(1),
+				MemoryLimitMB: 512,
+				PIDsLimit:     128,
+				DiskLimitMB:   512,
+				NetworkMode:   model.NetworkModeInternetDisabled,
+				AllowTunnels:  boolPtr(false),
+			})
+			if err != nil {
+				t.Fatalf("create sandbox: %v", err)
+			}
+			if sandbox.RuntimeClass != tt.wantClass {
+				t.Errorf("RuntimeClass: got %q, want %q", sandbox.RuntimeClass, tt.wantClass)
+			}
+		})
+	}
+}
+
+// TestReconcileToleatesLegacySandboxWithNoRuntimeClass verifies that sandboxes
+// with an empty runtime_class (i.e. created before the column was added) are
+// reconciled successfully without errors, and that the class is derived from
+// the backend on subsequent reads.
+func TestReconcileToleratesLegacySandboxWithNoRuntimeClass(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	// Simulate a legacy row by clearing the runtime_class column.
+	sqlDB := store.DB()
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE sandboxes SET runtime_class='' WHERE sandbox_id=?`, sandbox.ID); err != nil {
+		t.Fatalf("clear runtime_class: %v", err)
+	}
+
+	// Reconcile must succeed even when runtime_class is empty.
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile with legacy sandbox: %v", err)
+	}
+
+	// After reconcile the sandbox should still be readable with a derived class.
+	got, err := svc.GetSandbox(ctx, tenantA.ID, sandbox.ID)
+	if err != nil {
+		t.Fatalf("get sandbox after reconcile: %v", err)
+	}
+	if got.RuntimeClass != model.RuntimeClassVM {
+		t.Errorf("expected derived RuntimeClassVM for qemu backend, got %q", got.RuntimeClass)
+	}
+}
+
 func newServiceHarness(t *testing.T, runtime model.RuntimeManager, backend string) (*Service, *repository.Store, model.TenantQuota, model.Tenant, model.Tenant) {
 	t.Helper()
 	root := t.TempDir()
