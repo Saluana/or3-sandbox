@@ -2,10 +2,12 @@
 
 ## 1. Finalize the runtime-selection model and compatibility rules (Req 1, 5, 6, 7)
 
-- [ ] Define the explicit operator-facing runtime selection values for v1 and document how they map to backend family and VM-backed policy.
-- [ ] Decide whether to preserve the existing `runtime_class` field as isolation posture and add a new runtime-selection field, or to evolve the existing field with a compatibility layer.
+- [x] Define the explicit operator-facing runtime selection values for v1 and document how they map to backend family and VM-backed policy.
+- [x] Decide whether to preserve the existing `runtime_class` field as isolation posture and add a new runtime-selection field, or to evolve the existing field with a compatibility layer.
 - [ ] Update `internal/model/runtime_class.go` and related model files with stable helpers for backend mapping, VM-backed checks, and legacy fallback.
 - [ ] Add focused unit tests for runtime-selection parsing, backend mapping, and VM-backed policy helpers.
+
+Decision recorded in `planning/or3-sandbox-v1/design.md`: preserve `runtime_class` as isolation posture, add explicit persisted `runtime_selection`, and use deterministic fallback from legacy `runtime_backend` values.
 
 ## 2. Add additive config for enabled/default runtime selection (Req 1, 3, 4, 6, 12)
 

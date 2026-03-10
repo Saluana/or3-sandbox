@@ -96,6 +96,35 @@ The product-facing runtime selections should be explicit and stable:
 - `containerd-kata-professional`
 - `qemu-professional`
 
+Final v1 decision:
+
+- preserve `runtime_class` as the persisted isolation-posture concept rather than redefining it as the operator-facing runtime selector
+- add a new explicit runtime-selection field for sandboxes and snapshots
+- treat runtime selection as the operator/API/config value and `runtime_class` as a derived compatibility and policy value
+- keep the runtime-selection enum additive so a future backend such as Firecracker can be introduced without redefining the control-plane contract
+
+That means the model intentionally separates three related but different concepts:
+
+- **runtime selection**: the stable operator-facing value used for config, API requests, persistence, and dispatch
+- **backend family**: the concrete implementation family used by the runtime adapter, such as Docker, QEMU, or containerd-backed Kata
+- **isolation posture**: the policy-facing classification used for VM-backed vs trusted/shared-kernel behavior
+
+For v1, the canonical mapping is:
+
+| Runtime selection | Backend family | Isolation posture | VM-backed |
+| --- | --- | --- | --- |
+| `docker-dev` | `docker` | trusted/shared-kernel | no |
+| `containerd-kata-professional` | `kata` | vm-backed | yes |
+| `qemu-professional` | `qemu` | vm-backed | yes |
+
+Compatibility rules for this model:
+
+- new API/config/persistence surfaces use runtime selection as the source of truth for create-time choice and steady-state dispatch
+- `runtime_backend` remains persisted as an operational detail and compatibility field
+- `runtime_class` remains persisted as the isolation-posture field so existing policy helpers and production-safety checks can keep a narrow VM-backed vs trusted meaning
+- helpers in `internal/model/runtime_class.go` and adjacent model code should derive backend family and VM-backed posture from runtime selection first, then fall back to legacy persisted fields when explicit runtime selection is absent
+- future runtime selections may map to an existing backend family or a new one, but must continue to derive a single isolation posture and deterministic legacy fallback path
+
 Because the repo already uses `runtime_class` in a narrower VM-vs-trusted sense, the implementation should preserve compatibility by separating two concepts:
 
 - **runtime selection key**: which adapter/config bundle to use for a sandbox
@@ -113,14 +142,34 @@ const (
 )
 ```
 
-And keep a derived policy helper similar to today:
+And keep derived policy helpers similar to today:
 
 ```go
 func (s RuntimeSelection) IsVMBacked() bool
 func (s RuntimeSelection) Backend() string
 ```
 
-If preserving the existing `runtime_class` column is less disruptive than redefining it, the store can keep the current isolation-class semantics and add one explicit selection column. The public API can still expose the operator-facing runtime selection requested in the v1 document.
+The persistence decision is also explicit for v1:
+
+- keep the existing `runtime_class` column semantics
+- add one explicit `runtime_selection` column to `sandboxes`
+- add one explicit `runtime_selection` column to `snapshots`
+- expose runtime selection publicly in the API and CLI while keeping the old fields available for compatibility and migration
+
+Legacy fallback rules are deterministic:
+
+- if a row already has explicit runtime selection, use it for dispatch and policy derivation
+- if explicit runtime selection is absent and `runtime_backend=docker`, treat the row as `docker-dev`
+- if explicit runtime selection is absent and `runtime_backend=qemu`, treat the row as `qemu-professional`
+- if explicit runtime selection is absent and a later backend family is introduced, startup migration or scan-time reconciliation must define one canonical selection for that family before the row can be considered fully upgraded
+- if stored fields disagree after migration, explicit runtime selection wins and the repository/service layers should surface the row as needing repair rather than silently switching adapters
+
+Config compatibility follows the same pattern:
+
+- explicit enabled/default runtime-selection config takes precedence when present
+- legacy `SANDBOX_RUNTIME=docker` maps to enabled/default `docker-dev`
+- legacy `SANDBOX_RUNTIME=qemu` maps to enabled/default `qemu-professional`
+- there is no implicit legacy mapping for Kata; enabling Kata requires explicit multi-runtime configuration so operators make a deliberate professional-runtime choice
 
 ### 2. Dispatcher instead of daemon-wide backend
 
