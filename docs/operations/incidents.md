@@ -59,6 +59,37 @@ Inspect:
 - local snapshot artifacts under `SANDBOX_SNAPSHOT_ROOT/<sandbox-id>/<snapshot-id>/`
 - optional export bundles referenced by `export_location`
 
+## Verification follow-up findings
+
+When a verification drill fails, treat the drill output as incident evidence and record which guest profile and control mode were under test.
+
+### Failed tunnel-abuse or public-access checks
+
+Follow up with:
+
+1. inspect recent `tunnel.create`, `tunnel.revoke`, `tunnel.proxy`, and `policy.tunnel` audit events
+2. confirm tenant tunnel quotas, default auth mode, default visibility, and public-tunnel policy flags
+3. verify that lifecycle transitions revoked active tunnels where expected
+4. rerun the bounded drill only after policy or quota changes are documented
+
+### Failed restart-recovery drills
+
+Follow up with:
+
+1. capture `sandbox.reconcile`, `snapshot.restore`, and `sandbox.stop` audit events around the failure window
+2. confirm whether the daemon restart path was expected to be disruptive and whether `SANDBOXD_RESTART_COMMAND` was the exact command used
+3. inspect `/v1/runtime/health` and `/v1/runtime/capacity` before admitting traffic again
+4. preserve any affected snapshot artifacts before retrying cleanup or restore actions
+
+### Storage-pressure verification findings
+
+Follow up with:
+
+1. capture current free space on the database, storage, and snapshot filesystems
+2. record `/v1/runtime/capacity` and `/metrics` values for storage pressure and admission denials
+3. identify the largest snapshot roots and sandbox workspace roots before deleting anything
+4. rerun the bounded verification only after the free-space posture is back inside the expected operating window
+
 ## Runbook: daemon crash
 
 1. Confirm the process is gone and capture the last daemon logs.

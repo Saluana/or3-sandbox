@@ -1498,6 +1498,255 @@ func TestTunnelPolicyRejectsDefaultPublicVisibility(t *testing.T) {
 	}
 }
 
+func TestCreateTunnelRejectsDenialPaths(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("sandbox disallows tunnels", func(t *testing.T) {
+		runtime := newStubRuntime()
+		svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+		quota.AllowTunnels = true
+		if err := store.SeedTenants(ctx, []config.TenantConfig{{ID: tenantA.ID, Name: tenantA.Name, Token: "token-a"}}, quota); err != nil {
+			t.Fatalf("seed tenants: %v", err)
+		}
+		sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+			BaseImageRef:  "guest-base.qcow2",
+			CPULimit:      model.CPUCores(1),
+			MemoryLimitMB: 512,
+			PIDsLimit:     128,
+			DiskLimitMB:   512,
+			NetworkMode:   model.NetworkModeInternetDisabled,
+			AllowTunnels:  boolPtr(false),
+		})
+		if err != nil {
+			t.Fatalf("create sandbox: %v", err)
+		}
+		if _, err := svc.CreateTunnel(ctx, tenantA.ID, sandbox.ID, model.CreateTunnelRequest{TargetPort: 8080}); err == nil || !strings.Contains(err.Error(), "does not allow tunnels") {
+			t.Fatalf("expected sandbox tunnel denial, got %v", err)
+		}
+	})
+
+	t.Run("tenant quota disallows tunnels", func(t *testing.T) {
+		runtime := newStubRuntime()
+		svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+		quota.AllowTunnels = true
+		if err := store.SeedTenants(ctx, []config.TenantConfig{{ID: tenantA.ID, Name: tenantA.Name, Token: "token-a"}}, quota); err != nil {
+			t.Fatalf("seed tenants: %v", err)
+		}
+		sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+			BaseImageRef:  "guest-base.qcow2",
+			CPULimit:      model.CPUCores(1),
+			MemoryLimitMB: 512,
+			PIDsLimit:     128,
+			DiskLimitMB:   512,
+			NetworkMode:   model.NetworkModeInternetDisabled,
+			AllowTunnels:  boolPtr(true),
+		})
+		if err != nil {
+			t.Fatalf("create sandbox: %v", err)
+		}
+		quota.AllowTunnels = false
+		if err := store.SeedTenants(ctx, []config.TenantConfig{{ID: tenantA.ID, Name: tenantA.Name, Token: "token-a"}}, quota); err != nil {
+			t.Fatalf("update tenant quota: %v", err)
+		}
+		if _, err := svc.CreateTunnel(ctx, tenantA.ID, sandbox.ID, model.CreateTunnelRequest{TargetPort: 8080}); err == nil || !strings.Contains(err.Error(), "tenant tunnel policy denied") {
+			t.Fatalf("expected tenant tunnel denial, got %v", err)
+		}
+	})
+
+	t.Run("tunnel quota exceeded", func(t *testing.T) {
+		runtime := newStubRuntime()
+		svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+		quota.AllowTunnels = true
+		quota.MaxTunnels = 1
+		if err := store.SeedTenants(ctx, []config.TenantConfig{{ID: tenantA.ID, Name: tenantA.Name, Token: "token-a"}}, quota); err != nil {
+			t.Fatalf("seed tenants: %v", err)
+		}
+		sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+			BaseImageRef:  "guest-base.qcow2",
+			CPULimit:      model.CPUCores(1),
+			MemoryLimitMB: 512,
+			PIDsLimit:     128,
+			DiskLimitMB:   512,
+			NetworkMode:   model.NetworkModeInternetDisabled,
+			AllowTunnels:  boolPtr(true),
+		})
+		if err != nil {
+			t.Fatalf("create sandbox: %v", err)
+		}
+		if _, err := svc.CreateTunnel(ctx, tenantA.ID, sandbox.ID, model.CreateTunnelRequest{TargetPort: 8080}); err != nil {
+			t.Fatalf("create first tunnel: %v", err)
+		}
+		if _, err := svc.CreateTunnel(ctx, tenantA.ID, sandbox.ID, model.CreateTunnelRequest{TargetPort: 8081}); err == nil || !strings.Contains(err.Error(), "tunnel quota exceeded") {
+			t.Fatalf("expected tunnel quota denial, got %v", err)
+		}
+	})
+
+	t.Run("unsupported protocol auth and visibility", func(t *testing.T) {
+		runtime := newStubRuntime()
+		svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+		quota.AllowTunnels = true
+		if err := store.SeedTenants(ctx, []config.TenantConfig{{ID: tenantA.ID, Name: tenantA.Name, Token: "token-a"}}, quota); err != nil {
+			t.Fatalf("seed tenants: %v", err)
+		}
+		sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+			BaseImageRef:  "guest-base.qcow2",
+			CPULimit:      model.CPUCores(1),
+			MemoryLimitMB: 512,
+			PIDsLimit:     128,
+			DiskLimitMB:   512,
+			NetworkMode:   model.NetworkModeInternetDisabled,
+			AllowTunnels:  boolPtr(true),
+		})
+		if err != nil {
+			t.Fatalf("create sandbox: %v", err)
+		}
+		cases := []struct {
+			name string
+			req  model.CreateTunnelRequest
+			want string
+		}{
+			{name: "protocol", req: model.CreateTunnelRequest{TargetPort: 8080, Protocol: "tcp"}, want: "unsupported tunnel protocol"},
+			{name: "auth", req: model.CreateTunnelRequest{TargetPort: 8080, Protocol: model.TunnelProtocolHTTP, AuthMode: "mtls"}, want: "unsupported auth_mode"},
+			{name: "visibility", req: model.CreateTunnelRequest{TargetPort: 8080, Protocol: model.TunnelProtocolHTTP, AuthMode: "token", Visibility: "cluster"}, want: "unsupported visibility"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				if _, err := svc.CreateTunnel(ctx, tenantA.ID, sandbox.ID, tc.req); err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("expected %q denial, got %v", tc.want, err)
+				}
+			})
+		}
+	})
+}
+
+func TestLifecycleTransitionsRevokeActiveTunnels(t *testing.T) {
+	ctx := context.Background()
+
+	assertRevoked := func(t *testing.T, store *repository.Store, tenantID, tunnelID, wantReason string) {
+		t.Helper()
+		tunnel, err := store.GetTunnel(ctx, tenantID, tunnelID)
+		if err != nil {
+			t.Fatalf("get tunnel: %v", err)
+		}
+		if tunnel.RevokedAt == nil {
+			t.Fatalf("expected tunnel %s to be revoked", tunnelID)
+		}
+		events, err := store.ListAuditEvents(ctx, tenantID)
+		if err != nil {
+			t.Fatalf("list audit events: %v", err)
+		}
+		found := false
+		for _, event := range events {
+			if event.Action == "tunnel.revoke" && event.ResourceID == tunnelID && strings.Contains(event.Message, wantReason) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected tunnel revoke audit for %s with reason %q, got %+v", tunnelID, wantReason, events)
+		}
+	}
+
+	t.Run("stop revokes active tunnels", func(t *testing.T) {
+		runtime := newStubRuntime()
+		runtime.startState = model.RuntimeState{RuntimeID: "rt-stop-revoke", Status: model.SandboxStatusRunning, Running: true}
+		runtime.stopState = model.RuntimeState{RuntimeID: "rt-stop-revoke", Status: model.SandboxStatusStopped}
+		svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+		quota.AllowTunnels = true
+		if err := store.SeedTenants(ctx, []config.TenantConfig{{ID: tenantA.ID, Name: tenantA.Name, Token: "token-a"}}, quota); err != nil {
+			t.Fatalf("seed tenants: %v", err)
+		}
+		sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+			BaseImageRef:  "guest-base.qcow2",
+			CPULimit:      model.CPUCores(1),
+			MemoryLimitMB: 512,
+			PIDsLimit:     128,
+			DiskLimitMB:   512,
+			NetworkMode:   model.NetworkModeInternetDisabled,
+			AllowTunnels:  boolPtr(true),
+			Start:         true,
+		})
+		if err != nil {
+			t.Fatalf("create sandbox: %v", err)
+		}
+		tunnel, err := svc.CreateTunnel(ctx, tenantA.ID, sandbox.ID, model.CreateTunnelRequest{TargetPort: 8080})
+		if err != nil {
+			t.Fatalf("create tunnel: %v", err)
+		}
+		if _, err := svc.StopSandbox(ctx, tenantA.ID, sandbox.ID, false); err != nil {
+			t.Fatalf("stop sandbox: %v", err)
+		}
+		assertRevoked(t, store, tenantA.ID, tunnel.ID, "sandbox_stop")
+	})
+
+	t.Run("suspend revokes active tunnels", func(t *testing.T) {
+		runtime := newStubRuntime()
+		runtime.startState = model.RuntimeState{RuntimeID: "rt-suspend-revoke", Status: model.SandboxStatusRunning, Running: true}
+		svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+		quota.AllowTunnels = true
+		if err := store.SeedTenants(ctx, []config.TenantConfig{{ID: tenantA.ID, Name: tenantA.Name, Token: "token-a"}}, quota); err != nil {
+			t.Fatalf("seed tenants: %v", err)
+		}
+		sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+			BaseImageRef:  "guest-base.qcow2",
+			CPULimit:      model.CPUCores(1),
+			MemoryLimitMB: 512,
+			PIDsLimit:     128,
+			DiskLimitMB:   512,
+			NetworkMode:   model.NetworkModeInternetDisabled,
+			AllowTunnels:  boolPtr(true),
+			Start:         true,
+		})
+		if err != nil {
+			t.Fatalf("create sandbox: %v", err)
+		}
+		tunnel, err := svc.CreateTunnel(ctx, tenantA.ID, sandbox.ID, model.CreateTunnelRequest{TargetPort: 8080})
+		if err != nil {
+			t.Fatalf("create tunnel: %v", err)
+		}
+		if _, err := svc.SuspendSandbox(ctx, tenantA.ID, sandbox.ID); err != nil {
+			t.Fatalf("suspend sandbox: %v", err)
+		}
+		assertRevoked(t, store, tenantA.ID, tunnel.ID, "sandbox_suspend")
+	})
+
+	t.Run("snapshot restore revokes active tunnels", func(t *testing.T) {
+		runtime := newStubRuntime()
+		runtime.snapshotInfo = model.SnapshotInfo{ImageRef: "snapshot-image"}
+		runtime.restoreState = model.RuntimeState{RuntimeID: "rt-restore-revoke", Status: model.SandboxStatusStopped}
+		svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+		quota.AllowTunnels = true
+		if err := store.SeedTenants(ctx, []config.TenantConfig{{ID: tenantA.ID, Name: tenantA.Name, Token: "token-a"}}, quota); err != nil {
+			t.Fatalf("seed tenants: %v", err)
+		}
+		sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+			BaseImageRef:  "guest-base.qcow2",
+			CPULimit:      model.CPUCores(1),
+			MemoryLimitMB: 512,
+			PIDsLimit:     128,
+			DiskLimitMB:   512,
+			NetworkMode:   model.NetworkModeInternetDisabled,
+			AllowTunnels:  boolPtr(true),
+			Start:         false,
+		})
+		if err != nil {
+			t.Fatalf("create sandbox: %v", err)
+		}
+		tunnel, err := svc.CreateTunnel(ctx, tenantA.ID, sandbox.ID, model.CreateTunnelRequest{TargetPort: 8080})
+		if err != nil {
+			t.Fatalf("create tunnel: %v", err)
+		}
+		snapshot, err := svc.CreateSnapshot(ctx, tenantA.ID, sandbox.ID, model.CreateSnapshotRequest{Name: "restore-revoke"})
+		if err != nil {
+			t.Fatalf("create snapshot: %v", err)
+		}
+		if _, err := svc.RestoreSnapshot(ctx, tenantA.ID, snapshot.ID, model.RestoreSnapshotRequest{TargetSandboxID: sandbox.ID}); err != nil {
+			t.Fatalf("restore snapshot: %v", err)
+		}
+		assertRevoked(t, store, tenantA.ID, tunnel.ID, "snapshot_restore")
+	})
+}
+
 func TestCapacityReportAndMetricsShowQuotaPressure(t *testing.T) {
 	ctx := context.Background()
 	runtime := newStubRuntime()

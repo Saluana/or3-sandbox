@@ -7,9 +7,10 @@ This guide describes the supported expectations for upgrading the single-node co
 Do this every time:
 
 1. Run the CI-friendly smoke path from [Production Verification](verification.md).
-2. Take a fresh backup of SQLite, the snapshot root, and any optional export bundles.
-3. Record the current daemon version and guest base image version.
-4. Confirm there are no active incident conditions such as disk pressure, auth failures, or snapshot corruption.
+2. If the deployment is a production Linux/KVM host, run `./scripts/qemu-host-verification.sh --profile core --control-mode agent` before the upgrade window and resolve any failures first.
+3. Take a fresh backup of SQLite, the snapshot root, and any optional export bundles.
+4. Record the current daemon version and guest base image version.
+5. Confirm there are no active incident conditions such as disk pressure, auth failures, or snapshot corruption.
 
 ## Database compatibility
 
@@ -60,8 +61,10 @@ If the guest image changes materially, validate:
 4. If the guest image changed, deploy it before restarting the daemon.
 5. Start `sandboxd`.
 6. Check `/healthz`, `/v1/runtime/health`, `/v1/runtime/capacity`, and `/metrics`.
-7. Run the smoke path again.
-8. Perform one documented operator drill, such as snapshot restore or daemon restart recovery.
+7. Run the fast smoke path again.
+8. Run `go run ./cmd/sandboxctl doctor --production-qemu`.
+9. Run `./scripts/qemu-host-verification.sh --profile core --control-mode agent` on the prepared Linux/KVM host.
+10. Perform one documented operator drill, such as snapshot restore or daemon restart recovery, before restoring production-ready language.
 
 ## Rollback expectations
 

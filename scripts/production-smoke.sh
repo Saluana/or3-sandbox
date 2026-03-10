@@ -15,6 +15,8 @@ fi
 
 cd "$(dirname "$0")/.."
 
+echo "[production-smoke] running the fast CI-friendly package sanity gate only; use scripts/qemu-host-verification.sh and the documented operator drills for production readiness" >&2
+
 exec "$GO_BIN" test \
 	./internal/config \
 	./internal/auth \

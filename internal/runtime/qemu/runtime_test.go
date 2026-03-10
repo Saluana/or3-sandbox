@@ -396,6 +396,13 @@ func TestAgentTTYHandleCloseIsIdempotent(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()
 	defer clientConn.Close()
+	go func() {
+		for {
+			if _, err := agentproto.ReadMessage(serverConn); err != nil {
+				return
+			}
+		}
+	}()
 
 	reader, writer := io.Pipe()
 	handle := &agentTTYHandle{

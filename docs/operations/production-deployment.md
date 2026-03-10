@@ -19,7 +19,14 @@ The production gate is enforced through **runtime classes**, not through ad-hoc 
 | `docker` | `trusted-docker` | No |
 | `qemu` | `vm` | Yes |
 
-The supported hostile-production target is Linux with KVM-backed QEMU. macOS remains useful for development and local validation, but it is not the production reference posture.
+The supported hostile-production target is Linux with KVM-backed QEMU. macOS remains useful for development and local validation, but it is not the production reference posture. Host kernel, hypervisor, firmware, and machine-hardening posture remain external production dependencies; this repo’s verification suite does not replace them.
+
+Do not describe a deployment as production-ready until it has passed:
+
+- the fast package sanity gate from [Production Verification](verification.md)
+- `go run ./cmd/sandboxctl doctor --production-qemu`
+- `./scripts/qemu-host-verification.sh --profile core --control-mode agent` on the prepared Linux/KVM host
+- the documented operator drills for smoke, abuse, and restart/recovery evidence
 
 For production planning, separate sandbox isolation from tenant isolation:
 
@@ -148,6 +155,7 @@ Bring the system up in this order:
 5. Confirm runtime posture with `sandboxctl runtime-health` or `GET /v1/runtime/health`.
 6. Confirm capacity and storage visibility with `sandboxctl quota`, `GET /v1/runtime/capacity`, or `GET /metrics`.
 7. Run `sandboxctl doctor --production-qemu` and resolve any blocking failures before admitting production traffic.
+8. Run `./scripts/qemu-host-verification.sh --profile core --control-mode agent` and the required operator drills before using production-ready language for the host.
 
 If the daemon is supervised by `systemd`, make secret mounts and persistent storage available before the unit starts.
 
@@ -175,6 +183,8 @@ Check these first:
 - `/v1/runtime/capacity` for quota pressure, snapshot counts, degraded sandboxes, and guest profile/capability mix
 - `/metrics` for scrape-friendly counters and ratios, including guest profile mix, declared capability counts, audit-event counters, admission denials, lifecycle failures, snapshot activity, exec/TTY activity, and tunnel changes
 - the JSON logs from `sandboxd` for `component=daemon`, `component=auth`, `component=api`, and `component=service`
+
+These inspection surfaces are part of the production evidence trail, not a substitute for the gated host verification and operator drills above.
 
 ## Curated image approval and rebuild cadence
 

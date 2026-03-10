@@ -363,6 +363,9 @@ func (s *Service) StopSandbox(ctx context.Context, tenantID, sandboxID string, f
 		auditKV("force", force),
 		auditKV("result_status", sandbox.Status),
 	))
+	if err := s.revokeActiveTunnels(ctx, tenantID, sandbox, "sandbox_stop"); err != nil {
+		return model.Sandbox{}, err
+	}
 	return s.store.GetSandbox(ctx, tenantID, sandbox.ID)
 }
 
@@ -396,20 +399,8 @@ func (s *Service) DeleteSandbox(ctx context.Context, tenantID, sandboxID string,
 	if err != nil {
 		return err
 	}
-	tunnels, err := s.store.ListTunnels(ctx, tenantID, sandboxID)
-	if err != nil {
+	if err := s.revokeActiveTunnels(ctx, tenantID, sandbox, "sandbox_delete"); err != nil {
 		return err
-	}
-	for _, tunnel := range tunnels {
-		if tunnel.RevokedAt == nil {
-			if err := s.store.RevokeTunnel(ctx, tenantID, tunnel.ID); err != nil {
-				return err
-			}
-			s.recordAudit(ctx, tenantID, sandbox.ID, "tunnel.revoke", tunnel.ID, "ok", auditDetail(
-				auditKV("reason", "sandbox_delete"),
-				tunnelAuditDetail(tunnel),
-			))
-		}
 	}
 	if sandbox.Status == model.SandboxStatusRunning || sandbox.Status == model.SandboxStatusSuspended {
 		if _, err := s.StopSandbox(ctx, tenantID, sandboxID, true); err != nil {
@@ -1063,6 +1054,9 @@ func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID stri
 		auditKV("forced_stop", forcedStop),
 		snapshotAuditDetail(snapshot),
 	))
+	if err := s.revokeActiveTunnels(ctx, tenantID, sandbox, "snapshot_restore"); err != nil {
+		return model.Sandbox{}, err
+	}
 	return s.store.GetSandbox(ctx, tenantID, sandbox.ID)
 }
 
@@ -1459,7 +1453,32 @@ func (s *Service) transitionSandbox(ctx context.Context, tenantID, sandboxID, au
 		auditKV("transitional_status", transitional),
 		auditKV("result_status", finalStatus),
 	))
+	if finalStatus == model.SandboxStatusSuspended {
+		if err := s.revokeActiveTunnels(ctx, tenantID, sandbox, "sandbox_suspend"); err != nil {
+			return model.Sandbox{}, err
+		}
+	}
 	return s.store.GetSandbox(ctx, tenantID, sandbox.ID)
+}
+
+func (s *Service) revokeActiveTunnels(ctx context.Context, tenantID string, sandbox model.Sandbox, reason string) error {
+	tunnels, err := s.store.ListTunnels(ctx, tenantID, sandbox.ID)
+	if err != nil {
+		return err
+	}
+	for _, tunnel := range tunnels {
+		if tunnel.RevokedAt != nil {
+			continue
+		}
+		if err := s.store.RevokeTunnel(ctx, tenantID, tunnel.ID); err != nil {
+			return err
+		}
+		s.recordAudit(ctx, tenantID, sandbox.ID, "tunnel.revoke", tunnel.ID, "ok", auditDetail(
+			auditKV("reason", reason),
+			tunnelAuditDetail(tunnel),
+		))
+	}
+	return nil
 }
 
 func (s *Service) reserveSandboxCreate(ctx context.Context, tenantID string, sandbox model.Sandbox, req model.CreateSandboxRequest) error {
