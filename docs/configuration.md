@@ -30,6 +30,10 @@ There are four big groups:
 | `SANDBOX_STORAGE_ROOT` | `./data/storage` | sandbox runtime files |
 | `SANDBOX_SNAPSHOT_ROOT` | `./data/snapshots` | snapshot files |
 | `SANDBOX_OPERATOR_HOST` | `http://127.0.0.1:8080` | public host used in generated endpoints |
+| `SANDBOX_STORAGE_WARNING_FILE_COUNT` | `10000` | warning threshold for total stored files across workspace, cache, scratch, and snapshots |
+| `SANDBOX_SNAPSHOT_MAX_MB` | `1024` | max extracted snapshot bundle size |
+| `SANDBOX_SNAPSHOT_MAX_FILES` | `8192` | max files allowed while restoring a snapshot bundle |
+| `SANDBOX_SNAPSHOT_MAX_EXPANSION_RATIO` | `32` | max extracted-to-compressed expansion ratio for snapshot restore |
 
 ## Deployment mode
 
@@ -58,6 +62,11 @@ Important truth:
 - If `SANDBOX_RUNTIME=docker`, startup fails unless `SANDBOX_TRUSTED_DOCKER_RUNTIME=true`
 - This is on purpose, so the operator must clearly opt in to Docker's shared-kernel model
 - In production mode, startup also fails unless `SANDBOX_RUNTIME=qemu`
+
+Platform note:
+
+- on Linux, trusted Docker sandboxes also request `--storage-opt size=...` as a best-effort writable-layer quota hint
+- on macOS and other non-Linux developer hosts, Docker storage limits remain best-effort because the local VM-backed Docker engine may not honor the same kernel quota features
 
 ## Sandbox defaults
 
@@ -195,6 +204,14 @@ Curated image/profile guidance:
 | `SANDBOX_CLEANUP_INTERVAL` | `5m` | cleanup loop timing |
 
 The reconcile loop also helps clean up orphaned exec records and incomplete snapshots after a daemon restart.
+
+## Snapshot and storage safety limits
+
+These settings help fail closed when a restore bundle or a tenant workload creates too much pressure:
+
+- `SANDBOX_STORAGE_WARNING_FILE_COUNT` raises audit and metrics pressure signals when file counts grow too large
+- `SANDBOX_SNAPSHOT_MAX_MB`, `SANDBOX_SNAPSHOT_MAX_FILES`, and `SANDBOX_SNAPSHOT_MAX_EXPANSION_RATIO` bound snapshot restore extraction
+- restore validation rejects unsupported special files and normalizes restored file permissions
 
 ## QEMU-specific settings
 

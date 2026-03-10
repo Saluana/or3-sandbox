@@ -4,3 +4,4 @@ planning/completed
 .playwright-mcp
 data
 sandbox.db
+.gocache

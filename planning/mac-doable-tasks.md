@@ -63,30 +63,30 @@ Design: [lightweight-image-profiles/design.md](lightweight-image-profiles/design
 
 Design: [storage-network-snapshot-hardening/design.md](storage-network-snapshot-hardening/design.md)
 
-- [ ] Add small internal storage-class definitions in `internal/model` or `internal/service`.
-- [ ] Update `internal/service/service.go` to create distinct roots for durable workspace, cache, scratch, and any operator-managed secrets material.
-- [ ] Update runtime specs so Docker and QEMU can map those roots consistently.
-- [ ] Document durability and snapshot inclusion rules in `docs/tutorials/files-and-tunnels.md` and related docs.
-- [ ] Ensure secrets material is mounted or exposed separately from workspace and is excluded from snapshot/export flows.
-- [ ] Add service tests covering class separation and snapshot exclusion behavior.
-- [ ] Review QEMU disk sizing in `internal/runtime/qemu` and document it as the hard storage boundary for VM-backed sandboxes.
-- [ ] Add the strongest supported Docker-side quota enforcement available in `internal/runtime/docker/runtime.go` without breaking trusted local dev workflows.
-- [ ] Extend storage measurement and reconcile logic in `internal/service/service.go` and `internal/repository/store.go` to detect both byte growth and file-count/inode pressure.
-- [ ] Add a small internal network-policy resolver that maps existing `NetworkMode` values to concrete behavior.
-- [ ] Update Docker and QEMU runtime wiring to keep sandbox services loopback-only unless published via the tunnel control plane.
-- [ ] Keep current API request shapes stable while making egress and exposure policy more explicit under the hood.
-- [ ] Add audit coverage for exposure changes and policy denials in `internal/service/audit.go` and related tests.
-- [ ] Reject path traversal, unsupported special files, dangerous links, and oversized expansion ratios.
-- [ ] Normalize ownership and permissions on restore.
-- [ ] Persist enough metadata on snapshots to reject incompatible profile/runtime restores where needed.
-- [ ] Add regression tests for malformed and hostile archive inputs.
-- [ ] Add targeted tests or scripts for Docker trusted-mode storage pressure where hard quotas are not available.
-- [ ] Verify tunnel exposure remains loopback-only unless explicitly published.
-- [ ] Add snapshot failure and partial-restore drills to the operations scripts or docs.
-- [ ] Update `docs/operations/snapshot-failed.md` with restore validation and cleanup behavior.
-- [ ] Update `docs/tutorials/files-and-tunnels.md` with storage classes, durability rules, and tunnel exposure rules.
-- [ ] Update `docs/configuration.md` with any new snapshot or storage-pressure limits.
-- [ ] Make platform-specific limits explicit, especially for Docker on non-Linux hosts.
+- [x] Add small internal storage-class definitions in `internal/model` or `internal/service`.
+- [x] Update `internal/service/service.go` to create distinct roots for durable workspace, cache, scratch, and any operator-managed secrets material.
+- [x] Update runtime specs so Docker and QEMU can map those roots consistently.
+- [x] Document durability and snapshot inclusion rules in `docs/tutorials/files-and-tunnels.md` and related docs.
+- [x] Ensure secrets material is mounted or exposed separately from workspace and is excluded from snapshot/export flows.
+- [x] Add service tests covering class separation and snapshot exclusion behavior.
+- [x] Review QEMU disk sizing in `internal/runtime/qemu` and document it as the hard storage boundary for VM-backed sandboxes.
+- [x] Add the strongest supported Docker-side quota enforcement available in `internal/runtime/docker/runtime.go` without breaking trusted local dev workflows.
+- [x] Extend storage measurement and reconcile logic in `internal/service/service.go` and `internal/repository/store.go` to detect both byte growth and file-count/inode pressure.
+- [x] Add a small internal network-policy resolver that maps existing `NetworkMode` values to concrete behavior.
+- [x] Update Docker and QEMU runtime wiring to keep sandbox services loopback-only unless published via the tunnel control plane.
+- [x] Keep current API request shapes stable while making egress and exposure policy more explicit under the hood.
+- [x] Add audit coverage for exposure changes and policy denials in `internal/service/audit.go` and related tests.
+- [x] Reject path traversal, unsupported special files, dangerous links, and oversized expansion ratios.
+- [x] Normalize ownership and permissions on restore.
+- [x] Persist enough metadata on snapshots to reject incompatible profile/runtime restores where needed.
+- [x] Add regression tests for malformed and hostile archive inputs.
+- [x] Add targeted tests or scripts for Docker trusted-mode storage pressure where hard quotas are not available.
+- [x] Verify tunnel exposure remains loopback-only unless explicitly published.
+- [x] Add snapshot failure and partial-restore drills to the operations scripts or docs.
+- [x] Update `docs/operations/snapshot-failed.md` with restore validation and cleanup behavior.
+- [x] Update `docs/tutorials/files-and-tunnels.md` with storage classes, durability rules, and tunnel exposure rules.
+- [x] Update `docs/configuration.md` with any new snapshot or storage-pressure limits.
+- [x] Make platform-specific limits explicit, especially for Docker on non-Linux hosts.
 
 ## Phase 4: prove production behavior
 

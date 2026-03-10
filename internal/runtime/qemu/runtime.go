@@ -97,6 +97,8 @@ type sandboxLayout struct {
 	rootfsDir         string
 	workspaceDir      string
 	cacheDir          string
+	scratchDir        string
+	secretsDir        string
 	runtimeDir        string
 	rootDiskPath      string
 	workspaceDiskPath string
@@ -839,6 +841,8 @@ func layoutForSpec(spec model.SandboxSpec) sandboxLayout {
 		rootfsDir:         spec.StorageRoot,
 		workspaceDir:      spec.WorkspaceRoot,
 		cacheDir:          spec.CacheRoot,
+		scratchDir:        spec.ScratchRoot,
+		secretsDir:        spec.SecretsRoot,
 		runtimeDir:        filepath.Join(baseDir, ".runtime"),
 		rootDiskPath:      filepath.Join(spec.StorageRoot, "overlay.qcow2"),
 		workspaceDiskPath: filepath.Join(spec.WorkspaceRoot, "workspace.img"),
@@ -857,6 +861,8 @@ func layoutForSandbox(sandbox model.Sandbox) sandboxLayout {
 		StorageRoot:   sandbox.StorageRoot,
 		WorkspaceRoot: sandbox.WorkspaceRoot,
 		CacheRoot:     sandbox.CacheRoot,
+		ScratchRoot:   filepath.Join(filepath.Dir(sandbox.StorageRoot), "scratch"),
+		SecretsRoot:   filepath.Join(filepath.Dir(sandbox.StorageRoot), "secrets"),
 	})
 }
 
@@ -925,7 +931,7 @@ func (r *Runtime) probeReady(ctx context.Context, sandbox model.Sandbox, layout 
 }
 
 func ensureLayout(layout sandboxLayout) error {
-	for _, dir := range []string{layout.rootfsDir, layout.workspaceDir, layout.cacheDir, layout.runtimeDir} {
+	for _, dir := range []string{layout.rootfsDir, layout.workspaceDir, layout.cacheDir, layout.scratchDir, layout.secretsDir, layout.runtimeDir} {
 		if dir == "" {
 			continue
 		}
@@ -1157,20 +1163,26 @@ func sandboxWithRuntimeID(sandbox model.Sandbox, runtimeID string) model.Sandbox
 }
 
 func allocatedPathSize(path string) (int64, error) {
+	bytes, _, err := allocatedPathUsage(path)
+	return bytes, err
+}
+
+func allocatedPathUsage(path string) (int64, int64, error) {
 	if strings.TrimSpace(path) == "" {
-		return 0, nil
+		return 0, 0, nil
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return 0, nil
+			return 0, 0, nil
 		}
-		return 0, err
+		return 0, 0, err
 	}
 	if !info.IsDir() {
-		return allocatedFileSize(info), nil
+		return allocatedFileSize(info), 1, nil
 	}
 	var total int64
+	var entries int64
 	err = filepath.Walk(path, func(current string, info os.FileInfo, err error) error {
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -1181,10 +1193,11 @@ func allocatedPathSize(path string) (int64, error) {
 		if info.IsDir() {
 			return nil
 		}
+		entries++
 		total += allocatedFileSize(info)
 		return nil
 	})
-	return total, err
+	return total, entries, err
 }
 
 func allocatedFileSize(info os.FileInfo) int64 {

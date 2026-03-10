@@ -89,12 +89,15 @@ func buildRuntime(cfg config.Config) (model.RuntimeManager, error) {
 	switch cfg.RuntimeBackend {
 	case "docker":
 		return runtimedocker.New(runtimedocker.Options{
-			User:                    cfg.DockerUser,
-			TmpfsSizeMB:             cfg.DockerTmpfsSizeMB,
-			SeccompProfile:          cfg.DockerSeccompProfile,
-			AppArmorProfile:         cfg.DockerAppArmorProfile,
-			SELinuxLabel:            cfg.DockerSELinuxLabel,
-			AllowDangerousOverrides: cfg.DockerAllowDangerousOverrides,
+			User:                      cfg.DockerUser,
+			TmpfsSizeMB:               cfg.DockerTmpfsSizeMB,
+			SeccompProfile:            cfg.DockerSeccompProfile,
+			AppArmorProfile:           cfg.DockerAppArmorProfile,
+			SELinuxLabel:              cfg.DockerSELinuxLabel,
+			AllowDangerousOverrides:   cfg.DockerAllowDangerousOverrides,
+			SnapshotMaxBytes:          cfg.SnapshotMaxBytes,
+			SnapshotMaxFiles:          cfg.SnapshotMaxFiles,
+			SnapshotMaxExpansionRatio: cfg.SnapshotMaxExpansionRatio,
 		}), nil
 	case "qemu":
 		return runtimeqemu.New(runtimeqemu.Options{

@@ -106,27 +106,31 @@ func (r *Runtime) MkdirWorkspace(ctx context.Context, sandbox model.Sandbox, rel
 func (r *Runtime) MeasureStorage(ctx context.Context, sandbox model.Sandbox) (model.StorageUsage, error) {
 	_ = ctx
 	layout := layoutForSandbox(sandbox)
-	rootfsBytes, err := allocatedPathSize(layout.rootDiskPath)
+	rootfsBytes, rootfsEntries, err := allocatedPathUsage(layout.rootDiskPath)
 	if err != nil {
 		return model.StorageUsage{}, err
 	}
-	workspaceBytes, err := allocatedPathSize(layout.workspaceDiskPath)
+	workspaceBytes, workspaceEntries, err := allocatedPathUsage(layout.workspaceDiskPath)
 	if err != nil {
 		return model.StorageUsage{}, err
 	}
-	cacheBytes, err := allocatedPathSize(sandbox.CacheRoot)
+	cacheBytes, cacheEntries, err := allocatedPathUsage(sandbox.CacheRoot)
 	if err != nil {
 		return model.StorageUsage{}, err
 	}
-	snapshotBytes, err := allocatedPathSize(filepath.Join(sandbox.StorageRoot, ".snapshots"))
+	snapshotBytes, snapshotEntries, err := allocatedPathUsage(filepath.Join(sandbox.StorageRoot, ".snapshots"))
 	if err != nil {
 		return model.StorageUsage{}, err
 	}
 	return model.StorageUsage{
-		RootfsBytes:    rootfsBytes,
-		WorkspaceBytes: workspaceBytes,
-		CacheBytes:     cacheBytes,
-		SnapshotBytes:  snapshotBytes,
+		RootfsBytes:      rootfsBytes,
+		WorkspaceBytes:   workspaceBytes,
+		CacheBytes:       cacheBytes,
+		SnapshotBytes:    snapshotBytes,
+		RootfsEntries:    rootfsEntries,
+		WorkspaceEntries: workspaceEntries,
+		CacheEntries:     cacheEntries,
+		SnapshotEntries:  snapshotEntries,
 	}, nil
 }
 

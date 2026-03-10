@@ -43,6 +43,10 @@ type Config struct {
 	PolicyAllowPublicTunnels      bool
 	PolicyMaxSandboxLifetime      time.Duration
 	PolicyMaxIdleTimeout          time.Duration
+	StorageWarningFileCount       int
+	SnapshotMaxBytes              int64
+	SnapshotMaxFiles              int
+	SnapshotMaxExpansionRatio     int
 	AllowedGuestProfiles          []model.GuestProfile
 	DangerousGuestProfiles        []model.GuestProfile
 	AllowDangerousProfiles        bool
@@ -107,6 +111,11 @@ func Load(args []string) (Config, error) {
 	fs.BoolVar(&policyAllowPublicTunnels, "policy-allow-public-tunnels", policyAllowPublicTunnels, "allow public tunnels")
 	fs.DurationVar(&cfg.PolicyMaxSandboxLifetime, "policy-max-sandbox-lifetime", envDuration("SANDBOX_POLICY_MAX_SANDBOX_LIFETIME", 0), "maximum sandbox lifetime before policy denial; 0 disables")
 	fs.DurationVar(&cfg.PolicyMaxIdleTimeout, "policy-max-idle-timeout", envDuration("SANDBOX_POLICY_MAX_IDLE_TIMEOUT", 0), "maximum sandbox idle time before policy denial; 0 disables")
+	fs.IntVar(&cfg.StorageWarningFileCount, "storage-warning-file-count", envInt("SANDBOX_STORAGE_WARNING_FILE_COUNT", 10000), "warn when a sandbox exceeds this many stored files across workspace, cache, scratch, and snapshots")
+	snapshotMaxMB := envInt("SANDBOX_SNAPSHOT_MAX_MB", 1024)
+	fs.IntVar(&snapshotMaxMB, "snapshot-max-mb", snapshotMaxMB, "maximum extracted snapshot bundle size in megabytes")
+	fs.IntVar(&cfg.SnapshotMaxFiles, "snapshot-max-files", envInt("SANDBOX_SNAPSHOT_MAX_FILES", 8192), "maximum files allowed in a restored snapshot archive")
+	fs.IntVar(&cfg.SnapshotMaxExpansionRatio, "snapshot-max-expansion-ratio", envInt("SANDBOX_SNAPSHOT_MAX_EXPANSION_RATIO", 32), "maximum extracted-to-compressed ratio allowed for snapshot restore archives")
 	fs.StringVar(&cfg.DockerUser, "docker-user", env("SANDBOX_DOCKER_USER", "10001:10001"), "docker user or uid:gid for trusted-docker sandboxes")
 	fs.IntVar(&cfg.DockerTmpfsSizeMB, "docker-tmpfs-mb", envInt("SANDBOX_DOCKER_TMPFS_MB", 64), "docker tmpfs size for /tmp in megabytes")
 	fs.StringVar(&cfg.DockerSeccompProfile, "docker-seccomp-profile", env("SANDBOX_DOCKER_SECCOMP_PROFILE", ""), "optional docker seccomp profile path")
@@ -170,6 +179,7 @@ func Load(args []string) (Config, error) {
 		return Config{}, fmt.Errorf("parse max cpu quota: %w", err)
 	}
 	cfg.DefaultNetworkMode = model.NetworkMode(networkMode)
+	cfg.SnapshotMaxBytes = int64(snapshotMaxMB) * 1024 * 1024
 	cfg.DefaultAllowTunnels = strings.EqualFold(allowTunnels, "true")
 	cfg.TrustedDockerRuntime = strings.EqualFold(trustedDockerRuntime, "true")
 	cfg.TrustedProxyHeaders = trustedProxyHeaders
@@ -205,6 +215,18 @@ func Load(args []string) (Config, error) {
 
 func (c Config) Validate() error {
 	var problems []string
+	if c.StorageWarningFileCount == 0 {
+		c.StorageWarningFileCount = 10000
+	}
+	if c.SnapshotMaxBytes == 0 {
+		c.SnapshotMaxBytes = 1024 * 1024 * 1024
+	}
+	if c.SnapshotMaxFiles == 0 {
+		c.SnapshotMaxFiles = 8192
+	}
+	if c.SnapshotMaxExpansionRatio == 0 {
+		c.SnapshotMaxExpansionRatio = 32
+	}
 	if c.DeploymentMode != "development" && c.DeploymentMode != "production" {
 		problems = append(problems, fmt.Sprintf("unsupported deployment mode %q", c.DeploymentMode))
 	}
@@ -228,6 +250,18 @@ func (c Config) Validate() error {
 	}
 	if c.PolicyMaxIdleTimeout < 0 {
 		problems = append(problems, "policy max idle timeout must be zero or positive")
+	}
+	if c.StorageWarningFileCount < 0 {
+		problems = append(problems, "storage warning file count must be zero or positive")
+	}
+	if c.SnapshotMaxBytes <= 0 {
+		problems = append(problems, "snapshot max bytes must be positive")
+	}
+	if c.SnapshotMaxFiles <= 0 {
+		problems = append(problems, "snapshot max files must be positive")
+	}
+	if c.SnapshotMaxExpansionRatio <= 0 {
+		problems = append(problems, "snapshot max expansion ratio must be positive")
 	}
 	if err := validateAuthConfig(c, requireReadableFile); err != nil {
 		problems = append(problems, err.Error())

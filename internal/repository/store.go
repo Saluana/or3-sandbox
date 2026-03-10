@@ -201,8 +201,8 @@ func (s *Store) CreateSandbox(ctx context.Context, sandbox model.Sandbox) error 
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO sandbox_storage(sandbox_id, rootfs_bytes, workspace_bytes, cache_bytes, snapshot_bytes, updated_at)
-			VALUES (?, 0, 0, 0, 0, ?)
+			INSERT INTO sandbox_storage(sandbox_id, rootfs_bytes, workspace_bytes, cache_bytes, snapshot_bytes, rootfs_entries, workspace_entries, cache_entries, snapshot_entries, updated_at)
+			VALUES (?, 0, 0, 0, 0, 0, 0, 0, 0, ?)
 		`, sandbox.ID, now); err != nil {
 			return err
 		}
@@ -350,24 +350,25 @@ func (s *Store) StorageUsageUpdatedAt(ctx context.Context, sandboxID string) (ti
 	return parseTime(updated)
 }
 
-func (s *Store) UpdateStorageUsage(ctx context.Context, sandboxID string, rootfsBytes, workspaceBytes, cacheBytes, snapshotBytes int64) error {
+func (s *Store) UpdateStorageUsage(ctx context.Context, sandboxID string, rootfsBytes, workspaceBytes, cacheBytes, snapshotBytes, rootfsEntries, workspaceEntries, cacheEntries, snapshotEntries int64) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE sandbox_storage
-		SET rootfs_bytes=?, workspace_bytes=?, cache_bytes=?, snapshot_bytes=?, updated_at=?
+		SET rootfs_bytes=?, workspace_bytes=?, cache_bytes=?, snapshot_bytes=?, rootfs_entries=?, workspace_entries=?, cache_entries=?, snapshot_entries=?, updated_at=?
 		WHERE sandbox_id=?
-	`, rootfsBytes, workspaceBytes, cacheBytes, snapshotBytes, time.Now().UTC().Format(time.RFC3339Nano), sandboxID)
+	`, rootfsBytes, workspaceBytes, cacheBytes, snapshotBytes, rootfsEntries, workspaceEntries, cacheEntries, snapshotEntries, time.Now().UTC().Format(time.RFC3339Nano), sandboxID)
 	return err
 }
 
 type TenantUsage struct {
-	Sandboxes          int               `json:"sandboxes"`
-	RunningSandboxes   int               `json:"running_sandboxes"`
-	ConcurrentExecs    int               `json:"concurrent_execs"`
-	ActiveTunnels      int               `json:"active_tunnels"`
-	RequestedCPU       model.CPUQuantity `json:"requested_cpu"`
-	RequestedMemory    int               `json:"requested_memory_mb"`
-	RequestedStorage   int               `json:"requested_storage_mb"`
-	ActualStorageBytes int64             `json:"actual_storage_bytes"`
+	Sandboxes            int               `json:"sandboxes"`
+	RunningSandboxes     int               `json:"running_sandboxes"`
+	ConcurrentExecs      int               `json:"concurrent_execs"`
+	ActiveTunnels        int               `json:"active_tunnels"`
+	RequestedCPU         model.CPUQuantity `json:"requested_cpu"`
+	RequestedMemory      int               `json:"requested_memory_mb"`
+	RequestedStorage     int               `json:"requested_storage_mb"`
+	ActualStorageBytes   int64             `json:"actual_storage_bytes"`
+	ActualStorageEntries int64             `json:"actual_storage_entries"`
 }
 
 func (s *Store) TenantUsage(ctx context.Context, tenantID string) (TenantUsage, error) {
@@ -379,6 +380,7 @@ func (s *Store) TenantUsage(ctx context.Context, tenantID string) (TenantUsage, 
 			SUM(s.memory_limit_mb) AS memory_total,
 			SUM(s.disk_limit_mb) AS storage_total,
 			SUM(COALESCE(ss.rootfs_bytes, 0) + COALESCE(ss.workspace_bytes, 0) + COALESCE(ss.cache_bytes, 0) + COALESCE(ss.snapshot_bytes, 0)) AS actual_storage_bytes,
+			SUM(COALESCE(ss.rootfs_entries, 0) + COALESCE(ss.workspace_entries, 0) + COALESCE(ss.cache_entries, 0) + COALESCE(ss.snapshot_entries, 0)) AS actual_storage_entries,
 			COALESCE((SELECT COUNT(*) FROM executions e WHERE e.tenant_id = ? AND e.status = ?), 0) AS concurrent_execs,
 			COALESCE((SELECT COUNT(*) FROM tunnels t WHERE t.tenant_id = ? AND t.revoked_at IS NULL), 0) AS active_tunnels
 		FROM sandboxes s
@@ -386,8 +388,8 @@ func (s *Store) TenantUsage(ctx context.Context, tenantID string) (TenantUsage, 
 		WHERE s.tenant_id = ? AND s.status != ?
 	`, string(model.SandboxStatusRunning), tenantID, string(model.ExecutionStatusRunning), tenantID, tenantID, string(model.SandboxStatusDeleted))
 	var usage TenantUsage
-	var running, cpuTotal, memTotal, storageTotal, actualStorageBytes sql.NullInt64
-	if err := row.Scan(&usage.Sandboxes, &running, &cpuTotal, &memTotal, &storageTotal, &actualStorageBytes, &usage.ConcurrentExecs, &usage.ActiveTunnels); err != nil {
+	var running, cpuTotal, memTotal, storageTotal, actualStorageBytes, actualStorageEntries sql.NullInt64
+	if err := row.Scan(&usage.Sandboxes, &running, &cpuTotal, &memTotal, &storageTotal, &actualStorageBytes, &actualStorageEntries, &usage.ConcurrentExecs, &usage.ActiveTunnels); err != nil {
 		return usage, err
 	}
 	usage.RunningSandboxes = int(running.Int64)
@@ -395,6 +397,7 @@ func (s *Store) TenantUsage(ctx context.Context, tenantID string) (TenantUsage, 
 	usage.RequestedMemory = int(memTotal.Int64)
 	usage.RequestedStorage = int(storageTotal.Int64)
 	usage.ActualStorageBytes = actualStorageBytes.Int64
+	usage.ActualStorageEntries = actualStorageEntries.Int64
 	return usage, nil
 }
 
@@ -508,9 +511,9 @@ func (s *Store) CreateSnapshot(ctx context.Context, snapshot model.Snapshot) err
 		completed = snapshot.CompletedAt.UTC().Format(time.RFC3339Nano)
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO snapshots(snapshot_id, sandbox_id, tenant_id, name, status, image_ref, profile, image_contract_version, control_protocol_version, workspace_tar, export_location, created_at, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, snapshot.ID, snapshot.SandboxID, snapshot.TenantID, snapshot.Name, string(snapshot.Status), snapshot.ImageRef, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceTar, snapshot.ExportLocation, snapshot.CreatedAt.UTC().Format(time.RFC3339Nano), completed)
+		INSERT INTO snapshots(snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, export_location, created_at, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, snapshot.ID, snapshot.SandboxID, snapshot.TenantID, snapshot.Name, string(snapshot.Status), snapshot.ImageRef, snapshot.RuntimeBackend, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceContractVersion, snapshot.WorkspaceTar, snapshot.ExportLocation, snapshot.CreatedAt.UTC().Format(time.RFC3339Nano), completed)
 	return err
 }
 
@@ -521,15 +524,15 @@ func (s *Store) UpdateSnapshot(ctx context.Context, snapshot model.Snapshot) err
 	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE snapshots
-		SET status=?, image_ref=?, profile=?, image_contract_version=?, control_protocol_version=?, workspace_tar=?, export_location=?, completed_at=?
+		SET status=?, image_ref=?, runtime_backend=?, profile=?, image_contract_version=?, control_protocol_version=?, workspace_contract_version=?, workspace_tar=?, export_location=?, completed_at=?
 		WHERE snapshot_id=? AND tenant_id=?
-	`, string(snapshot.Status), snapshot.ImageRef, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceTar, snapshot.ExportLocation, completed, snapshot.ID, snapshot.TenantID)
+	`, string(snapshot.Status), snapshot.ImageRef, snapshot.RuntimeBackend, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceContractVersion, snapshot.WorkspaceTar, snapshot.ExportLocation, completed, snapshot.ID, snapshot.TenantID)
 	return err
 }
 
 func (s *Store) GetSnapshot(ctx context.Context, tenantID, snapshotID string) (model.Snapshot, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, profile, image_contract_version, control_protocol_version, workspace_tar, export_location, created_at, completed_at
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, export_location, created_at, completed_at
 		FROM snapshots WHERE tenant_id=? AND snapshot_id=?
 	`, tenantID, snapshotID)
 	return scanSnapshot(row)
@@ -537,7 +540,7 @@ func (s *Store) GetSnapshot(ctx context.Context, tenantID, snapshotID string) (m
 
 func (s *Store) ListSnapshots(ctx context.Context, tenantID, sandboxID string) ([]model.Snapshot, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, profile, image_contract_version, control_protocol_version, workspace_tar, export_location, created_at, completed_at
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, export_location, created_at, completed_at
 		FROM snapshots
 		WHERE tenant_id=? AND sandbox_id=?
 		ORDER BY created_at DESC
@@ -594,7 +597,7 @@ func (s *Store) ListRunningExecutions(ctx context.Context) ([]model.Execution, e
 
 func (s *Store) ListSnapshotsByStatus(ctx context.Context, status model.SnapshotStatus) ([]model.Snapshot, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, profile, image_contract_version, control_protocol_version, workspace_tar, export_location, created_at, completed_at
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, export_location, created_at, completed_at
 		FROM snapshots
 		WHERE status = ?
 		ORDER BY created_at
@@ -780,16 +783,18 @@ func scanSnapshot(scanner interface{ Scan(...any) error }) (model.Snapshot, erro
 	var snapshot model.Snapshot
 	var created string
 	var completed sql.NullString
-	var profile, imageContractVersion, controlProtocolVersion string
-	if err := scanner.Scan(&snapshot.ID, &snapshot.SandboxID, &snapshot.TenantID, &snapshot.Name, &snapshot.Status, &snapshot.ImageRef, &profile, &imageContractVersion, &controlProtocolVersion, &snapshot.WorkspaceTar, &snapshot.ExportLocation, &created, &completed); err != nil {
+	var runtimeBackend, profile, imageContractVersion, controlProtocolVersion, workspaceContractVersion string
+	if err := scanner.Scan(&snapshot.ID, &snapshot.SandboxID, &snapshot.TenantID, &snapshot.Name, &snapshot.Status, &snapshot.ImageRef, &runtimeBackend, &profile, &imageContractVersion, &controlProtocolVersion, &workspaceContractVersion, &snapshot.WorkspaceTar, &snapshot.ExportLocation, &created, &completed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.Snapshot{}, ErrNotFound
 		}
 		return model.Snapshot{}, err
 	}
+	snapshot.RuntimeBackend = runtimeBackend
 	snapshot.Profile = model.GuestProfile(profile)
 	snapshot.ImageContractVersion = imageContractVersion
 	snapshot.ControlProtocolVersion = controlProtocolVersion
+	snapshot.WorkspaceContractVersion = workspaceContractVersion
 	createdAt, err := parseTime(created)
 	if err != nil {
 		return model.Snapshot{}, err

@@ -237,19 +237,21 @@ type CreateSnapshotRequest struct {
 }
 
 type Snapshot struct {
-	ID                     string         `json:"id"`
-	SandboxID              string         `json:"sandbox_id"`
-	TenantID               string         `json:"tenant_id"`
-	Name                   string         `json:"name"`
-	Status                 SnapshotStatus `json:"status"`
-	ImageRef               string         `json:"image_ref"`
-	Profile                GuestProfile   `json:"profile,omitempty"`
-	ImageContractVersion   string         `json:"image_contract_version,omitempty"`
-	ControlProtocolVersion string         `json:"control_protocol_version,omitempty"`
-	WorkspaceTar           string         `json:"-"`
-	ExportLocation         string         `json:"export_location,omitempty"`
-	CreatedAt              time.Time      `json:"created_at"`
-	CompletedAt            *time.Time     `json:"completed_at,omitempty"`
+	ID                       string         `json:"id"`
+	SandboxID                string         `json:"sandbox_id"`
+	TenantID                 string         `json:"tenant_id"`
+	Name                     string         `json:"name"`
+	Status                   SnapshotStatus `json:"status"`
+	ImageRef                 string         `json:"image_ref"`
+	RuntimeBackend           string         `json:"runtime_backend,omitempty"`
+	Profile                  GuestProfile   `json:"profile,omitempty"`
+	ImageContractVersion     string         `json:"image_contract_version,omitempty"`
+	ControlProtocolVersion   string         `json:"control_protocol_version,omitempty"`
+	WorkspaceContractVersion string         `json:"workspace_contract_version,omitempty"`
+	WorkspaceTar             string         `json:"-"`
+	ExportLocation           string         `json:"export_location,omitempty"`
+	CreatedAt                time.Time      `json:"created_at"`
+	CompletedAt              *time.Time     `json:"completed_at,omitempty"`
 }
 
 type RestoreSnapshotRequest struct {

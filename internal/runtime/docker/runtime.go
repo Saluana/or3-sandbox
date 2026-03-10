@@ -22,6 +22,7 @@ import (
 	"github.com/creack/pty"
 	"golang.org/x/term"
 
+	"or3-sandbox/internal/archiveutil"
 	"or3-sandbox/internal/model"
 )
 
@@ -35,14 +36,17 @@ const (
 )
 
 type Options struct {
-	Binary                  string
-	HostOS                  string
-	User                    string
-	TmpfsSizeMB             int
-	SeccompProfile          string
-	AppArmorProfile         string
-	SELinuxLabel            string
-	AllowDangerousOverrides bool
+	Binary                    string
+	HostOS                    string
+	User                      string
+	TmpfsSizeMB               int
+	SeccompProfile            string
+	AppArmorProfile           string
+	SELinuxLabel              string
+	AllowDangerousOverrides   bool
+	SnapshotMaxBytes          int64
+	SnapshotMaxFiles          int
+	SnapshotMaxExpansionRatio int
 }
 
 type Runtime struct {
@@ -54,6 +58,15 @@ type Runtime struct {
 	appArmorProfile         string
 	selinuxLabel            string
 	allowDangerousOverrides bool
+	restoreLimits           archiveutil.Limits
+}
+
+func defaultRestoreLimits() archiveutil.Limits {
+	return archiveutil.Limits{
+		MaxBytes:          256 * 1024 * 1024,
+		MaxFiles:          4096,
+		MaxExpansionRatio: 32,
+	}
 }
 
 func New(options ...Options) *Runtime {
@@ -81,6 +94,18 @@ func New(options ...Options) *Runtime {
 		resolved.SELinuxLabel = strings.TrimSpace(options[0].SELinuxLabel)
 		resolved.AllowDangerousOverrides = options[0].AllowDangerousOverrides
 	}
+	limits := defaultRestoreLimits()
+	if len(options) > 0 {
+		if options[0].SnapshotMaxBytes > 0 {
+			limits.MaxBytes = options[0].SnapshotMaxBytes
+		}
+		if options[0].SnapshotMaxFiles > 0 {
+			limits.MaxFiles = options[0].SnapshotMaxFiles
+		}
+		if options[0].SnapshotMaxExpansionRatio > 0 {
+			limits.MaxExpansionRatio = options[0].SnapshotMaxExpansionRatio
+		}
+	}
 	return &Runtime{
 		binary:                  resolved.Binary,
 		hostOS:                  resolved.HostOS,
@@ -90,6 +115,7 @@ func New(options ...Options) *Runtime {
 		appArmorProfile:         resolved.AppArmorProfile,
 		selinuxLabel:            resolved.SELinuxLabel,
 		allowDangerousOverrides: resolved.AllowDangerousOverrides,
+		restoreLimits:           limits,
 	}
 }
 
@@ -106,6 +132,16 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 	}
 	if spec.CacheRoot != "" {
 		if err := os.MkdirAll(spec.CacheRoot, 0o755); err != nil {
+			return model.RuntimeState{}, err
+		}
+	}
+	if spec.ScratchRoot != "" {
+		if err := os.MkdirAll(spec.ScratchRoot, 0o755); err != nil {
+			return model.RuntimeState{}, err
+		}
+	}
+	if spec.SecretsRoot != "" {
+		if err := os.MkdirAll(spec.SecretsRoot, 0o755); err != nil {
 			return model.RuntimeState{}, err
 		}
 	}
@@ -155,6 +191,20 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 		}
 		args = append(args, "-v", fmt.Sprintf("%s:/cache", cacheMount))
 	}
+	if spec.ScratchRoot != "" {
+		scratchMount, err := absoluteHostPath(spec.ScratchRoot)
+		if err != nil {
+			return model.RuntimeState{}, err
+		}
+		args = append(args, "-v", fmt.Sprintf("%s:/scratch", scratchMount))
+	}
+	if spec.SecretsRoot != "" {
+		secretsMount, err := absoluteHostPath(spec.SecretsRoot)
+		if err != nil {
+			return model.RuntimeState{}, err
+		}
+		args = append(args, "-v", fmt.Sprintf("%s:/secrets:ro", secretsMount))
+	}
 	switch spec.NetworkMode {
 	case model.NetworkModeInternetEnabled:
 		args = append(args, "--network", networkName(spec.SandboxID))
@@ -164,7 +214,17 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 		return model.RuntimeState{}, fmt.Errorf("unsupported network mode %q", spec.NetworkMode)
 	}
 	args = append(args, spec.BaseImageRef, "sleep", "infinity")
-	out, err := r.run(ctx, args...)
+	withStorageOpt := r.hostOS == "linux" && spec.DiskLimitMB > 0
+	storageOptArgs := append([]string(nil), args...)
+	if withStorageOpt {
+		storageOptArgs = append(storageOptArgs, "--storage-opt", fmt.Sprintf("size=%dm", spec.DiskLimitMB))
+	}
+	out, err := r.run(ctx, storageOptArgs...)
+	if err != nil && withStorageOpt && dockerStorageOptUnsupported(err) {
+		slog.Warn("docker storage-opt unsupported; retrying without disk quota", "runtime", "docker", "sandbox_id", spec.SandboxID, "disk_limit_mb", spec.DiskLimitMB, "error", err)
+		_, _ = r.run(ctx, "rm", "-f", containerName(spec.SandboxID))
+		out, err = r.run(ctx, args...)
+	}
 	if err != nil {
 		return model.RuntimeState{}, err
 	}
@@ -305,7 +365,8 @@ func (r *Runtime) Destroy(ctx context.Context, sandbox model.Sandbox) error {
 			return err
 		}
 	}
-	for _, dir := range []string{sandbox.WorkspaceRoot, sandbox.CacheRoot, sandbox.StorageRoot} {
+	baseDir := filepath.Dir(sandbox.StorageRoot)
+	for _, dir := range []string{sandbox.WorkspaceRoot, sandbox.CacheRoot, sandbox.StorageRoot, filepath.Join(baseDir, "scratch"), filepath.Join(baseDir, "secrets")} {
 		if dir == "" {
 			continue
 		}
@@ -493,23 +554,30 @@ func (r *Runtime) RestoreSnapshot(ctx context.Context, sandbox model.Sandbox, sn
 		return model.RuntimeState{}, err
 	}
 	if snapshot.WorkspaceTar != "" {
-		if err := extractArchive(snapshot.WorkspaceTar, sandbox.WorkspaceRoot); err != nil {
+		if err := r.extractArchive(snapshot.WorkspaceTar, sandbox.WorkspaceRoot); err != nil {
 			return model.RuntimeState{}, err
 		}
 	}
 	spec := model.SandboxSpec{
-		SandboxID:     sandbox.ID,
-		TenantID:      sandbox.TenantID,
-		BaseImageRef:  snapshot.ImageRef,
-		CPULimit:      sandbox.CPULimit,
-		MemoryLimitMB: sandbox.MemoryLimitMB,
-		PIDsLimit:     sandbox.PIDsLimit,
-		DiskLimitMB:   sandbox.DiskLimitMB,
-		NetworkMode:   sandbox.NetworkMode,
-		AllowTunnels:  sandbox.AllowTunnels,
-		StorageRoot:   sandbox.StorageRoot,
-		WorkspaceRoot: sandbox.WorkspaceRoot,
-		CacheRoot:     sandbox.CacheRoot,
+		SandboxID:                sandbox.ID,
+		TenantID:                 sandbox.TenantID,
+		BaseImageRef:             snapshot.ImageRef,
+		Profile:                  snapshot.Profile,
+		ControlProtocolVersion:   snapshot.ControlProtocolVersion,
+		WorkspaceContractVersion: snapshot.WorkspaceContractVersion,
+		ImageContractVersion:     snapshot.ImageContractVersion,
+		CPULimit:                 sandbox.CPULimit,
+		MemoryLimitMB:            sandbox.MemoryLimitMB,
+		PIDsLimit:                sandbox.PIDsLimit,
+		DiskLimitMB:              sandbox.DiskLimitMB,
+		NetworkMode:              sandbox.NetworkMode,
+		AllowTunnels:             sandbox.AllowTunnels,
+		StorageRoot:              sandbox.StorageRoot,
+		WorkspaceRoot:            sandbox.WorkspaceRoot,
+		CacheRoot:                sandbox.CacheRoot,
+		ScratchRoot:              filepath.Join(filepath.Dir(sandbox.StorageRoot), "scratch"),
+		SecretsRoot:              filepath.Join(filepath.Dir(sandbox.StorageRoot), "secrets"),
+		NetworkPolicy:            model.ResolveNetworkPolicy(sandbox.NetworkMode, sandbox.AllowTunnels),
 	}
 	return r.Create(ctx, spec)
 }
@@ -793,51 +861,34 @@ func archiveDirectory(srcDir, destTarGz string) error {
 }
 
 func extractArchive(srcTarGz, destDir string) error {
-	file, err := os.Open(srcTarGz)
-	if err != nil {
-		return err
+	_, err := archiveutil.ExtractTarGz(srcTarGz, destDir, defaultRestoreLimits())
+	return err
+}
+
+func (r *Runtime) extractArchive(srcTarGz, destDir string) error {
+	limits := r.restoreLimits
+	if limits.MaxBytes <= 0 || limits.MaxFiles <= 0 || limits.MaxExpansionRatio <= 0 {
+		limits = defaultRestoreLimits()
 	}
-	defer file.Close()
-	gz, err := gzip.NewReader(file)
-	if err != nil {
-		return err
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	for {
-		header, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(destDir, filepath.Clean(header.Name))
-		if !strings.HasPrefix(target, filepath.Clean(destDir)+string(os.PathSeparator)) && filepath.Clean(target) != filepath.Clean(destDir) {
-			return fmt.Errorf("tar entry escapes destination: %s", header.Name)
-		}
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, os.FileMode(header.Mode)); err != nil {
-				return err
-			}
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
-			}
-			file, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(header.Mode))
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(file, tr); err != nil {
-				file.Close()
-				return err
-			}
-			if err := file.Close(); err != nil {
-				return err
-			}
+	_, err := archiveutil.ExtractTarGz(srcTarGz, destDir, limits)
+	return err
+}
+
+func dockerStorageOptUnsupported(err error) bool {
+	message := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"storage-opt is supported only",
+		"unsupported storage opt",
+		"invalid option: size",
+		"unknown storage opt",
+		"xfs project quota",
+		"project quota",
+	} {
+		if strings.Contains(message, needle) {
+			return true
 		}
 	}
+	return false
 }
 
 func containerName(id string) string {

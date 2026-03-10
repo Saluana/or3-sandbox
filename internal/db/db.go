@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 3
+const schemaVersion = 5
 
 func Open(ctx context.Context, path string) (*sql.DB, error) {
 	dsn, err := sqliteDSN(path)
@@ -114,6 +114,10 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			workspace_bytes INTEGER NOT NULL DEFAULT 0,
 			cache_bytes INTEGER NOT NULL DEFAULT 0,
 			snapshot_bytes INTEGER NOT NULL DEFAULT 0,
+			rootfs_entries INTEGER NOT NULL DEFAULT 0,
+			workspace_entries INTEGER NOT NULL DEFAULT 0,
+			cache_entries INTEGER NOT NULL DEFAULT 0,
+			snapshot_entries INTEGER NOT NULL DEFAULT 0,
 			updated_at TEXT NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS tunnels (
@@ -136,9 +140,11 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			name TEXT NOT NULL,
 			status TEXT NOT NULL,
 			image_ref TEXT NOT NULL,
+			runtime_backend TEXT NOT NULL DEFAULT '',
 			profile TEXT NOT NULL DEFAULT '',
 			image_contract_version TEXT NOT NULL DEFAULT '',
 			control_protocol_version TEXT NOT NULL DEFAULT '',
+			workspace_contract_version TEXT NOT NULL DEFAULT '',
 			workspace_tar TEXT NOT NULL,
 			export_location TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
@@ -231,13 +237,31 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if err := ensureColumn(ctx, tx, "snapshots", "profile", `ALTER TABLE snapshots ADD COLUMN profile TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if err := ensureColumn(ctx, tx, "snapshots", "runtime_backend", `ALTER TABLE snapshots ADD COLUMN runtime_backend TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	if err := ensureColumn(ctx, tx, "snapshots", "image_contract_version", `ALTER TABLE snapshots ADD COLUMN image_contract_version TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
 	if err := ensureColumn(ctx, tx, "snapshots", "control_protocol_version", `ALTER TABLE snapshots ADD COLUMN control_protocol_version TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if err := ensureColumn(ctx, tx, "snapshots", "workspace_contract_version", `ALTER TABLE snapshots ADD COLUMN workspace_contract_version TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	if err := ensureColumn(ctx, tx, "sandboxes", "runtime_class", `ALTER TABLE sandboxes ADD COLUMN runtime_class TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "sandbox_storage", "rootfs_entries", `ALTER TABLE sandbox_storage ADD COLUMN rootfs_entries INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "sandbox_storage", "workspace_entries", `ALTER TABLE sandbox_storage ADD COLUMN workspace_entries INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "sandbox_storage", "cache_entries", `ALTER TABLE sandbox_storage ADD COLUMN cache_entries INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "sandbox_storage", "snapshot_entries", `ALTER TABLE sandbox_storage ADD COLUMN snapshot_entries INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sandboxes SET cpu_limit_millis = cpu_limit * 1000 WHERE cpu_limit_millis = 0`); err != nil {

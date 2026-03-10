@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"or3-sandbox/internal/config"
 	"or3-sandbox/internal/model"
 	"or3-sandbox/internal/repository"
 )
@@ -16,6 +17,8 @@ type TenantQuotaView struct {
 	Usage             repository.TenantUsage `json:"usage"`
 	StorageQuotaBytes int64                  `json:"storage_quota_bytes"`
 	StoragePressure   float64                `json:"storage_pressure"`
+	StorageEntries    int64                  `json:"storage_entries"`
+	EntryPressure     float64                `json:"entry_pressure"`
 	RunningPressure   float64                `json:"running_pressure"`
 	CPUPressure       float64                `json:"cpu_pressure"`
 	MemoryPressure    float64                `json:"memory_pressure"`
@@ -34,13 +37,15 @@ type CapacityReport struct {
 	Alerts           []string                      `json:"alerts,omitempty"`
 }
 
-func buildTenantQuotaView(quota model.TenantQuota, usage repository.TenantUsage) TenantQuotaView {
+func buildTenantQuotaView(cfg config.Config, quota model.TenantQuota, usage repository.TenantUsage) TenantQuotaView {
 	storageQuotaBytes := int64(quota.MaxStorageMB) * 1024 * 1024
 	view := TenantQuotaView{
 		Quota:             quota,
 		Usage:             usage,
 		StorageQuotaBytes: storageQuotaBytes,
 		StoragePressure:   ratioInt64(usage.ActualStorageBytes, storageQuotaBytes),
+		StorageEntries:    usage.ActualStorageEntries,
+		EntryPressure:     ratioInt64(usage.ActualStorageEntries, int64(cfg.StorageWarningFileCount)),
 		RunningPressure:   ratioInt(usage.RunningSandboxes, quota.MaxRunningSandboxes),
 		CPUPressure:       ratioInt64(usage.RequestedCPU.MilliValue(), quota.MaxCPUCores.MilliValue()),
 		MemoryPressure:    ratioInt(usage.RequestedMemory, quota.MaxMemoryMB),
@@ -49,6 +54,11 @@ func buildTenantQuotaView(quota model.TenantQuota, usage repository.TenantUsage)
 		view.Alerts = append(view.Alerts, "storage quota pressure exceeded")
 	} else if view.StoragePressure >= 0.8 {
 		view.Alerts = append(view.Alerts, "storage quota pressure above 80%")
+	}
+	if view.EntryPressure >= 1 {
+		view.Alerts = append(view.Alerts, "storage file-count pressure exceeded")
+	} else if view.EntryPressure >= 0.8 {
+		view.Alerts = append(view.Alerts, "storage file-count pressure above 80%")
 	}
 	if view.RunningPressure >= 1 {
 		view.Alerts = append(view.Alerts, "running sandbox quota exceeded")
@@ -100,7 +110,7 @@ func (s *Service) CapacityReport(ctx context.Context, tenantID string) (Capacity
 	if err != nil {
 		return CapacityReport{}, err
 	}
-	quotaView := buildTenantQuotaView(quota, usage)
+	quotaView := buildTenantQuotaView(s.cfg, quota, usage)
 	report := CapacityReport{
 		Backend:          s.cfg.RuntimeBackend,
 		CheckedAt:        time.Now().UTC(),
@@ -141,7 +151,9 @@ func (s *Service) MetricsReport(ctx context.Context, tenantID string) (string, e
 		fmt.Sprintf("or3_sandbox_exec_running %d", report.QuotaView.Usage.ConcurrentExecs),
 		fmt.Sprintf("or3_sandbox_tunnels_active %d", report.QuotaView.Usage.ActiveTunnels),
 		fmt.Sprintf("or3_sandbox_actual_storage_bytes %d", report.QuotaView.Usage.ActualStorageBytes),
+		fmt.Sprintf("or3_sandbox_actual_storage_entries %d", report.QuotaView.Usage.ActualStorageEntries),
 		fmt.Sprintf("or3_sandbox_storage_pressure_ratio %.6f", report.QuotaView.StoragePressure),
+		fmt.Sprintf("or3_sandbox_storage_entry_pressure_ratio %.6f", report.QuotaView.EntryPressure),
 		fmt.Sprintf("or3_sandbox_running_pressure_ratio %.6f", report.QuotaView.RunningPressure),
 		fmt.Sprintf("or3_sandbox_runtime_healthy %d", boolMetric(health.Healthy)),
 	)
