@@ -414,6 +414,86 @@ func TestProductionQEMUDoctorFailsUnreadableTunnelSigningKeyPath(t *testing.T) {
 	assertDoctorCheck(t, summary.Checks, "tunnel-signing-key", "fail", "not readable")
 }
 
+func TestProductionQEMUDoctorReportsEnabledRuntimeSelections(t *testing.T) {
+	restore := captureDoctorGlobals()
+	defer restore()
+
+	root := t.TempDir()
+	dbDir := filepath.Join(root, "db")
+	storageRoot := filepath.Join(root, "storage")
+	snapshotRoot := filepath.Join(root, "snapshots")
+	keyPath := filepath.Join(root, "containerd.sock")
+	imagePath := filepath.Join(root, "guest.qcow2")
+	for _, dir := range []string{dbDir, storageRoot, snapshotRoot} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(keyPath, []byte("sock"), 0o644); err != nil {
+		t.Fatalf("write fake socket: %v", err)
+	}
+	if err := writeDoctorGuestContract(imagePath); err != nil {
+		t.Fatalf("write guest contract: %v", err)
+	}
+
+	doctorHostOS = "linux"
+	doctorLookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	doctorStat = os.Stat
+	doctorReadFile = func(path string) ([]byte, error) {
+		if path == "/sys/fs/cgroup/cgroup.controllers" {
+			return []byte("cpu memory pids"), nil
+		}
+		return os.ReadFile(path)
+	}
+	doctorStatFS = func(string) (doctorFSInfo, error) { return doctorFSInfo{AvailableBytes: 8 << 30}, nil }
+	doctorConfigLoader = func([]string) (config.Config, error) {
+		return config.Config{
+			RuntimeBackend:            "qemu",
+			DefaultRuntimeSelection:   model.RuntimeSelectionContainerdKataProfessional,
+			EnabledRuntimeSelections:  []model.RuntimeSelection{model.RuntimeSelectionDockerDev, model.RuntimeSelectionContainerdKataProfessional, model.RuntimeSelectionQEMUProfessional},
+			TrustedDockerRuntime:      true,
+			AuthMode:                  "jwt-hs256",
+			DatabasePath:              filepath.Join(dbDir, "sandbox.db"),
+			StorageRoot:               storageRoot,
+			SnapshotRoot:              snapshotRoot,
+			QEMUBinary:                "qemu-system-x86_64",
+			QEMUAllowedBaseImagePaths: []string{imagePath},
+			KataBinary:                "ctr",
+			KataRuntimeClass:          "io.containerd.kata.v2",
+			KataContainerdSocket:      keyPath,
+		}, nil
+	}
+
+	summary := runProductionQEMUDoctor()
+	assertDoctorCheck(t, summary.Checks, "runtime-selection", "pass", "default runtime selection is \"containerd-kata-professional\"")
+	assertDoctorCheck(t, summary.Checks, "runtime-selection", "pass", "docker-dev")
+	assertDoctorCheck(t, summary.Checks, "kata", "pass", "io.containerd.kata.v2")
+	assertDoctorCheck(t, summary.Checks, "docker", "pass", "docker-dev prerequisites are present")
+}
+
+func TestProductionQEMUDoctorFailsKataOnNonLinuxHost(t *testing.T) {
+	restore := captureDoctorGlobals()
+	defer restore()
+	doctorHostOS = "darwin"
+	doctorConfigLoader = func([]string) (config.Config, error) {
+		return config.Config{
+			RuntimeBackend:           "qemu",
+			DefaultRuntimeSelection:  model.RuntimeSelectionQEMUProfessional,
+			EnabledRuntimeSelections: []model.RuntimeSelection{model.RuntimeSelectionContainerdKataProfessional, model.RuntimeSelectionQEMUProfessional},
+			AuthMode:                 "jwt-hs256",
+			DatabasePath:             filepath.Join(t.TempDir(), "sandbox.db"),
+			StorageRoot:              t.TempDir(),
+			SnapshotRoot:             t.TempDir(),
+			QEMUBinary:               "qemu-system-x86_64",
+			KataBinary:               "ctr",
+			KataRuntimeClass:         "io.containerd.kata.v2",
+			KataContainerdSocket:     "/run/containerd/containerd.sock",
+		}, nil
+	}
+	summary := runProductionQEMUDoctor()
+	assertDoctorCheck(t, summary.Checks, "kata", "fail", "host OS darwin is not supported")
+}
+
 func captureDoctorGlobals() func() {
 	loader := doctorConfigLoader
 	hostOS := doctorHostOS

@@ -26,13 +26,18 @@ sandboxctl / curl
         |        |
         |        +--> repository/store (SQLite)
         |        |
-        |        +--> runtime manager
+        |        +--> runtime registry (dispatcher)
         |                  |
-        |                  +--> docker runtime
-        |                  +--> qemu runtime
+        |                  +--> docker runtime  (docker-dev)
+        |                  +--> kata runtime    (containerd-kata-professional)
+        |                  +--> qemu runtime    (qemu-professional)
         |
         +--> JSON / SSE / WebSocket responses
 ```
+
+The **runtime registry** dispatches lifecycle, exec, snapshot, and inspect
+operations to the correct backend based on each sandbox's persisted runtime
+selection. Multiple runtimes can be enabled simultaneously.
 
 ## Main layers
 
@@ -48,7 +53,8 @@ The project has two main entry points:
 - loads config
 - opens SQLite
 - seeds tenant records from tokens
-- builds the selected runtime
+- builds the runtime registry from enabled runtime selections
+- registers each enabled runtime (docker, kata, qemu) into the dispatcher
 - starts the HTTP server
 - runs reconciliation in the background
 

@@ -4,10 +4,21 @@ A **runtime** is the part that does the real sandbox work.
 
 In this project, the runtime is the engine under the hood.
 
-`or3-sandbox` supports two runtime backends:
+`or3-sandbox` supports three runtime backends:
 
 - `docker`
+- `kata` (containerd + Kata Containers)
 - `qemu`
+
+Operators choose which runtimes to enable using **runtime selections**:
+
+| Runtime selection | Backend | Runtime class | Production eligible |
+| --- | --- | --- | --- |
+| `docker-dev` | `docker` | `trusted-docker` | No – shared-kernel only |
+| `containerd-kata-professional` | `kata` | `vm` | Yes – microVM isolation |
+| `qemu-professional` | `qemu` | `vm` | Yes – full VM isolation |
+
+Multiple runtime selections can be enabled simultaneously. The operator sets `SANDBOX_ENABLED_RUNTIME_SELECTIONS` and `SANDBOX_DEFAULT_RUNTIME_SELECTION` in the daemon config. Callers can request a specific runtime selection at sandbox creation time.
 
 ## Runtime classes
 
@@ -16,20 +27,23 @@ Each backend maps to a **runtime class** that describes its isolation posture:
 | Backend | Runtime class | Production eligible |
 | --- | --- | --- |
 | `docker` | `trusted-docker` | No – shared-kernel only |
+| `kata` | `vm` | Yes – microVM-backed isolation |
 | `qemu` | `vm` | Yes – VM-backed isolation |
 
 The runtime class is used by policy decisions throughout the system. Setting `SANDBOX_MODE=production` fails closed: it rejects any backend whose runtime class is not `vm`.
 
 Docker is intentionally documented and validated as `trusted-docker`. It is not the hostile multi-tenant production boundary. It remains available for local development, image compatibility checks, and explicitly trusted operator environments.
 
-Future VM-compatible backends (such as Kata Containers) would also map to the `vm` class when they are supported.
+Future VM-compatible backends would also map to the `vm` class when they are supported.
 
-The current backend and its resolved class are visible through `GET /v1/runtime/info`:
+The current runtime info including enabled selections is visible through `GET /v1/runtime/info`:
 
 ```json
 {
-  "backend": "qemu",
-  "class": "vm"
+  "backend": "kata",
+  "class": "vm",
+  "default_runtime_selection": "containerd-kata-professional",
+  "enabled_runtime_selections": ["docker-dev", "containerd-kata-professional"]
 }
 ```
 
@@ -40,6 +54,7 @@ The `sandboxctl doctor --production-qemu` command also reports the resolved clas
 | Runtime | Best for | Runtime class | Main control method |
 | --- | --- | --- | --- |
 | `docker` | local development and trusted setups | `trusted-docker` | Docker CLI |
+| `kata` | professional hosted sandboxes | `vm` | containerd ctr CLI |
 | `qemu` | production isolation and security-sensitive workloads | `vm` | QEMU + guest agent |
 
 ## Docker runtime
@@ -120,6 +135,66 @@ If you do allow an explicit override, model it through the small capability set 
 
 Those overrides are intended for trusted operator workflows only and are audit-visible.
 
+## Kata runtime
+
+### Why it exists
+
+The Kata runtime is the primary professional hosted runtime for v1.
+
+It uses containerd with Kata Containers to run each sandbox inside a lightweight microVM, giving VM-class isolation with container-like ergonomics.
+
+Kata resolves to the `vm` runtime class and is production-eligible.
+
+### How it works
+
+The Kata adapter shells out to `ctr` (the containerd CLI) rather than linking the containerd client library, keeping the dependency surface small.
+
+For each sandbox, the Kata runtime:
+
+- pulls the base image if not already present
+- creates a container via `ctr run` with the configured Kata runtime class
+- bind-mounts `/workspace`, `/cache`, `/scratch`, and `/secrets` from host-side storage
+- passes CPU and memory limits to containerd
+- applies a network label (`or3.network.loopback-only=true`) for internet-disabled sandboxes
+- tracks task PIDs and persists local state under `.kata/state.json`
+
+### Exec and TTY
+
+- Non-interactive exec uses `ctr task exec`
+- Interactive TTY uses `ctr task exec --tty` with a PTY
+- Detached exec is supported
+
+### Snapshots
+
+Kata snapshots use the same model as Docker:
+
+- workspace directory is archived as a `.tar.gz`
+- the base image reference is preserved alongside the archive
+- restore clears the workspace and extracts the archive with safety limits
+
+### Limitations
+
+- **Suspend / Resume**: not supported (Kata does not expose pause today)
+- **Disk limits**: not enforced at create time; containerd + Kata manage root filesystem sizing via the guest kernel
+- **Linux only**: the Kata runtime requires a Linux host with KVM
+
+### Host prerequisites
+
+- containerd must be installed and running
+- Kata Containers runtime must be installed (e.g. `kata-qemu` or `kata-clh`)
+- The containerd socket must be accessible to the daemon
+- `ctr` CLI must be available
+
+Use `sandboxctl doctor --production-qemu` to check Kata prerequisites. The doctor reports whether `ctr` and the containerd socket are reachable.
+
+### Configuration
+
+```bash
+SANDBOX_KATA_BINARY=/usr/local/bin/ctr
+SANDBOX_KATA_RUNTIME_CLASS=kata-qemu
+SANDBOX_KATA_CONTAINERD_SOCKET=/run/containerd/containerd.sock
+```
+
 ## QEMU runtime
 
 ### Why it exists
@@ -187,11 +262,19 @@ Choose `docker` if:
 - you are working on a trusted local machine
 - you want the cheaper, denser option for trusted internal work
 
+Choose `kata` if:
+
+- you need professional-grade hosted sandboxes with VM isolation
+- you want container-like ergonomics (containerd images, bind mounts)
+- you are running on a Linux host with KVM and containerd
+- you want the primary professional runtime for v1
+
 Choose `qemu` if:
 
-- you need the stronger production isolation boundary
+- you need the strongest production isolation boundary
 - you are working on untrusted or security-sensitive workloads
 - you are comfortable preparing guest images and validating profile contracts
+- you need suspend/resume or full guest-agent control
 
 ## Storage behavior
 
@@ -199,6 +282,11 @@ Choose `qemu` if:
 
 - workspace is a host-mounted directory
 - snapshots combine a committed image and a workspace archive
+
+### Kata
+
+- workspace is a host-mounted directory (same as Docker)
+- snapshots combine a base image reference and a workspace archive
 
 ### QEMU
 
@@ -229,4 +317,5 @@ Then, once the project makes sense to you, read `images/guest/README.md` and try
 For production planning, remember the simple rule:
 
 - Docker (`trusted-docker` class): choose when the workload is trusted and density matters
-- QEMU (`vm` class): required when the security boundary matters more than density, and the only class eligible for `SANDBOX_MODE=production`
+- Kata (`vm` class): the primary professional hosted runtime, combining container ergonomics with microVM isolation
+- QEMU (`vm` class): the advanced professional path for full VM isolation with guest-agent control

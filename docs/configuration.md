@@ -44,7 +44,7 @@ There are four big groups:
 Important truth:
 
 - `development` mode allows the trusted Docker path and static tokens
-- `production` mode rejects Docker and requires the `qemu` runtime plus secure auth and transport settings
+- `production` mode rejects Docker and requires a VM-backed default runtime selection plus secure auth and transport settings
 
 These settings answer the question:
 
@@ -54,14 +54,44 @@ These settings answer the question:
 
 | Setting | Default | What it means |
 | --- | --- | --- |
-| `SANDBOX_RUNTIME` | `docker` | choose `docker` or `qemu` |
+| `SANDBOX_ENABLED_RUNTIME_SELECTIONS` | derived from `SANDBOX_RUNTIME` when unset | comma-separated enabled runtime selections |
+| `SANDBOX_DEFAULT_RUNTIME_SELECTION` | derived from `SANDBOX_RUNTIME` when unset | default runtime selection for create requests that omit `runtime_selection` |
+| `SANDBOX_RUNTIME` | `docker` | legacy compatibility setting; maps `docker` → `docker-dev`, `qemu` → `qemu-professional` |
 | `SANDBOX_TRUSTED_DOCKER_RUNTIME` | `false` | must be `true` when using Docker |
+| `SANDBOX_KATA_BINARY` | `ctr` | Kata/containerd client binary |
+| `SANDBOX_KATA_RUNTIME_CLASS` | `io.containerd.kata.v2` | Kata runtime class name |
+| `SANDBOX_KATA_CONTAINERD_SOCKET` | `/run/containerd/containerd.sock` | containerd socket used for Kata |
 
 Important truth:
 
-- If `SANDBOX_RUNTIME=docker`, startup fails unless `SANDBOX_TRUSTED_DOCKER_RUNTIME=true`
+- If `docker-dev` is enabled or defaulted, startup fails unless `SANDBOX_TRUSTED_DOCKER_RUNTIME=true`
 - This is on purpose, so the operator must clearly opt in to Docker's shared-kernel model
-- In production mode, startup also fails unless `SANDBOX_RUNTIME=qemu`
+- In production mode, startup fails unless the default runtime selection is VM-backed (`containerd-kata-professional` or `qemu-professional`)
+
+Supported v1 runtime selections:
+
+- `docker-dev`
+- `containerd-kata-professional`
+- `qemu-professional`
+
+Example local Docker setup:
+
+```bash
+SANDBOX_ENABLED_RUNTIME_SELECTIONS=docker-dev
+SANDBOX_DEFAULT_RUNTIME_SELECTION=docker-dev
+SANDBOX_TRUSTED_DOCKER_RUNTIME=true
+```
+
+Example mixed Docker + Kata setup:
+
+```bash
+SANDBOX_ENABLED_RUNTIME_SELECTIONS=docker-dev,containerd-kata-professional
+SANDBOX_DEFAULT_RUNTIME_SELECTION=containerd-kata-professional
+SANDBOX_TRUSTED_DOCKER_RUNTIME=true
+SANDBOX_KATA_BINARY=ctr
+SANDBOX_KATA_RUNTIME_CLASS=io.containerd.kata.v2
+SANDBOX_KATA_CONTAINERD_SOCKET=/run/containerd/containerd.sock
+```
 
 Platform note:
 

@@ -2,7 +2,7 @@
 
 This guide shows the easiest way to get `or3-sandbox` running.
 
-If you are brand new to the project, use the **Docker runtime** first.
+If you are brand new to the project, use the **Docker runtime selection** first.
 
 If you are deploying for production, stop after the local setup walkthrough and switch to the operator docs in [Production Deployment](operations/production-deployment.md).
 
@@ -13,6 +13,13 @@ If you are deploying for production, stop after the local setup walkthrough and 
 - macOS or Linux
 - Go 1.26 or newer
 - Docker
+
+### Optional for the Kata path
+
+- Linux host
+- containerd
+- Kata Containers runtime installed
+- `ctr` available in `PATH`
 
 ### Optional for the QEMU path
 
@@ -39,14 +46,15 @@ docker version
 
 If Docker is not installed or not running, fix that first.
 
-## Step 3: Start the daemon with Docker runtime
+## Step 3: Start the daemon with Docker runtime selection
 
-The Docker runtime is treated as a **trusted** mode, so you must say that on purpose.
+The Docker path is treated as a **trusted** mode, so you must say that on purpose.
 
 Run:
 
 ```bash
-SANDBOX_RUNTIME=docker \
+SANDBOX_ENABLED_RUNTIME_SELECTIONS=docker-dev \
+SANDBOX_DEFAULT_RUNTIME_SELECTION=docker-dev \
 SANDBOX_TRUSTED_DOCKER_RUNTIME=true \
 go run ./cmd/sandboxd \
   -listen :8080 \
@@ -61,6 +69,15 @@ What this does:
 - creates a SQLite database in `./data`
 - stores sandbox files under `./data/storage`
 - stores snapshot files under `./data/snapshots`
+- enables the `docker-dev` runtime selection as the default for new sandboxes
+
+Legacy compatibility note:
+
+```bash
+SANDBOX_RUNTIME=docker
+```
+
+still works, but new docs and examples use explicit runtime selections.
 
 ## Step 4: Set client environment variables
 
@@ -101,6 +118,12 @@ go run ./cmd/sandboxctl runtime-health
 go run ./cmd/sandboxctl create --image alpine:3.20 --start
 ```
 
+That uses the daemon's default runtime selection. To request Docker explicitly:
+
+```bash
+go run ./cmd/sandboxctl create --image alpine:3.20 --runtime docker-dev --start
+```
+
 Then list sandboxes:
 
 ```bash
@@ -108,6 +131,31 @@ go run ./cmd/sandboxctl list
 ```
 
 If that works, your setup is good.
+
+## Optional: Start with Docker and Kata enabled together
+
+On a Linux host with containerd and Kata installed, you can enable both the
+trusted Docker path and the professional Kata path in one daemon:
+
+```bash
+SANDBOX_ENABLED_RUNTIME_SELECTIONS=docker-dev,containerd-kata-professional \
+SANDBOX_DEFAULT_RUNTIME_SELECTION=containerd-kata-professional \
+SANDBOX_TRUSTED_DOCKER_RUNTIME=true \
+SANDBOX_KATA_BINARY=ctr \
+SANDBOX_KATA_RUNTIME_CLASS=io.containerd.kata.v2 \
+SANDBOX_KATA_CONTAINERD_SOCKET=/run/containerd/containerd.sock \
+go run ./cmd/sandboxd
+```
+
+Then create sandboxes with either:
+
+```bash
+go run ./cmd/sandboxctl create --image alpine:3.20 --runtime docker-dev --start
+go run ./cmd/sandboxctl create --image alpine:3.20 --runtime containerd-kata-professional --start
+```
+
+Use `go run ./cmd/sandboxctl doctor` to confirm the host prerequisites before
+turning on Kata or QEMU.
 
 ## Common setup problems
 
@@ -132,9 +180,29 @@ Cause:
 Fix:
 
 ```bash
-export SANDBOX_RUNTIME=docker
+export SANDBOX_ENABLED_RUNTIME_SELECTIONS=docker-dev
+export SANDBOX_DEFAULT_RUNTIME_SELECTION=docker-dev
 export SANDBOX_TRUSTED_DOCKER_RUNTIME=true
 ```
+
+## Problem: Kata runtime error at startup
+
+Cause:
+
+- `ctr`, containerd, or the configured Kata runtime class is unavailable
+
+Fix:
+
+```bash
+go run ./cmd/sandboxctl doctor
+```
+
+Then verify:
+
+- `SANDBOX_KATA_BINARY`
+- `SANDBOX_KATA_RUNTIME_CLASS`
+- `SANDBOX_KATA_CONTAINERD_SOCKET`
+- containerd is running on the local host
 
 ## Problem: command not found
 

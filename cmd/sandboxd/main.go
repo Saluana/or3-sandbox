@@ -18,6 +18,7 @@ import (
 	"or3-sandbox/internal/model"
 	"or3-sandbox/internal/repository"
 	runtimedocker "or3-sandbox/internal/runtime/docker"
+	runtimekata "or3-sandbox/internal/runtime/kata"
 	runtimeqemu "or3-sandbox/internal/runtime/qemu"
 	"or3-sandbox/internal/runtime/registry"
 	"or3-sandbox/internal/service"
@@ -117,6 +118,15 @@ func buildRuntime(cfg config.Config) (model.RuntimeManager, error) {
 				return nil, err
 			}
 			runtimes[selection] = rt
+		case model.RuntimeSelectionContainerdKataProfessional:
+			runtimes[selection] = runtimekata.New(runtimekata.Options{
+				Binary:                    cfg.KataBinary,
+				RuntimeClass:              cfg.KataRuntimeClass,
+				ContainerdSocket:          cfg.KataContainerdSocket,
+				SnapshotMaxBytes:          cfg.SnapshotMaxBytes,
+				SnapshotMaxFiles:          cfg.SnapshotMaxFiles,
+				SnapshotMaxExpansionRatio: cfg.SnapshotMaxExpansionRatio,
+			})
 		default:
 			return nil, errors.New("unsupported runtime selection")
 		}

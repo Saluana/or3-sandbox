@@ -93,6 +93,7 @@ func runProductionQEMUDoctor() doctorSummary {
 		add("fail", "config", err.Error())
 		cfg = doctorConfigFromEnv()
 	}
+	reportRuntimeSelections(add, cfg)
 	if cfg.RuntimeBackend != "qemu" {
 		add("fail", "runtime", "SANDBOX_RUNTIME must be qemu for production-qemu validation")
 	} else {
@@ -114,17 +115,9 @@ func runProductionQEMUDoctor() doctorSummary {
 	} else {
 		add("pass", "host-os", "linux host detected")
 	}
-	for _, command := range []string{cfg.QEMUBinary, "qemu-img"} {
-		if strings.TrimSpace(command) == "" {
-			add("fail", "command", "SANDBOX_QEMU_BINARY must be set for production-qemu validation")
-			continue
-		}
-		if _, err := doctorLookPath(command); err != nil {
-			add("fail", "command", fmt.Sprintf("required command %q is not available", command))
-		} else {
-			add("pass", "command", fmt.Sprintf("found %q", command))
-		}
-	}
+	reportDockerDoctor(add, cfg)
+	reportKataDoctor(add, cfg)
+	reportQEMUDoctor(add, cfg)
 	if doctorHostOS == "linux" {
 		if _, err := doctorStat("/dev/kvm"); err != nil {
 			add("fail", "kvm", "/dev/kvm is not available")
@@ -211,6 +204,87 @@ func runProductionQEMUDoctor() doctorSummary {
 		add("pass", "image-contract", fmt.Sprintf("image %q profile=%s control=%s protocol=%s", imagePath, contract.Profile, contract.Control.Mode, contract.Control.ProtocolVersion))
 	}
 	return summary
+}
+
+func reportRuntimeSelections(add func(string, string, string), cfg config.Config) {
+	if cfg.DefaultRuntimeSelection == "" {
+		add("fail", "runtime-selection", "default runtime selection is not configured")
+	} else {
+		add("pass", "runtime-selection", fmt.Sprintf("default runtime selection is %q", cfg.DefaultRuntimeSelection))
+	}
+	if len(cfg.EnabledRuntimeSelections) == 0 {
+		add("fail", "runtime-selection", "no enabled runtime selections are configured")
+		return
+	}
+	enabled := make([]string, 0, len(cfg.EnabledRuntimeSelections))
+	for _, selection := range cfg.EnabledRuntimeSelections {
+		enabled = append(enabled, string(selection))
+	}
+	sort.Strings(enabled)
+	add("pass", "runtime-selection", "enabled runtime selections: "+strings.Join(enabled, ", "))
+}
+
+func reportDockerDoctor(add func(string, string, string), cfg config.Config) {
+	if !cfg.IsRuntimeSelectionEnabled(model.RuntimeSelectionDockerDev) {
+		return
+	}
+	if !cfg.TrustedDockerRuntime {
+		add("fail", "docker", "docker-dev is enabled but SANDBOX_TRUSTED_DOCKER_RUNTIME=true is required")
+		return
+	}
+	if _, err := doctorLookPath("docker"); err != nil {
+		add("fail", "docker", "docker CLI is not available")
+		return
+	}
+	add("pass", "docker", "docker-dev prerequisites are present")
+}
+
+func reportKataDoctor(add func(string, string, string), cfg config.Config) {
+	if !cfg.IsRuntimeSelectionEnabled(model.RuntimeSelectionContainerdKataProfessional) {
+		return
+	}
+	if doctorHostOS != "linux" {
+		add("fail", "kata", fmt.Sprintf("host OS %s is not supported for containerd+Kata", doctorHostOS))
+		return
+	}
+	if strings.TrimSpace(cfg.KataBinary) == "" {
+		add("fail", "kata", "SANDBOX_KATA_BINARY must be set")
+		return
+	}
+	if _, err := doctorLookPath(cfg.KataBinary); err != nil {
+		add("fail", "kata", fmt.Sprintf("kata client binary %q is not available", cfg.KataBinary))
+		return
+	}
+	if strings.TrimSpace(cfg.KataRuntimeClass) == "" {
+		add("fail", "kata", "SANDBOX_KATA_RUNTIME_CLASS must be set")
+		return
+	}
+	if strings.TrimSpace(cfg.KataContainerdSocket) == "" {
+		add("fail", "kata", "SANDBOX_KATA_CONTAINERD_SOCKET must be set")
+		return
+	}
+	if _, err := doctorStat(cfg.KataContainerdSocket); err != nil {
+		add("fail", "kata", fmt.Sprintf("containerd socket %q is not accessible: %v", cfg.KataContainerdSocket, err))
+		return
+	}
+	add("pass", "kata", fmt.Sprintf("kata runtime class %q and containerd socket %q are configured", cfg.KataRuntimeClass, cfg.KataContainerdSocket))
+}
+
+func reportQEMUDoctor(add func(string, string, string), cfg config.Config) {
+	if !cfg.IsRuntimeSelectionEnabled(model.RuntimeSelectionQEMUProfessional) {
+		return
+	}
+	for _, command := range []string{cfg.QEMUBinary, "qemu-img"} {
+		if strings.TrimSpace(command) == "" {
+			add("fail", "command", "SANDBOX_QEMU_BINARY must be set for production-qemu validation")
+			continue
+		}
+		if _, err := doctorLookPath(command); err != nil {
+			add("fail", "command", fmt.Sprintf("required command %q is not available", command))
+		} else {
+			add("pass", "command", fmt.Sprintf("found %q", command))
+		}
+	}
 }
 
 func doctorConfigFromEnv() config.Config {

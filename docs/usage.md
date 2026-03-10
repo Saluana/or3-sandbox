@@ -53,6 +53,23 @@ The CLI supports these top-level commands:
 go run ./cmd/sandboxctl create --image alpine:3.20 --start
 ```
 
+If you omit `--runtime`, the daemon uses its configured default runtime
+selection.
+
+Useful runtime selections:
+
+- `docker-dev`
+- `containerd-kata-professional`
+- `qemu-professional`
+
+Examples:
+
+```bash
+go run ./cmd/sandboxctl create --image alpine:3.20 --runtime docker-dev --start
+go run ./cmd/sandboxctl create --image alpine:3.20 --runtime containerd-kata-professional --start
+go run ./cmd/sandboxctl create --image "$SANDBOX_QEMU_BASE_IMAGE_PATH" --runtime qemu-professional --start
+```
+
 Profile guidance:
 
 - `alpine:3.20` maps to the lightweight `core` profile and is the default Docker image posture
@@ -62,6 +79,7 @@ Profile guidance:
 Useful flags:
 
 - `--image`
+- `--runtime`
 - `--cpu`
 - `--memory-mb`
 - `--pids`
@@ -75,6 +93,7 @@ Example with more settings:
 ```bash
 go run ./cmd/sandboxctl create \
   --image alpine:3.20 \
+  --runtime containerd-kata-professional \
   --cpu 2 \
   --memory-mb 1024 \
   --disk-mb 4096 \
@@ -231,9 +250,16 @@ Runtime health:
 
 ```bash
 go run ./cmd/sandboxctl runtime-health
+go run ./cmd/sandboxctl doctor
 ```
 
 These are good first commands when something seems wrong.
+
+`doctor` is especially useful after enabling Kata or QEMU because it reports:
+
+- enabled runtime selections
+- the default runtime selection
+- host prerequisite failures per runtime
 
 ## 10. Work with snapshots
 
@@ -283,9 +309,10 @@ Run a preset:
 go run ./cmd/sandboxctl preset run playwright
 ```
 
-The command stays the same for Docker and QEMU. The difference is packaging:
+The command stays the same across Docker, Kata, and QEMU. The difference is packaging:
 
 - Docker presets usually point at container images directly.
+- Kata presets also use container images, but run them through containerd + Kata.
 - QEMU presets usually point at a guest image path or use a documented `runtime.profile` plus `--env QEMU_GUEST_IMAGE=...`.
 - QEMU runs also have an extra guest-ready phase before bootstrap and app readiness begin.
 
@@ -331,6 +358,7 @@ curl -X POST http://127.0.0.1:8080/v1/sandboxes \
   -H 'Authorization: Bearer dev-token' \
   -H 'Content-Type: application/json' \
   -d '{
+    "runtime_selection": "containerd-kata-professional",
     "base_image_ref": "alpine:3.20",
     "cpu_limit": 2,
     "memory_limit_mb": 512,
@@ -361,7 +389,8 @@ If you leave out `timeout`, the server uses its normal default.
 
 Snapshots are now available from both the API and `sandboxctl`.
 
-Docker and QEMU still store snapshot data differently under the hood, but the user-facing create, list, inspect, and restore workflow is the same.
+Docker, Kata, and QEMU still store snapshot data differently under the hood,
+but the user-facing create, list, inspect, and restore workflow is the same.
 
 ## Good habits
 
