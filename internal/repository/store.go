@@ -21,6 +21,13 @@ func New(db *sql.DB) *Store {
 	return &Store{db: db}
 }
 
+// DB returns the underlying *sql.DB. This is intended for use in tests that
+// need direct database access (e.g. to simulate legacy rows without a
+// runtime_class column value).
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
 func (s *Store) WithTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -172,14 +179,14 @@ func (s *Store) CreateSandbox(ctx context.Context, sandbox model.Sandbox) error 
 	return s.WithTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO sandboxes(
-				sandbox_id, tenant_id, status, runtime_backend, base_image_ref,
+				sandbox_id, tenant_id, status, runtime_backend, runtime_class, base_image_ref,
 				profile, feature_set, capability_set, control_mode, control_protocol_version, workspace_contract_version, image_contract_version,
 				cpu_limit, cpu_limit_millis, memory_limit_mb, pids_limit, disk_limit_mb,
 				network_mode, allow_tunnels, storage_root, workspace_root, cache_root,
 				created_at, updated_at, last_active_at, deleted_at
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-		`, sandbox.ID, sandbox.TenantID, string(sandbox.Status), sandbox.RuntimeBackend, sandbox.BaseImageRef,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+		`, sandbox.ID, sandbox.TenantID, string(sandbox.Status), sandbox.RuntimeBackend, string(sandbox.RuntimeClass), sandbox.BaseImageRef,
 			string(sandbox.Profile), joinStringList(sandbox.Features), joinStringList(sandbox.Capabilities), string(sandbox.ControlMode), sandbox.ControlProtocolVersion, sandbox.WorkspaceContractVersion, sandbox.ImageContractVersion,
 			sandbox.CPULimit.VCPUCount(), sandbox.CPULimit.MilliValue(), sandbox.MemoryLimitMB, sandbox.PIDsLimit, sandbox.DiskLimitMB,
 			string(sandbox.NetworkMode), boolToInt(sandbox.AllowTunnels), sandbox.StorageRoot, sandbox.WorkspaceRoot, sandbox.CacheRoot,
@@ -194,8 +201,8 @@ func (s *Store) CreateSandbox(ctx context.Context, sandbox model.Sandbox) error 
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO sandbox_storage(sandbox_id, rootfs_bytes, workspace_bytes, cache_bytes, snapshot_bytes, updated_at)
-			VALUES (?, 0, 0, 0, 0, ?)
+			INSERT INTO sandbox_storage(sandbox_id, rootfs_bytes, workspace_bytes, cache_bytes, snapshot_bytes, rootfs_entries, workspace_entries, cache_entries, snapshot_entries, updated_at)
+			VALUES (?, 0, 0, 0, 0, 0, 0, 0, 0, ?)
 		`, sandbox.ID, now); err != nil {
 			return err
 		}
@@ -245,7 +252,7 @@ func (s *Store) UpdateRuntimeState(ctx context.Context, sandboxID string, state 
 
 func (s *Store) GetSandbox(ctx context.Context, tenantID, sandboxID string) (model.Sandbox, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
+		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.runtime_class, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
 		       s.memory_limit_mb, s.pids_limit, s.disk_limit_mb, s.network_mode, s.allow_tunnels,
 		       s.storage_root, s.workspace_root, s.cache_root,
 		       s.created_at, s.updated_at, s.last_active_at, s.deleted_at,
@@ -263,7 +270,7 @@ func (s *Store) GetSandbox(ctx context.Context, tenantID, sandboxID string) (mod
 
 func (s *Store) ListSandboxes(ctx context.Context, tenantID string) ([]model.Sandbox, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
+		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.runtime_class, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
 		       s.memory_limit_mb, s.pids_limit, s.disk_limit_mb, s.network_mode, s.allow_tunnels,
 		       s.storage_root, s.workspace_root, s.cache_root,
 		       s.created_at, s.updated_at, s.last_active_at, s.deleted_at,
@@ -298,7 +305,7 @@ func (s *Store) ListNonDeletedSandboxesByTenant(ctx context.Context, tenantID st
 
 func (s *Store) listNonDeletedSandboxes(ctx context.Context, tenantID string) ([]model.Sandbox, error) {
 	query := `
-		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
+		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_backend, s.runtime_class, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
 		       s.memory_limit_mb, s.pids_limit, s.disk_limit_mb, s.network_mode, s.allow_tunnels,
 		       s.storage_root, s.workspace_root, s.cache_root,
 		       s.created_at, s.updated_at, s.last_active_at, s.deleted_at,
@@ -343,24 +350,25 @@ func (s *Store) StorageUsageUpdatedAt(ctx context.Context, sandboxID string) (ti
 	return parseTime(updated)
 }
 
-func (s *Store) UpdateStorageUsage(ctx context.Context, sandboxID string, rootfsBytes, workspaceBytes, cacheBytes, snapshotBytes int64) error {
+func (s *Store) UpdateStorageUsage(ctx context.Context, sandboxID string, rootfsBytes, workspaceBytes, cacheBytes, snapshotBytes, rootfsEntries, workspaceEntries, cacheEntries, snapshotEntries int64) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE sandbox_storage
-		SET rootfs_bytes=?, workspace_bytes=?, cache_bytes=?, snapshot_bytes=?, updated_at=?
+		SET rootfs_bytes=?, workspace_bytes=?, cache_bytes=?, snapshot_bytes=?, rootfs_entries=?, workspace_entries=?, cache_entries=?, snapshot_entries=?, updated_at=?
 		WHERE sandbox_id=?
-	`, rootfsBytes, workspaceBytes, cacheBytes, snapshotBytes, time.Now().UTC().Format(time.RFC3339Nano), sandboxID)
+	`, rootfsBytes, workspaceBytes, cacheBytes, snapshotBytes, rootfsEntries, workspaceEntries, cacheEntries, snapshotEntries, time.Now().UTC().Format(time.RFC3339Nano), sandboxID)
 	return err
 }
 
 type TenantUsage struct {
-	Sandboxes          int               `json:"sandboxes"`
-	RunningSandboxes   int               `json:"running_sandboxes"`
-	ConcurrentExecs    int               `json:"concurrent_execs"`
-	ActiveTunnels      int               `json:"active_tunnels"`
-	RequestedCPU       model.CPUQuantity `json:"requested_cpu"`
-	RequestedMemory    int               `json:"requested_memory_mb"`
-	RequestedStorage   int               `json:"requested_storage_mb"`
-	ActualStorageBytes int64             `json:"actual_storage_bytes"`
+	Sandboxes            int               `json:"sandboxes"`
+	RunningSandboxes     int               `json:"running_sandboxes"`
+	ConcurrentExecs      int               `json:"concurrent_execs"`
+	ActiveTunnels        int               `json:"active_tunnels"`
+	RequestedCPU         model.CPUQuantity `json:"requested_cpu"`
+	RequestedMemory      int               `json:"requested_memory_mb"`
+	RequestedStorage     int               `json:"requested_storage_mb"`
+	ActualStorageBytes   int64             `json:"actual_storage_bytes"`
+	ActualStorageEntries int64             `json:"actual_storage_entries"`
 }
 
 func (s *Store) TenantUsage(ctx context.Context, tenantID string) (TenantUsage, error) {
@@ -372,6 +380,7 @@ func (s *Store) TenantUsage(ctx context.Context, tenantID string) (TenantUsage, 
 			SUM(s.memory_limit_mb) AS memory_total,
 			SUM(s.disk_limit_mb) AS storage_total,
 			SUM(COALESCE(ss.rootfs_bytes, 0) + COALESCE(ss.workspace_bytes, 0) + COALESCE(ss.cache_bytes, 0) + COALESCE(ss.snapshot_bytes, 0)) AS actual_storage_bytes,
+			SUM(COALESCE(ss.rootfs_entries, 0) + COALESCE(ss.workspace_entries, 0) + COALESCE(ss.cache_entries, 0) + COALESCE(ss.snapshot_entries, 0)) AS actual_storage_entries,
 			COALESCE((SELECT COUNT(*) FROM executions e WHERE e.tenant_id = ? AND e.status = ?), 0) AS concurrent_execs,
 			COALESCE((SELECT COUNT(*) FROM tunnels t WHERE t.tenant_id = ? AND t.revoked_at IS NULL), 0) AS active_tunnels
 		FROM sandboxes s
@@ -379,8 +388,8 @@ func (s *Store) TenantUsage(ctx context.Context, tenantID string) (TenantUsage, 
 		WHERE s.tenant_id = ? AND s.status != ?
 	`, string(model.SandboxStatusRunning), tenantID, string(model.ExecutionStatusRunning), tenantID, tenantID, string(model.SandboxStatusDeleted))
 	var usage TenantUsage
-	var running, cpuTotal, memTotal, storageTotal, actualStorageBytes sql.NullInt64
-	if err := row.Scan(&usage.Sandboxes, &running, &cpuTotal, &memTotal, &storageTotal, &actualStorageBytes, &usage.ConcurrentExecs, &usage.ActiveTunnels); err != nil {
+	var running, cpuTotal, memTotal, storageTotal, actualStorageBytes, actualStorageEntries sql.NullInt64
+	if err := row.Scan(&usage.Sandboxes, &running, &cpuTotal, &memTotal, &storageTotal, &actualStorageBytes, &actualStorageEntries, &usage.ConcurrentExecs, &usage.ActiveTunnels); err != nil {
 		return usage, err
 	}
 	usage.RunningSandboxes = int(running.Int64)
@@ -388,6 +397,7 @@ func (s *Store) TenantUsage(ctx context.Context, tenantID string) (TenantUsage, 
 	usage.RequestedMemory = int(memTotal.Int64)
 	usage.RequestedStorage = int(storageTotal.Int64)
 	usage.ActualStorageBytes = actualStorageBytes.Int64
+	usage.ActualStorageEntries = actualStorageEntries.Int64
 	return usage, nil
 }
 
@@ -501,9 +511,9 @@ func (s *Store) CreateSnapshot(ctx context.Context, snapshot model.Snapshot) err
 		completed = snapshot.CompletedAt.UTC().Format(time.RFC3339Nano)
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO snapshots(snapshot_id, sandbox_id, tenant_id, name, status, image_ref, profile, image_contract_version, control_protocol_version, workspace_tar, export_location, created_at, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, snapshot.ID, snapshot.SandboxID, snapshot.TenantID, snapshot.Name, string(snapshot.Status), snapshot.ImageRef, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceTar, snapshot.ExportLocation, snapshot.CreatedAt.UTC().Format(time.RFC3339Nano), completed)
+		INSERT INTO snapshots(snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, export_location, created_at, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, snapshot.ID, snapshot.SandboxID, snapshot.TenantID, snapshot.Name, string(snapshot.Status), snapshot.ImageRef, snapshot.RuntimeBackend, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceContractVersion, snapshot.WorkspaceTar, snapshot.ExportLocation, snapshot.CreatedAt.UTC().Format(time.RFC3339Nano), completed)
 	return err
 }
 
@@ -514,15 +524,15 @@ func (s *Store) UpdateSnapshot(ctx context.Context, snapshot model.Snapshot) err
 	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE snapshots
-		SET status=?, image_ref=?, profile=?, image_contract_version=?, control_protocol_version=?, workspace_tar=?, export_location=?, completed_at=?
+		SET status=?, image_ref=?, runtime_backend=?, profile=?, image_contract_version=?, control_protocol_version=?, workspace_contract_version=?, workspace_tar=?, export_location=?, completed_at=?
 		WHERE snapshot_id=? AND tenant_id=?
-	`, string(snapshot.Status), snapshot.ImageRef, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceTar, snapshot.ExportLocation, completed, snapshot.ID, snapshot.TenantID)
+	`, string(snapshot.Status), snapshot.ImageRef, snapshot.RuntimeBackend, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceContractVersion, snapshot.WorkspaceTar, snapshot.ExportLocation, completed, snapshot.ID, snapshot.TenantID)
 	return err
 }
 
 func (s *Store) GetSnapshot(ctx context.Context, tenantID, snapshotID string) (model.Snapshot, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, profile, image_contract_version, control_protocol_version, workspace_tar, export_location, created_at, completed_at
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, export_location, created_at, completed_at
 		FROM snapshots WHERE tenant_id=? AND snapshot_id=?
 	`, tenantID, snapshotID)
 	return scanSnapshot(row)
@@ -530,7 +540,7 @@ func (s *Store) GetSnapshot(ctx context.Context, tenantID, snapshotID string) (m
 
 func (s *Store) ListSnapshots(ctx context.Context, tenantID, sandboxID string) ([]model.Snapshot, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, profile, image_contract_version, control_protocol_version, workspace_tar, export_location, created_at, completed_at
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, export_location, created_at, completed_at
 		FROM snapshots
 		WHERE tenant_id=? AND sandbox_id=?
 		ORDER BY created_at DESC
@@ -551,11 +561,20 @@ func (s *Store) ListSnapshots(ctx context.Context, tenantID, sandboxID string) (
 }
 
 func (s *Store) AddAuditEvent(ctx context.Context, event model.AuditEvent) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO audit_events(audit_event_id, tenant_id, sandbox_id, action, resource_id, outcome, message, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, event.ID, event.TenantID, event.SandboxID, event.Action, event.ResourceID, event.Outcome, event.Message, event.CreatedAt.UTC().Format(time.RFC3339Nano))
-	return err
+	return s.WithTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO audit_events(audit_event_id, tenant_id, sandbox_id, action, resource_id, outcome, message, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, event.ID, event.TenantID, event.SandboxID, event.Action, event.ResourceID, event.Outcome, event.Message, event.CreatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO audit_event_counts(tenant_id, action, outcome, total)
+			VALUES (?, ?, ?, 1)
+			ON CONFLICT(tenant_id, action, outcome) DO UPDATE SET total = total + 1
+		`, event.TenantID, event.Action, event.Outcome)
+		return err
+	})
 }
 
 func (s *Store) ListRunningExecutions(ctx context.Context) ([]model.Execution, error) {
@@ -587,7 +606,7 @@ func (s *Store) ListRunningExecutions(ctx context.Context) ([]model.Execution, e
 
 func (s *Store) ListSnapshotsByStatus(ctx context.Context, status model.SnapshotStatus) ([]model.Snapshot, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, profile, image_contract_version, control_protocol_version, workspace_tar, export_location, created_at, completed_at
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, export_location, created_at, completed_at
 		FROM snapshots
 		WHERE status = ?
 		ORDER BY created_at
@@ -684,6 +703,31 @@ func (s *Store) ListAuditEvents(ctx context.Context, tenantID string) ([]model.A
 	return events, rows.Err()
 }
 
+func (s *Store) AuditEventCounts(ctx context.Context, tenantID string) (map[string]map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT action, outcome, total
+		FROM audit_event_counts
+		WHERE tenant_id = ?
+	`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := make(map[string]map[string]int)
+	for rows.Next() {
+		var action, outcome string
+		var count int
+		if err := rows.Scan(&action, &outcome, &count); err != nil {
+			return nil, err
+		}
+		if counts[action] == nil {
+			counts[action] = make(map[string]int)
+		}
+		counts[action][outcome] = count
+	}
+	return counts, rows.Err()
+}
+
 func scanSandbox(scanner interface{ Scan(...any) error }) (model.Sandbox, error) {
 	var sandbox model.Sandbox
 	var created, updated, lastActive string
@@ -691,8 +735,9 @@ func scanSandbox(scanner interface{ Scan(...any) error }) (model.Sandbox, error)
 	var allowTunnels int
 	var profile, featureSet, capabilitySet, controlMode, controlProtocolVersion, workspaceContractVersion, imageContractVersion string
 	var cpuLimitMillis int64
+	var runtimeClass string
 	if err := scanner.Scan(
-		&sandbox.ID, &sandbox.TenantID, &sandbox.Status, &sandbox.RuntimeBackend, &sandbox.BaseImageRef, &profile, &featureSet, &capabilitySet, &controlMode, &controlProtocolVersion, &workspaceContractVersion, &imageContractVersion,
+		&sandbox.ID, &sandbox.TenantID, &sandbox.Status, &sandbox.RuntimeBackend, &runtimeClass, &sandbox.BaseImageRef, &profile, &featureSet, &capabilitySet, &controlMode, &controlProtocolVersion, &workspaceContractVersion, &imageContractVersion,
 		&cpuLimitMillis, &sandbox.MemoryLimitMB, &sandbox.PIDsLimit, &sandbox.DiskLimitMB, &sandbox.NetworkMode,
 		&allowTunnels, &sandbox.StorageRoot, &sandbox.WorkspaceRoot, &sandbox.CacheRoot,
 		&created, &updated, &lastActive, &deleted,
@@ -712,6 +757,12 @@ func scanSandbox(scanner interface{ Scan(...any) error }) (model.Sandbox, error)
 	sandbox.WorkspaceContractVersion = workspaceContractVersion
 	sandbox.ImageContractVersion = imageContractVersion
 	sandbox.AllowTunnels = allowTunnels == 1
+	// Derive runtime class from backend when the stored value is empty (legacy rows).
+	if runtimeClass == "" {
+		sandbox.RuntimeClass = model.BackendToRuntimeClass(sandbox.RuntimeBackend)
+	} else {
+		sandbox.RuntimeClass = model.RuntimeClass(runtimeClass)
+	}
 	createdAt, err := parseTime(created)
 	if err != nil {
 		return model.Sandbox{}, err
@@ -766,16 +817,18 @@ func scanSnapshot(scanner interface{ Scan(...any) error }) (model.Snapshot, erro
 	var snapshot model.Snapshot
 	var created string
 	var completed sql.NullString
-	var profile, imageContractVersion, controlProtocolVersion string
-	if err := scanner.Scan(&snapshot.ID, &snapshot.SandboxID, &snapshot.TenantID, &snapshot.Name, &snapshot.Status, &snapshot.ImageRef, &profile, &imageContractVersion, &controlProtocolVersion, &snapshot.WorkspaceTar, &snapshot.ExportLocation, &created, &completed); err != nil {
+	var runtimeBackend, profile, imageContractVersion, controlProtocolVersion, workspaceContractVersion string
+	if err := scanner.Scan(&snapshot.ID, &snapshot.SandboxID, &snapshot.TenantID, &snapshot.Name, &snapshot.Status, &snapshot.ImageRef, &runtimeBackend, &profile, &imageContractVersion, &controlProtocolVersion, &workspaceContractVersion, &snapshot.WorkspaceTar, &snapshot.ExportLocation, &created, &completed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.Snapshot{}, ErrNotFound
 		}
 		return model.Snapshot{}, err
 	}
+	snapshot.RuntimeBackend = runtimeBackend
 	snapshot.Profile = model.GuestProfile(profile)
 	snapshot.ImageContractVersion = imageContractVersion
 	snapshot.ControlProtocolVersion = controlProtocolVersion
+	snapshot.WorkspaceContractVersion = workspaceContractVersion
 	createdAt, err := parseTime(created)
 	if err != nil {
 		return model.Snapshot{}, err

@@ -22,8 +22,15 @@ Important truths:
 Shared manifest notes:
 
 - `runtime.allowed` keeps one manifest honest across runtimes
-- `runtime.profile` is an optional guest-profile hint used by the QEMU path
+- `runtime.profile` is the shared curated profile contract for both Docker and QEMU
 - if a QEMU preset uses `${QEMU_GUEST_IMAGE}`, pass it with `--env QEMU_GUEST_IMAGE=/path/to/guest.qcow2` or override with `--set image=/path/to/guest.qcow2`
+
+Curated profile guidance:
+
+- use `core` or `runtime` for normal command-and-files workflows
+- use `browser` only when the image really needs browser automation tooling
+- use `container` only for explicit inner-Docker compatibility cases
+- treat `debug` and `container` as dangerous profiles that operators should block by default in production
 
 Shipped presets:
 

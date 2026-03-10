@@ -96,12 +96,32 @@ These features show that a sandbox is more than a container or VM that just runs
 You can:
 
 - keep files in `/workspace`
+- treat `/workspace` as the only durable, user-managed storage class
+- use `/cache` and `/scratch` only for disposable build output, downloads, and temp data
+- keep operator-provided material under `/secrets`, not inside `/workspace`
 - run background tasks
-- publish a chosen port in a controlled way
+- publish a chosen port in a controlled way through the tunnel control plane
+
+## Storage classes and durability
+
+- `/workspace` is the durable user workspace and is the only class included in portable Docker snapshot archives
+- `/cache` is service-owned writable cache space and is excluded from portable snapshot/export flows
+- `/scratch` is disposable writable space for temporary work and is excluded from snapshot/export flows
+- `/secrets` is reserved for operator-managed material and should be treated as read-only guest input
+
+For QEMU-backed sandboxes, the requested disk limit is split between the writable system layer and the workspace disk. That split is the hard VM storage boundary; host-side files such as cache, scratch, snapshots, and logs still need separate operator monitoring.
+
+## Tunnel exposure rules
+
+- sandbox services stay loopback-only by default
+- egress behavior still follows the requested network mode
+- public reachability only happens when the control plane publishes a tunnel endpoint
+- revoking the tunnel removes the published entry point without changing the sandbox's internal bind address
 
 ## Good safety habits
 
 - only create tunnels you actually need
 - revoke tunnels when finished
 - keep important files in `/workspace`
+- do not store secrets in `/workspace` if they should stay out of snapshots or exports
 - prefer small test commands first

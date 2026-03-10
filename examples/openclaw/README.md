@@ -2,6 +2,8 @@
 
 This preset starts an OpenClaw gateway inside a Docker sandbox, waits for it to become healthy, and publishes the Control UI through an OR3 tunnel.
 
+It uses the shared `runtime` profile because it needs a general-purpose application image, not browser tooling or inner Docker.
+
 It is tuned for the browser flow we debugged in this repo:
 
 - the gateway binds to loopback inside the sandbox
@@ -16,6 +18,7 @@ It is tuned for the browser flow we debugged in this repo:
 - `OPENROUTER_API_KEY` set in your shell or in a local `.env` file if you want hosted model access through OpenRouter
 - optional `OPENCLAW_MODEL` set in your shell or local `.env`
 - operator policy must allow the chosen image and tunnel configuration
+- production allowlists should prefer a digest-pinned curated image ref instead of broad registry wildcards
 
 ## Configuration inputs
 

@@ -12,12 +12,14 @@
 2. `curl -fsS -H "Authorization: Bearer $SANDBOX_TOKEN" "$SANDBOX_API/v1/runtime/capacity"`
 3. `curl -fsS -H "Authorization: Bearer $SANDBOX_TOKEN" "$SANDBOX_API/metrics"`
 4. the largest sandbox and snapshot directories under the storage roots
+5. recent `admission.*`, `snapshot.*`, and `sandbox.storage_pressure` audit events
 
 ## Immediate actions
 
 - preserve critical workload data first
 - stop non-critical work only if it helps protect critical sandboxes or snapshots
 - avoid deleting snapshot artifacts until you know whether they are the only recovery path
+- if configured, admission limits may already be denying new create/start work while you recover free space
 
 ## Recovery
 

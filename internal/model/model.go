@@ -92,6 +92,7 @@ type Sandbox struct {
 	TenantID                 string           `json:"tenant_id"`
 	Status                   SandboxStatus    `json:"status"`
 	RuntimeBackend           string           `json:"runtime_backend"`
+	RuntimeClass             RuntimeClass     `json:"runtime_class,omitempty"`
 	BaseImageRef             string           `json:"base_image_ref"`
 	Profile                  GuestProfile     `json:"profile,omitempty"`
 	Features                 []string         `json:"features,omitempty"`
@@ -122,6 +123,7 @@ type CreateSandboxRequest struct {
 	BaseImageRef  string       `json:"base_image_ref"`
 	Profile       GuestProfile `json:"profile,omitempty"`
 	Features      []string     `json:"features,omitempty"`
+	Capabilities  []string     `json:"capabilities,omitempty"`
 	CPULimit      CPUQuantity  `json:"cpu_limit"`
 	MemoryLimitMB int          `json:"memory_limit_mb"`
 	PIDsLimit     int          `json:"pids_limit"`
@@ -235,19 +237,21 @@ type CreateSnapshotRequest struct {
 }
 
 type Snapshot struct {
-	ID                     string         `json:"id"`
-	SandboxID              string         `json:"sandbox_id"`
-	TenantID               string         `json:"tenant_id"`
-	Name                   string         `json:"name"`
-	Status                 SnapshotStatus `json:"status"`
-	ImageRef               string         `json:"image_ref"`
-	Profile                GuestProfile   `json:"profile,omitempty"`
-	ImageContractVersion   string         `json:"image_contract_version,omitempty"`
-	ControlProtocolVersion string         `json:"control_protocol_version,omitempty"`
-	WorkspaceTar           string         `json:"-"`
-	ExportLocation         string         `json:"export_location,omitempty"`
-	CreatedAt              time.Time      `json:"created_at"`
-	CompletedAt            *time.Time     `json:"completed_at,omitempty"`
+	ID                       string         `json:"id"`
+	SandboxID                string         `json:"sandbox_id"`
+	TenantID                 string         `json:"tenant_id"`
+	Name                     string         `json:"name"`
+	Status                   SnapshotStatus `json:"status"`
+	ImageRef                 string         `json:"image_ref"`
+	RuntimeBackend           string         `json:"runtime_backend,omitempty"`
+	Profile                  GuestProfile   `json:"profile,omitempty"`
+	ImageContractVersion     string         `json:"image_contract_version,omitempty"`
+	ControlProtocolVersion   string         `json:"control_protocol_version,omitempty"`
+	WorkspaceContractVersion string         `json:"workspace_contract_version,omitempty"`
+	WorkspaceTar             string         `json:"-"`
+	ExportLocation           string         `json:"export_location,omitempty"`
+	CreatedAt                time.Time      `json:"created_at"`
+	CompletedAt              *time.Time     `json:"completed_at,omitempty"`
 }
 
 type RestoreSnapshotRequest struct {
@@ -264,6 +268,7 @@ type RuntimeHealth struct {
 
 type RuntimeInfo struct {
 	Backend string `json:"backend"`
+	Class   string `json:"class,omitempty"`
 }
 
 type RuntimeSandboxHealth struct {

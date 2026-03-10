@@ -23,15 +23,15 @@
 ## 4. Strengthen service-layer tunnel and recovery regression tests (Req 4, 5, 6, 8, 9)
 
 - [ ] Add `internal/service` tests for tunnel denial paths: sandbox disallows tunnels, tenant quota disallows tunnels, tunnel quota exceeded, unsupported protocol/auth/visibility, and public tunnel rejection by policy.
-- [ ] Add `internal/service` tests for dangerous-profile denial or immutable-profile violations if the QEMU profile system exposes those policy checks through service APIs.
+- [x] Add `internal/service` tests for dangerous-profile denial or immutable-profile violations if the QEMU profile system exposes those policy checks through service APIs.
 - [ ] Add `internal/service` tests covering tunnel revoke behavior triggered by lifecycle transitions that should invalidate active access.
-- [ ] Add or expand tests for storage pressure and partial snapshot failure persistence, reusing existing capacity and snapshot behavior where possible.
-- [ ] Add a targeted reconcile or restart regression test in `internal/service/service_test.go` that validates persisted state remains conservative after runtime inspection or recovery.
+- [x] Add or expand tests for storage pressure and partial snapshot failure persistence, reusing existing capacity and snapshot behavior where possible.
+- [x] Add a targeted reconcile or restart regression test in `internal/service/service_test.go` that validates persisted state remains conservative after runtime inspection or recovery.
 
 ## 5. Strengthen API-level verification surfaces (Req 4, 5, 8, 9)
 
-- [ ] Add `internal/api/integration_test.go` coverage for tunnel auth requirements, bounded signed URL TTL behavior, and relevant denial responses.
-- [ ] Add API-level verification for admin inspection endpoints used in operator drills, including `runtime-health`, capacity, and metrics access control.
+- [x] Add `internal/api/integration_test.go` coverage for tunnel auth requirements, bounded signed URL TTL behavior, and relevant denial responses.
+- [x] Add API-level verification for admin inspection endpoints used in operator drills, including `runtime-health`, capacity, and metrics access control.
 - [ ] Reuse existing auth and repository harnesses rather than introducing a new integration framework.
 
 ## 6. Add an operator drill path using existing CLI and API flows (Req 2, 4, 5, 6, 8, 9)

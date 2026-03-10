@@ -53,6 +53,12 @@ Binary-safe transfer notes:
 - `GET /v1/sandboxes/{id}/tunnels` — list tunnels for a sandbox
 - `DELETE /v1/tunnels/{id}` — revoke tunnel
 
+Browser tunnel auth note:
+
+- signed browser tunnel URLs and the bootstrap cookie act as a tunnel-scoped capability, not a full user session
+- the capability is intentionally narrow: it is scoped to one tunnel proxy path and bounded by normal expiry and revoke behavior
+- do not treat it as device binding, global logout, or broad CSRF protection for unrelated endpoints
+
 ## Snapshots
 
 - `GET /v1/sandboxes/{id}/snapshots` — list snapshots for a sandbox

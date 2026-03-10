@@ -24,55 +24,75 @@ type TenantConfig struct {
 }
 
 type Config struct {
-	DeploymentMode             string
-	ListenAddress              string
-	DatabasePath               string
-	StorageRoot                string
-	SnapshotRoot               string
-	BaseImageRef               string
-	RuntimeBackend             string
-	AuthMode                   string
-	AuthJWTIssuer              string
-	AuthJWTAudience            string
-	AuthJWTSecretPaths         []string
-	TLSCertPath                string
-	TLSKeyPath                 string
-	TrustedProxyHeaders        bool
-	TrustedDockerRuntime       bool
-	PolicyAllowedImages        []string
-	PolicyAllowPublicTunnels   bool
-	PolicyMaxSandboxLifetime   time.Duration
-	PolicyMaxIdleTimeout       time.Duration
-	DefaultCPULimit            model.CPUQuantity
-	DefaultMemoryLimitMB       int
-	DefaultPIDsLimit           int
-	DefaultDiskLimitMB         int
-	DefaultNetworkMode         model.NetworkMode
-	DefaultAllowTunnels        bool
-	RequestRatePerMinute       int
-	RequestBurst               int
-	DefaultQuota               model.TenantQuota
-	GracefulShutdown           time.Duration
-	ReconcileInterval          time.Duration
-	CleanupInterval            time.Duration
-	OperatorHost               string
-	TunnelSigningKey           string
-	TunnelSigningKeyPath       string
-	Tenants                    []TenantConfig
-	OptionalSnapshotExport     string
-	QEMUBinary                 string
-	QEMUAccel                  string
-	QEMUBaseImagePath          string
-	QEMUAllowedBaseImagePaths  []string
-	QEMUControlMode            model.GuestControlMode
-	QEMUAllowedProfiles        []model.GuestProfile
-	QEMUDangerousProfiles      []model.GuestProfile
-	QEMUAllowDangerousProfiles bool
-	QEMUAllowSSHCompat         bool
-	QEMUSSHUser                string
-	QEMUSSHPrivateKeyPath      string
-	QEMUSSHHostKeyPath         string
-	QEMUBootTimeout            time.Duration
+	DeploymentMode                string
+	ListenAddress                 string
+	DatabasePath                  string
+	StorageRoot                   string
+	SnapshotRoot                  string
+	BaseImageRef                  string
+	RuntimeBackend                string
+	AuthMode                      string
+	AuthJWTIssuer                 string
+	AuthJWTAudience               string
+	AuthJWTSecretPaths            []string
+	TLSCertPath                   string
+	TLSKeyPath                    string
+	TrustedProxyHeaders           bool
+	TrustedDockerRuntime          bool
+	PolicyAllowedImages           []string
+	PolicyAllowPublicTunnels      bool
+	PolicyMaxSandboxLifetime      time.Duration
+	PolicyMaxIdleTimeout          time.Duration
+	AdmissionMaxNodeSandboxes     int
+	AdmissionMaxNodeRunning       int
+	AdmissionMaxNodeCPU           model.CPUQuantity
+	AdmissionMaxNodeMemoryMB      int
+	AdmissionMinNodeFreeStorageMB int
+	AdmissionMaxTenantStarts      int
+	AdmissionMaxTenantHeavyOps    int
+	StorageWarningFileCount       int
+	SnapshotMaxBytes              int64
+	SnapshotMaxFiles              int
+	SnapshotMaxExpansionRatio     int
+	AllowedGuestProfiles          []model.GuestProfile
+	DangerousGuestProfiles        []model.GuestProfile
+	AllowDangerousProfiles        bool
+	DockerUser                    string
+	DockerTmpfsSizeMB             int
+	DockerSeccompProfile          string
+	DockerAppArmorProfile         string
+	DockerSELinuxLabel            string
+	DockerAllowDangerousOverrides bool
+	DefaultCPULimit               model.CPUQuantity
+	DefaultMemoryLimitMB          int
+	DefaultPIDsLimit              int
+	DefaultDiskLimitMB            int
+	DefaultNetworkMode            model.NetworkMode
+	DefaultAllowTunnels           bool
+	RequestRatePerMinute          int
+	RequestBurst                  int
+	DefaultQuota                  model.TenantQuota
+	GracefulShutdown              time.Duration
+	ReconcileInterval             time.Duration
+	CleanupInterval               time.Duration
+	OperatorHost                  string
+	TunnelSigningKey              string
+	TunnelSigningKeyPath          string
+	Tenants                       []TenantConfig
+	OptionalSnapshotExport        string
+	QEMUBinary                    string
+	QEMUAccel                     string
+	QEMUBaseImagePath             string
+	QEMUAllowedBaseImagePaths     []string
+	QEMUControlMode               model.GuestControlMode
+	QEMUAllowedProfiles           []model.GuestProfile
+	QEMUDangerousProfiles         []model.GuestProfile
+	QEMUAllowDangerousProfiles    bool
+	QEMUAllowSSHCompat            bool
+	QEMUSSHUser                   string
+	QEMUSSHPrivateKeyPath         string
+	QEMUSSHHostKeyPath            string
+	QEMUBootTimeout               time.Duration
 }
 
 func Load(args []string) (Config, error) {
@@ -83,7 +103,7 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.DatabasePath, "db", env("SANDBOX_DB_PATH", "./data/sandbox.db"), "SQLite path")
 	fs.StringVar(&cfg.StorageRoot, "storage-root", env("SANDBOX_STORAGE_ROOT", "./data/storage"), "storage root")
 	fs.StringVar(&cfg.SnapshotRoot, "snapshot-root", env("SANDBOX_SNAPSHOT_ROOT", "./data/snapshots"), "snapshot root")
-	fs.StringVar(&cfg.BaseImageRef, "base-image", env("SANDBOX_BASE_IMAGE", "mcr.microsoft.com/playwright:v1.51.1-noble"), "default base image")
+	fs.StringVar(&cfg.BaseImageRef, "base-image", env("SANDBOX_BASE_IMAGE", "alpine:3.20"), "default base image")
 	fs.StringVar(&cfg.RuntimeBackend, "runtime", env("SANDBOX_RUNTIME", "docker"), "runtime backend")
 	fs.StringVar(&cfg.AuthMode, "auth-mode", env("SANDBOX_AUTH_MODE", "static"), "auth mode")
 	fs.StringVar(&cfg.AuthJWTIssuer, "auth-jwt-issuer", env("SANDBOX_AUTH_JWT_ISSUER", ""), "jwt issuer")
@@ -98,18 +118,44 @@ func Load(args []string) (Config, error) {
 	fs.BoolVar(&policyAllowPublicTunnels, "policy-allow-public-tunnels", policyAllowPublicTunnels, "allow public tunnels")
 	fs.DurationVar(&cfg.PolicyMaxSandboxLifetime, "policy-max-sandbox-lifetime", envDuration("SANDBOX_POLICY_MAX_SANDBOX_LIFETIME", 0), "maximum sandbox lifetime before policy denial; 0 disables")
 	fs.DurationVar(&cfg.PolicyMaxIdleTimeout, "policy-max-idle-timeout", envDuration("SANDBOX_POLICY_MAX_IDLE_TIMEOUT", 0), "maximum sandbox idle time before policy denial; 0 disables")
+	fs.IntVar(&cfg.AdmissionMaxNodeSandboxes, "admission-max-node-sandboxes", envInt("SANDBOX_ADMISSION_MAX_NODE_SANDBOXES", 0), "maximum non-deleted sandboxes this node should admit before denying create requests; 0 disables")
+	fs.IntVar(&cfg.AdmissionMaxNodeRunning, "admission-max-node-running", envInt("SANDBOX_ADMISSION_MAX_NODE_RUNNING", 0), "maximum active sandboxes this node should admit before denying start-like requests; 0 disables")
+	admissionMaxNodeCPU := env("SANDBOX_ADMISSION_MAX_NODE_CPU", "")
+	fs.StringVar(&admissionMaxNodeCPU, "admission-max-node-cpu", admissionMaxNodeCPU, "maximum active CPU to admit on this node, for example 8 or 8000m; empty disables")
+	fs.IntVar(&cfg.AdmissionMaxNodeMemoryMB, "admission-max-node-memory-mb", envInt("SANDBOX_ADMISSION_MAX_NODE_MEMORY_MB", 0), "maximum active guest memory this node should admit before denying start-like requests; 0 disables")
+	fs.IntVar(&cfg.AdmissionMinNodeFreeStorageMB, "admission-min-node-free-storage-mb", envInt("SANDBOX_ADMISSION_MIN_NODE_FREE_STORAGE_MB", 0), "minimum free bytes required on storage and snapshot volumes before admitting heavy operations; 0 disables")
+	fs.IntVar(&cfg.AdmissionMaxTenantStarts, "admission-max-tenant-starts", envInt("SANDBOX_ADMISSION_MAX_TENANT_STARTS", 0), "maximum concurrent create/start/boot operations per tenant; 0 disables")
+	fs.IntVar(&cfg.AdmissionMaxTenantHeavyOps, "admission-max-tenant-heavy-ops", envInt("SANDBOX_ADMISSION_MAX_TENANT_HEAVY_OPS", 0), "maximum concurrent heavy lifecycle operations per tenant; 0 disables")
+	fs.IntVar(&cfg.StorageWarningFileCount, "storage-warning-file-count", envInt("SANDBOX_STORAGE_WARNING_FILE_COUNT", 10000), "warn when a sandbox exceeds this many stored files across workspace, cache, scratch, and snapshots")
+	snapshotMaxMB := envInt("SANDBOX_SNAPSHOT_MAX_MB", 1024)
+	fs.IntVar(&snapshotMaxMB, "snapshot-max-mb", snapshotMaxMB, "maximum extracted snapshot bundle size in megabytes")
+	fs.IntVar(&cfg.SnapshotMaxFiles, "snapshot-max-files", envInt("SANDBOX_SNAPSHOT_MAX_FILES", 8192), "maximum files allowed in a restored snapshot archive")
+	fs.IntVar(&cfg.SnapshotMaxExpansionRatio, "snapshot-max-expansion-ratio", envInt("SANDBOX_SNAPSHOT_MAX_EXPANSION_RATIO", 32), "maximum extracted-to-compressed ratio allowed for snapshot restore archives")
+	fs.StringVar(&cfg.DockerUser, "docker-user", env("SANDBOX_DOCKER_USER", "10001:10001"), "docker user or uid:gid for trusted-docker sandboxes")
+	fs.IntVar(&cfg.DockerTmpfsSizeMB, "docker-tmpfs-mb", envInt("SANDBOX_DOCKER_TMPFS_MB", 64), "docker tmpfs size for /tmp in megabytes")
+	fs.StringVar(&cfg.DockerSeccompProfile, "docker-seccomp-profile", env("SANDBOX_DOCKER_SECCOMP_PROFILE", ""), "optional docker seccomp profile path")
+	fs.StringVar(&cfg.DockerAppArmorProfile, "docker-apparmor-profile", env("SANDBOX_DOCKER_APPARMOR_PROFILE", ""), "optional docker AppArmor profile name")
+	fs.StringVar(&cfg.DockerSELinuxLabel, "docker-selinux-label", env("SANDBOX_DOCKER_SELINUX_LABEL", ""), "optional docker SELinux label security option")
+	dockerAllowDangerousOverrides := strings.EqualFold(env("SANDBOX_DOCKER_ALLOW_DANGEROUS_OVERRIDES", "false"), "true")
+	fs.BoolVar(&dockerAllowDangerousOverrides, "docker-allow-dangerous-overrides", dockerAllowDangerousOverrides, "allow explicit dangerous docker capability overrides in trusted environments")
 	fs.StringVar(&cfg.QEMUBinary, "qemu-binary", env("SANDBOX_QEMU_BINARY", defaultQEMUBinary()), "qemu system binary")
 	fs.StringVar(&cfg.QEMUAccel, "qemu-accel", env("SANDBOX_QEMU_ACCEL", "auto"), "qemu accelerator selection")
 	fs.StringVar(&cfg.QEMUBaseImagePath, "qemu-base-image-path", env("SANDBOX_QEMU_BASE_IMAGE_PATH", ""), "qemu base guest image path")
 	qemuAllowedBaseImagePaths := env("SANDBOX_QEMU_ALLOWED_BASE_IMAGE_PATHS", "")
 	fs.StringVar(&qemuAllowedBaseImagePaths, "qemu-allowed-base-image-paths", qemuAllowedBaseImagePaths, "comma-separated qemu guest image paths tenants may request")
-	qemuAllowedProfiles := env("SANDBOX_QEMU_ALLOWED_PROFILES", "core,runtime,browser,container")
+	allowedGuestProfiles := env("SANDBOX_ALLOWED_PROFILES", "")
+	qemuAllowedProfiles := env("SANDBOX_QEMU_ALLOWED_PROFILES", "core,runtime,browser,container,debug")
 	fs.StringVar(&qemuAllowedProfiles, "qemu-allowed-profiles", qemuAllowedProfiles, "comma-separated qemu guest profiles allowed for sandbox creation")
+	dangerousGuestProfiles := env("SANDBOX_DANGEROUS_PROFILES", "")
 	qemuDangerousProfiles := env("SANDBOX_QEMU_DANGEROUS_PROFILES", "container,debug")
 	fs.StringVar(&qemuDangerousProfiles, "qemu-dangerous-profiles", qemuDangerousProfiles, "comma-separated qemu guest profiles treated as dangerous and blocked unless explicitly allowed")
 	qemuControlMode := env("SANDBOX_QEMU_CONTROL_MODE", string(model.GuestControlModeAgent))
 	fs.StringVar(&qemuControlMode, "qemu-control-mode", qemuControlMode, "qemu control mode: agent or ssh-compat")
-	qemuAllowDangerousProfiles := strings.EqualFold(env("SANDBOX_QEMU_ALLOW_DANGEROUS_PROFILES", "false"), "true")
+	allowDangerousProfiles := strings.EqualFold(env("SANDBOX_ALLOW_DANGEROUS_PROFILES", ""), "true")
+	qemuAllowDangerousProfiles := allowDangerousProfiles
+	if !qemuAllowDangerousProfiles {
+		qemuAllowDangerousProfiles = strings.EqualFold(env("SANDBOX_QEMU_ALLOW_DANGEROUS_PROFILES", "false"), "true")
+	}
 	fs.BoolVar(&qemuAllowDangerousProfiles, "qemu-allow-dangerous-profiles", qemuAllowDangerousProfiles, "allow dangerous qemu guest profiles such as container and debug")
 	qemuAllowSSHCompat := strings.EqualFold(env("SANDBOX_QEMU_ALLOW_SSH_COMPAT", "false"), "true")
 	fs.BoolVar(&qemuAllowSSHCompat, "qemu-allow-ssh-compat", qemuAllowSSHCompat, "allow ssh-compat qemu image contracts in production validation and policy")
@@ -142,21 +188,32 @@ func Load(args []string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse default cpu: %w", err)
 	}
+	if strings.TrimSpace(admissionMaxNodeCPU) != "" {
+		cfg.AdmissionMaxNodeCPU, err = model.ParseCPUQuantity(admissionMaxNodeCPU)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse admission max node cpu: %w", err)
+		}
+	}
 	cfg.DefaultCPULimit = defaultCPULimit
 	maxCPUCores, err := model.ParseCPUQuantity(env("SANDBOX_QUOTA_MAX_CPU", "16"))
 	if err != nil {
 		return Config{}, fmt.Errorf("parse max cpu quota: %w", err)
 	}
 	cfg.DefaultNetworkMode = model.NetworkMode(networkMode)
+	cfg.SnapshotMaxBytes = int64(snapshotMaxMB) * 1024 * 1024
 	cfg.DefaultAllowTunnels = strings.EqualFold(allowTunnels, "true")
 	cfg.TrustedDockerRuntime = strings.EqualFold(trustedDockerRuntime, "true")
 	cfg.TrustedProxyHeaders = trustedProxyHeaders
 	cfg.AuthJWTSecretPaths = parseCommaSeparated(authJWTSecretPaths)
 	cfg.PolicyAllowedImages = parseCommaSeparated(policyAllowedImages)
 	cfg.PolicyAllowPublicTunnels = policyAllowPublicTunnels
+	cfg.DockerAllowDangerousOverrides = dockerAllowDangerousOverrides
 	cfg.OptionalSnapshotExport = env("SANDBOX_S3_EXPORT_URI", "")
 	cfg.QEMUAllowedBaseImagePaths = parseCommaSeparated(qemuAllowedBaseImagePaths)
 	cfg.QEMUControlMode = model.GuestControlMode(strings.ToLower(strings.TrimSpace(qemuControlMode)))
+	cfg.AllowedGuestProfiles = parseGuestProfiles(allowedGuestProfiles)
+	cfg.DangerousGuestProfiles = parseGuestProfiles(dangerousGuestProfiles)
+	cfg.AllowDangerousProfiles = allowDangerousProfiles
 	cfg.QEMUAllowedProfiles = parseGuestProfiles(qemuAllowedProfiles)
 	cfg.QEMUDangerousProfiles = parseGuestProfiles(qemuDangerousProfiles)
 	cfg.QEMUAllowDangerousProfiles = qemuAllowDangerousProfiles
@@ -179,6 +236,18 @@ func Load(args []string) (Config, error) {
 
 func (c Config) Validate() error {
 	var problems []string
+	if c.StorageWarningFileCount == 0 {
+		c.StorageWarningFileCount = 10000
+	}
+	if c.SnapshotMaxBytes == 0 {
+		c.SnapshotMaxBytes = 1024 * 1024 * 1024
+	}
+	if c.SnapshotMaxFiles == 0 {
+		c.SnapshotMaxFiles = 8192
+	}
+	if c.SnapshotMaxExpansionRatio == 0 {
+		c.SnapshotMaxExpansionRatio = 32
+	}
 	if c.DeploymentMode != "development" && c.DeploymentMode != "production" {
 		problems = append(problems, fmt.Sprintf("unsupported deployment mode %q", c.DeploymentMode))
 	}
@@ -202,6 +271,39 @@ func (c Config) Validate() error {
 	}
 	if c.PolicyMaxIdleTimeout < 0 {
 		problems = append(problems, "policy max idle timeout must be zero or positive")
+	}
+	if c.AdmissionMaxNodeSandboxes < 0 {
+		problems = append(problems, "admission max node sandboxes must be zero or positive")
+	}
+	if c.AdmissionMaxNodeRunning < 0 {
+		problems = append(problems, "admission max node running must be zero or positive")
+	}
+	if c.AdmissionMaxNodeCPU < 0 {
+		problems = append(problems, "admission max node cpu must be zero or positive")
+	}
+	if c.AdmissionMaxNodeMemoryMB < 0 {
+		problems = append(problems, "admission max node memory must be zero or positive")
+	}
+	if c.AdmissionMinNodeFreeStorageMB < 0 {
+		problems = append(problems, "admission min node free storage must be zero or positive")
+	}
+	if c.AdmissionMaxTenantStarts < 0 {
+		problems = append(problems, "admission max tenant starts must be zero or positive")
+	}
+	if c.AdmissionMaxTenantHeavyOps < 0 {
+		problems = append(problems, "admission max tenant heavy ops must be zero or positive")
+	}
+	if c.StorageWarningFileCount < 0 {
+		problems = append(problems, "storage warning file count must be zero or positive")
+	}
+	if c.SnapshotMaxBytes <= 0 {
+		problems = append(problems, "snapshot max bytes must be positive")
+	}
+	if c.SnapshotMaxFiles <= 0 {
+		problems = append(problems, "snapshot max files must be positive")
+	}
+	if c.SnapshotMaxExpansionRatio <= 0 {
+		problems = append(problems, "snapshot max expansion ratio must be positive")
 	}
 	if err := validateAuthConfig(c, requireReadableFile); err != nil {
 		problems = append(problems, err.Error())
@@ -228,8 +330,8 @@ func (c Config) Validate() error {
 		problems = append(problems, "at least one tenant token is required")
 	}
 	if c.DeploymentMode == "production" {
-		if c.RuntimeBackend != "qemu" {
-			problems = append(problems, "production mode requires SANDBOX_RUNTIME=qemu")
+		if !model.BackendToRuntimeClass(c.RuntimeBackend).IsVMBacked() {
+			problems = append(problems, fmt.Sprintf("production mode requires a VM-backed runtime class; %q resolves to class %q which is not VM-backed", c.RuntimeBackend, model.BackendToRuntimeClass(c.RuntimeBackend)))
 		}
 		if c.AuthMode == "static" {
 			problems = append(problems, "production mode requires SANDBOX_AUTH_MODE=jwt-hs256")
@@ -337,6 +439,20 @@ func validateRuntimeConfig(c Config, probe runtimeValidationProbe) error {
 		if !c.TrustedDockerRuntime {
 			return errors.New("docker runtime requires SANDBOX_TRUSTED_DOCKER_RUNTIME=true because it is shared-kernel and not a production multi-tenant boundary")
 		}
+		if strings.TrimSpace(c.DockerUser) == "" {
+			c.DockerUser = defaultDockerUser()
+		}
+		if c.DockerTmpfsSizeMB == 0 {
+			c.DockerTmpfsSizeMB = defaultDockerTmpfsSizeMB()
+		}
+		if c.DockerTmpfsSizeMB < 0 {
+			return errors.New("docker runtime requires SANDBOX_DOCKER_TMPFS_MB to be positive")
+		}
+		if strings.TrimSpace(c.DockerSeccompProfile) != "" {
+			if err := probe.fileReadable(c.DockerSeccompProfile); err != nil {
+				return fmt.Errorf("docker seccomp profile is not readable: %w", err)
+			}
+		}
 		return nil
 	case "qemu":
 		return validateQEMUConfig(c, probe)
@@ -359,7 +475,7 @@ func validateQEMUConfig(c Config, probe runtimeValidationProbe) error {
 	if !c.QEMUControlMode.IsValid() {
 		return fmt.Errorf("qemu runtime requires SANDBOX_QEMU_CONTROL_MODE to be one of %q or %q", model.GuestControlModeAgent, model.GuestControlModeSSHCompat)
 	}
-	if len(c.QEMUAllowedProfiles) == 0 {
+	if len(c.effectiveAllowedGuestProfiles("qemu")) == 0 {
 		return errors.New("qemu runtime requires at least one allowed guest profile")
 	}
 	if c.QEMUControlMode == model.GuestControlModeSSHCompat {
@@ -408,6 +524,11 @@ func validateQEMUConfig(c Config, probe runtimeValidationProbe) error {
 	return nil
 }
 
+// RuntimeClass returns the runtime class derived from the configured backend.
+func (c Config) RuntimeClass() model.RuntimeClass {
+	return model.BackendToRuntimeClass(c.RuntimeBackend)
+}
+
 func (c Config) EffectiveQEMUAllowedBaseImagePaths() []string {
 	return appendDefaultQEMUBaseImagePath(c.QEMUAllowedBaseImagePaths, c.QEMUBaseImagePath)
 }
@@ -438,7 +559,11 @@ func NormalizeQEMUBaseImagePath(path string) string {
 }
 
 func (c Config) IsAllowedQEMUProfile(profile model.GuestProfile) bool {
-	for _, allowed := range c.QEMUAllowedProfiles {
+	return c.IsAllowedGuestProfile("qemu", profile)
+}
+
+func (c Config) IsAllowedGuestProfile(runtimeBackend string, profile model.GuestProfile) bool {
+	for _, allowed := range c.effectiveAllowedGuestProfiles(runtimeBackend) {
 		if allowed == profile {
 			return true
 		}
@@ -447,12 +572,46 @@ func (c Config) IsAllowedQEMUProfile(profile model.GuestProfile) bool {
 }
 
 func (c Config) IsDangerousQEMUProfile(profile model.GuestProfile) bool {
-	for _, dangerous := range c.QEMUDangerousProfiles {
+	return c.IsDangerousGuestProfile("qemu", profile)
+}
+
+func (c Config) IsDangerousGuestProfile(runtimeBackend string, profile model.GuestProfile) bool {
+	for _, dangerous := range c.effectiveDangerousGuestProfiles(runtimeBackend) {
 		if dangerous == profile {
 			return true
 		}
 	}
 	return false
+}
+
+func (c Config) AllowsDangerousGuestProfiles(runtimeBackend string) bool {
+	return c.AllowDangerousProfiles || (runtimeBackend == "qemu" && c.QEMUAllowDangerousProfiles)
+}
+
+func (c Config) effectiveAllowedGuestProfiles(runtimeBackend string) []model.GuestProfile {
+	if len(c.AllowedGuestProfiles) > 0 {
+		return c.AllowedGuestProfiles
+	}
+	if runtimeBackend == "qemu" && len(c.QEMUAllowedProfiles) > 0 {
+		return c.QEMUAllowedProfiles
+	}
+	return []model.GuestProfile{
+		model.GuestProfileCore,
+		model.GuestProfileRuntime,
+		model.GuestProfileBrowser,
+		model.GuestProfileContainer,
+		model.GuestProfileDebug,
+	}
+}
+
+func (c Config) effectiveDangerousGuestProfiles(runtimeBackend string) []model.GuestProfile {
+	if len(c.DangerousGuestProfiles) > 0 {
+		return c.DangerousGuestProfiles
+	}
+	if runtimeBackend == "qemu" && len(c.QEMUDangerousProfiles) > 0 {
+		return c.QEMUDangerousProfiles
+	}
+	return []model.GuestProfile{model.GuestProfileContainer, model.GuestProfileDebug}
 }
 
 func parseGuestProfiles(raw string) []model.GuestProfile {
@@ -616,4 +775,12 @@ func parseCommaSeparated(raw string) []string {
 		values = append(values, entry)
 	}
 	return values
+}
+
+func defaultDockerUser() string {
+	return "10001:10001"
+}
+
+func defaultDockerTmpfsSizeMB() int {
+	return 64
 }

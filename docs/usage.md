@@ -53,6 +53,12 @@ The CLI supports these top-level commands:
 go run ./cmd/sandboxctl create --image alpine:3.20 --start
 ```
 
+Profile guidance:
+
+- `alpine:3.20` maps to the lightweight `core` profile and is the default Docker image posture
+- browser workflows should use an explicit browser image such as `mcr.microsoft.com/playwright:v1.51.1-noble`
+- inner-Docker compatibility should use an explicit `container` image/profile and is blocked by default in safe policy mode
+
 Useful flags:
 
 - `--image`
@@ -75,6 +81,13 @@ go run ./cmd/sandboxctl create \
   --network internet-enabled \
   --allow-tunnels=true \
   --start
+```
+
+If you want the curated runtime image from this repo instead of the minimal default, build it first and point `SANDBOX_BASE_IMAGE` at it:
+
+```bash
+docker build -t or3-sandbox/base:runtime images/base
+export SANDBOX_BASE_IMAGE=or3-sandbox/base:runtime
 ```
 
 ## 2. List sandboxes

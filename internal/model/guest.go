@@ -32,3 +32,7 @@ func NormalizeFeatures(values []string) []string {
 	}
 	return result
 }
+
+func NormalizeCapabilities(values []string) []string {
+	return NormalizeFeatures(values)
+}

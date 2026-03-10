@@ -2,6 +2,7 @@ name: playwright
 description: Capture a screenshot with Playwright and download it as a binary artifact.
 runtime:
   allowed: [docker]
+  profile: browser
 sandbox:
   image: mcr.microsoft.com/playwright:v1.51.1-noble
   cpu: "2"

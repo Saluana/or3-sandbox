@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"or3-sandbox/internal/config"
 	"or3-sandbox/internal/model"
 	"or3-sandbox/internal/repository"
 )
@@ -16,31 +17,51 @@ type TenantQuotaView struct {
 	Usage             repository.TenantUsage `json:"usage"`
 	StorageQuotaBytes int64                  `json:"storage_quota_bytes"`
 	StoragePressure   float64                `json:"storage_pressure"`
+	StorageEntries    int64                  `json:"storage_entries"`
+	EntryPressure     float64                `json:"entry_pressure"`
 	RunningPressure   float64                `json:"running_pressure"`
 	CPUPressure       float64                `json:"cpu_pressure"`
 	MemoryPressure    float64                `json:"memory_pressure"`
 	Alerts            []string               `json:"alerts,omitempty"`
 }
 
+type NodePressureView struct {
+	Sandboxes           int      `json:"sandboxes"`
+	RunningSandboxes    int      `json:"running_sandboxes"`
+	RunningCPUMillis    int64    `json:"running_cpu_millis"`
+	RunningMemoryMB     int      `json:"running_memory_mb"`
+	FreeStorageBytes    int64    `json:"free_storage_bytes,omitempty"`
+	MaxSandboxes        int      `json:"max_sandboxes,omitempty"`
+	MaxRunningSandboxes int      `json:"max_running_sandboxes,omitempty"`
+	MaxCPUMillis        int64    `json:"max_cpu_millis,omitempty"`
+	MaxMemoryMB         int      `json:"max_memory_mb,omitempty"`
+	MinFreeStorageBytes int64    `json:"min_free_storage_bytes,omitempty"`
+	Alerts              []string `json:"alerts,omitempty"`
+}
+
 type CapacityReport struct {
 	Backend          string                        `json:"backend"`
 	CheckedAt        time.Time                     `json:"checked_at"`
 	QuotaView        TenantQuotaView               `json:"quota_view"`
+	NodePressure     NodePressureView              `json:"node_pressure"`
 	StatusCounts     map[string]int                `json:"status_counts"`
 	ProfileCounts    map[string]int                `json:"profile_counts,omitempty"`
 	CapabilityCounts map[string]int                `json:"capability_counts,omitempty"`
 	SnapshotCounts   map[model.SnapshotStatus]int  `json:"snapshot_counts,omitempty"`
 	ExecutionCounts  map[model.ExecutionStatus]int `json:"execution_counts,omitempty"`
+	AuditCounts      map[string]map[string]int     `json:"audit_counts,omitempty"`
 	Alerts           []string                      `json:"alerts,omitempty"`
 }
 
-func buildTenantQuotaView(quota model.TenantQuota, usage repository.TenantUsage) TenantQuotaView {
+func buildTenantQuotaView(cfg config.Config, quota model.TenantQuota, usage repository.TenantUsage) TenantQuotaView {
 	storageQuotaBytes := int64(quota.MaxStorageMB) * 1024 * 1024
 	view := TenantQuotaView{
 		Quota:             quota,
 		Usage:             usage,
 		StorageQuotaBytes: storageQuotaBytes,
 		StoragePressure:   ratioInt64(usage.ActualStorageBytes, storageQuotaBytes),
+		StorageEntries:    usage.ActualStorageEntries,
+		EntryPressure:     ratioInt64(usage.ActualStorageEntries, int64(cfg.StorageWarningFileCount)),
 		RunningPressure:   ratioInt(usage.RunningSandboxes, quota.MaxRunningSandboxes),
 		CPUPressure:       ratioInt64(usage.RequestedCPU.MilliValue(), quota.MaxCPUCores.MilliValue()),
 		MemoryPressure:    ratioInt(usage.RequestedMemory, quota.MaxMemoryMB),
@@ -50,6 +71,11 @@ func buildTenantQuotaView(quota model.TenantQuota, usage repository.TenantUsage)
 	} else if view.StoragePressure >= 0.8 {
 		view.Alerts = append(view.Alerts, "storage quota pressure above 80%")
 	}
+	if view.EntryPressure >= 1 {
+		view.Alerts = append(view.Alerts, "storage file-count pressure exceeded")
+	} else if view.EntryPressure >= 0.8 {
+		view.Alerts = append(view.Alerts, "storage file-count pressure above 80%")
+	}
 	if view.RunningPressure >= 1 {
 		view.Alerts = append(view.Alerts, "running sandbox quota exceeded")
 	}
@@ -58,6 +84,37 @@ func buildTenantQuotaView(quota model.TenantQuota, usage repository.TenantUsage)
 	}
 	if view.MemoryPressure >= 1 {
 		view.Alerts = append(view.Alerts, "memory quota pressure exceeded")
+	}
+	return view
+}
+
+func buildNodePressureView(cfg config.Config, snapshot admissionSnapshot) NodePressureView {
+	view := NodePressureView{
+		Sandboxes:           snapshot.nodeSandboxes,
+		RunningSandboxes:    snapshot.nodeRunning,
+		RunningCPUMillis:    snapshot.runningCPU.MilliValue(),
+		RunningMemoryMB:     snapshot.runningMemory,
+		FreeStorageBytes:    snapshot.freeStorage,
+		MaxSandboxes:        cfg.AdmissionMaxNodeSandboxes,
+		MaxRunningSandboxes: cfg.AdmissionMaxNodeRunning,
+		MaxCPUMillis:        cfg.AdmissionMaxNodeCPU.MilliValue(),
+		MaxMemoryMB:         cfg.AdmissionMaxNodeMemoryMB,
+		MinFreeStorageBytes: int64(cfg.AdmissionMinNodeFreeStorageMB) * 1024 * 1024,
+	}
+	if view.MaxSandboxes > 0 && view.Sandboxes >= view.MaxSandboxes {
+		view.Alerts = append(view.Alerts, "node sandbox admission pressure exceeded")
+	}
+	if view.MaxRunningSandboxes > 0 && view.RunningSandboxes >= view.MaxRunningSandboxes {
+		view.Alerts = append(view.Alerts, "node running admission pressure exceeded")
+	}
+	if view.MaxCPUMillis > 0 && view.RunningCPUMillis >= view.MaxCPUMillis {
+		view.Alerts = append(view.Alerts, "node cpu admission pressure exceeded")
+	}
+	if view.MaxMemoryMB > 0 && view.RunningMemoryMB >= view.MaxMemoryMB {
+		view.Alerts = append(view.Alerts, "node memory admission pressure exceeded")
+	}
+	if view.MinFreeStorageBytes > 0 && view.FreeStorageBytes >= 0 && view.FreeStorageBytes <= view.MinFreeStorageBytes {
+		view.Alerts = append(view.Alerts, "node free storage admission floor reached")
 	}
 	return view
 }
@@ -100,18 +157,30 @@ func (s *Service) CapacityReport(ctx context.Context, tenantID string) (Capacity
 	if err != nil {
 		return CapacityReport{}, err
 	}
-	quotaView := buildTenantQuotaView(quota, usage)
+	auditCounts, err := s.store.AuditEventCounts(ctx, tenantID)
+	if err != nil {
+		return CapacityReport{}, err
+	}
+	nodeSnapshot, err := s.admissionSnapshot(ctx, tenantID)
+	if err != nil {
+		return CapacityReport{}, err
+	}
+	quotaView := buildTenantQuotaView(s.cfg, quota, usage)
+	nodeView := buildNodePressureView(s.cfg, nodeSnapshot)
 	report := CapacityReport{
 		Backend:          s.cfg.RuntimeBackend,
 		CheckedAt:        time.Now().UTC(),
 		QuotaView:        quotaView,
+		NodePressure:     nodeView,
 		StatusCounts:     statusCounts,
 		ProfileCounts:    profileCounts,
 		CapabilityCounts: capabilityCounts,
 		SnapshotCounts:   snapshotCounts,
 		ExecutionCounts:  executionCounts,
+		AuditCounts:      auditCounts,
 		Alerts:           append([]string(nil), quotaView.Alerts...),
 	}
+	report.Alerts = append(report.Alerts, nodeView.Alerts...)
 	if statusCounts[string(model.SandboxStatusDegraded)] > 0 {
 		report.Alerts = append(report.Alerts, "one or more sandboxes are degraded")
 	}
@@ -141,10 +210,19 @@ func (s *Service) MetricsReport(ctx context.Context, tenantID string) (string, e
 		fmt.Sprintf("or3_sandbox_exec_running %d", report.QuotaView.Usage.ConcurrentExecs),
 		fmt.Sprintf("or3_sandbox_tunnels_active %d", report.QuotaView.Usage.ActiveTunnels),
 		fmt.Sprintf("or3_sandbox_actual_storage_bytes %d", report.QuotaView.Usage.ActualStorageBytes),
+		fmt.Sprintf("or3_sandbox_actual_storage_entries %d", report.QuotaView.Usage.ActualStorageEntries),
 		fmt.Sprintf("or3_sandbox_storage_pressure_ratio %.6f", report.QuotaView.StoragePressure),
+		fmt.Sprintf("or3_sandbox_storage_entry_pressure_ratio %.6f", report.QuotaView.EntryPressure),
 		fmt.Sprintf("or3_sandbox_running_pressure_ratio %.6f", report.QuotaView.RunningPressure),
+		fmt.Sprintf("or3_sandbox_node_sandboxes %d", report.NodePressure.Sandboxes),
+		fmt.Sprintf("or3_sandbox_node_running_sandboxes %d", report.NodePressure.RunningSandboxes),
+		fmt.Sprintf("or3_sandbox_node_running_cpu_millis %d", report.NodePressure.RunningCPUMillis),
+		fmt.Sprintf("or3_sandbox_node_running_memory_mb %d", report.NodePressure.RunningMemoryMB),
 		fmt.Sprintf("or3_sandbox_runtime_healthy %d", boolMetric(health.Healthy)),
 	)
+	if report.NodePressure.FreeStorageBytes >= 0 {
+		lines = append(lines, fmt.Sprintf("or3_sandbox_node_free_storage_bytes %d", report.NodePressure.FreeStorageBytes))
+	}
 	for _, status := range sortedStringKeys(health.StatusCounts) {
 		lines = append(lines, fmt.Sprintf("or3_sandbox_runtime_status_count{status=%q} %d", status, health.StatusCounts[status]))
 	}
@@ -159,6 +237,27 @@ func (s *Service) MetricsReport(ctx context.Context, tenantID string) (string, e
 	}
 	for _, status := range sortedExecutionStatuses(report.ExecutionCounts) {
 		lines = append(lines, fmt.Sprintf("or3_sandbox_executions_count{status=%q} %d", status, report.ExecutionCounts[status]))
+	}
+	for _, action := range sortedNestedKeys(report.AuditCounts) {
+		for _, outcome := range sortedStringKeys(report.AuditCounts[action]) {
+			count := report.AuditCounts[action][outcome]
+			lines = append(lines, fmt.Sprintf("or3_sandbox_audit_events_total{action=%q,outcome=%q} %d", action, outcome, count))
+			if strings.HasPrefix(action, "admission.") && outcome == "denied" {
+				lines = append(lines, fmt.Sprintf("or3_sandbox_admission_denials_total{action=%q} %d", action, count))
+			}
+			if strings.HasPrefix(action, "snapshot.") {
+				lines = append(lines, fmt.Sprintf("or3_sandbox_snapshot_operations_total{action=%q,outcome=%q} %d", action, outcome, count))
+			}
+			if action == "sandbox.exec" || action == "sandbox.exec.detached" || action == "sandbox.tty.attach" || action == "sandbox.tty.detach" {
+				lines = append(lines, fmt.Sprintf("or3_sandbox_interactive_events_total{action=%q,outcome=%q} %d", action, outcome, count))
+			}
+			if action == "tunnel.create" || action == "tunnel.revoke" {
+				lines = append(lines, fmt.Sprintf("or3_sandbox_tunnel_events_total{action=%q,outcome=%q} %d", action, outcome, count))
+			}
+			if strings.HasPrefix(action, "sandbox.") && outcome == "error" {
+				lines = append(lines, fmt.Sprintf("or3_sandbox_lifecycle_failures_total{action=%q} %d", action, count))
+			}
+		}
 	}
 	return strings.Join(lines, "\n") + "\n", nil
 }
@@ -225,6 +324,15 @@ func ratioInt64(value, limit int64) float64 {
 }
 
 func sortedStringKeys(values map[string]int) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedNestedKeys(values map[string]map[string]int) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
 		keys = append(keys, key)

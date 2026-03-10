@@ -71,7 +71,7 @@
 
 ## 10. Add bounded recovery and abuse drills with per-profile expectations (Req 9, 10, 11, 12)
 
-- [ ] Add `scripts/qemu-recovery-drill.sh` for the smallest set of disruptive drills that matter before launch: daemon restart with sandboxes present, guest-agent handshake failure, boot failure detection, stale runtime artifact cleanup, and interrupted snapshot handling.
+- [x] Add `scripts/qemu-recovery-drill.sh` for the smallest set of disruptive drills that matter before launch: daemon restart with sandboxes present, guest-agent handshake failure, boot failure detection, stale runtime artifact cleanup, and interrupted snapshot handling.
 - [x] Add `scripts/qemu-resource-abuse.sh` with repeatable memory, disk, file-count, PID/fork-pressure, and stdout-flood scenarios plus explicit pass/fail thresholds.
 - [ ] Extend `internal/runtime/qemu/host_integration_test.go` with recovery, abuse, and snapshot-integrity coverage across `core` and at least one heavier profile.
 - [x] Add service-level checks in `internal/service/service_test.go` for storage-pressure reporting, degraded/error visibility, and conservative post-restart state.

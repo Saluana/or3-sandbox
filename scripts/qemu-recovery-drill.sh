@@ -87,5 +87,28 @@ fi
 sandboxctl snapshot-restore "$snapshot_id" "$SANDBOX_ID" >/dev/null
 wait_for_status "$SANDBOX_ID" stopped 30
 
+log 'running partial snapshot failure drill'
+snapshot_root="${SANDBOX_SNAPSHOT_ROOT:-$ROOT_DIR/data/snapshots}"
+workspace_tar="$snapshot_root/$SANDBOX_ID/$snapshot_id/workspace.tar.gz"
+if [ -f "$workspace_tar" ]; then
+  mv "$workspace_tar" "$workspace_tar.missing"
+  if sandboxctl snapshot-restore "$snapshot_id" "$SANDBOX_ID" >/dev/null 2>&1; then
+    echo 'expected restore to fail when the workspace archive is missing' >&2
+    exit 1
+  fi
+  mv "$workspace_tar.missing" "$workspace_tar"
+else
+  log 'skipping partial snapshot failure drill because the local workspace archive was not present'
+fi
+
+log 'verifying owned sandbox-root cleanup on delete'
+storage_root="${SANDBOX_STORAGE_ROOT:-$ROOT_DIR/data/storage}/$SANDBOX_ID"
+sandboxctl delete "$SANDBOX_ID" >/dev/null
+SANDBOX_ID=""
+if [ -e "$storage_root" ]; then
+  echo "expected sandbox storage root cleanup for $storage_root" >&2
+  exit 1
+fi
+
 log 'recovery drill completed successfully'
-log 'guest-agent handshake failure and interrupted snapshot subdrills still require host-level fault injection outside this script'
+log 'guest-agent handshake failure still requires host-level fault injection outside this script'

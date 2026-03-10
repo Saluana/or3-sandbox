@@ -10,12 +10,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"or3-sandbox/internal/auth"
 	"or3-sandbox/internal/config"
 	"or3-sandbox/internal/db"
+	"or3-sandbox/internal/dockerimage"
 	"or3-sandbox/internal/guestimage"
 	"or3-sandbox/internal/model"
 	"or3-sandbox/internal/repository"
@@ -216,6 +218,43 @@ func TestLifecycleRefreshStorageUsesRuntimeMeasurement(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 	assertActualStorage(t, store, tenantA.ID, 450)
+}
+
+func TestCreateSandboxBuildsScratchSecretsRootsAndNetworkPolicy(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	if got := filepath.Base(runtime.createdSpec.ScratchRoot); got != "scratch" {
+		t.Fatalf("expected scratch root, got %q", runtime.createdSpec.ScratchRoot)
+	}
+	if got := filepath.Base(runtime.createdSpec.SecretsRoot); got != "secrets" {
+		t.Fatalf("expected secrets root, got %q", runtime.createdSpec.SecretsRoot)
+	}
+	if runtime.createdSpec.NetworkPolicy.Internet {
+		t.Fatal("expected internet-disabled network policy")
+	}
+	if !runtime.createdSpec.NetworkPolicy.LoopbackOnly {
+		t.Fatal("expected loopback-only network policy")
+	}
+	for _, dir := range []string{runtime.createdSpec.ScratchRoot, runtime.createdSpec.SecretsRoot} {
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+			t.Fatalf("expected storage root %q to exist, got %v", dir, err)
+		}
+	}
 }
 
 func TestCreateSnapshotPersistsArtifactsOutsideSandboxRoot(t *testing.T) {
@@ -468,6 +507,152 @@ func TestRestoreSnapshotFetchesExportBundleWhenLocalArtifactsAreMissing(t *testi
 	}
 }
 
+func TestRestoreSnapshotRebindsExportedArtifactsForDifferentTargetSandbox(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.OptionalSnapshotExport = filepath.Join(filepath.Dir(svc.cfg.SnapshotRoot), "exports")
+
+	source, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create source sandbox: %v", err)
+	}
+	target, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create target sandbox: %v", err)
+	}
+	originalRootfs := filepath.Join(source.StorageRoot, ".snapshots", "snap-export", "rootfs.img")
+	originalWorkspace := filepath.Join(source.StorageRoot, ".snapshots", "snap-export", "workspace.img")
+	for path, content := range map[string]string{
+		originalRootfs:    "rootfs-export",
+		originalWorkspace: "workspace-export",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir snapshot fixture: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write snapshot fixture %s: %v", path, err)
+		}
+	}
+	runtime.snapshotInfo = model.SnapshotInfo{ImageRef: originalRootfs, WorkspaceTar: originalWorkspace}
+
+	snapshot, err := svc.CreateSnapshot(ctx, tenantA.ID, source.ID, model.CreateSnapshotRequest{Name: "exported-cross-restore"})
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if err := os.Remove(snapshot.ImageRef); err != nil {
+		t.Fatalf("remove local rootfs snapshot: %v", err)
+	}
+	if err := os.Remove(snapshot.WorkspaceTar); err != nil {
+		t.Fatalf("remove local workspace snapshot: %v", err)
+	}
+
+	if _, err := svc.RestoreSnapshot(ctx, tenantA.ID, snapshot.ID, model.RestoreSnapshotRequest{TargetSandboxID: target.ID}); err != nil {
+		t.Fatalf("restore snapshot: %v", err)
+	}
+	expectedRootfs := filepath.Join(svc.cfg.SnapshotRoot, target.ID, snapshot.ID, filepath.Base(snapshot.ImageRef))
+	expectedWorkspace := filepath.Join(svc.cfg.SnapshotRoot, target.ID, snapshot.ID, filepath.Base(snapshot.WorkspaceTar))
+	if runtime.restoredSnapshot.ImageRef != expectedRootfs {
+		t.Fatalf("expected rebound image ref %q, got %q", expectedRootfs, runtime.restoredSnapshot.ImageRef)
+	}
+	if runtime.restoredSnapshot.WorkspaceTar != expectedWorkspace {
+		t.Fatalf("expected rebound workspace tar %q, got %q", expectedWorkspace, runtime.restoredSnapshot.WorkspaceTar)
+	}
+	for _, path := range []string{expectedRootfs, expectedWorkspace} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected rebound snapshot artifact %s: %v", path, err)
+		}
+	}
+}
+
+func TestRestoreSnapshotRejectsRuntimeCompatibilityMismatch(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	snapshot, err := svc.CreateSnapshot(ctx, tenantA.ID, sandbox.ID, model.CreateSnapshotRequest{Name: "snap"})
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	snapshot.RuntimeBackend = "docker"
+	if err := store.UpdateSnapshot(ctx, snapshot); err != nil {
+		t.Fatalf("update snapshot: %v", err)
+	}
+
+	if _, err := svc.RestoreSnapshot(ctx, tenantA.ID, snapshot.ID, model.RestoreSnapshotRequest{TargetSandboxID: sandbox.ID}); err == nil || !strings.Contains(err.Error(), "runtime") {
+		t.Fatalf("expected runtime compatibility error, got %v", err)
+	}
+}
+
+func TestRestoreSnapshotRejectsIncompatibleSnapshotBeforeStoppingRunningTarget(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	snapshot, err := svc.CreateSnapshot(ctx, tenantA.ID, sandbox.ID, model.CreateSnapshotRequest{Name: "snap"})
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	snapshot.RuntimeBackend = "docker"
+	if err := store.UpdateSnapshot(ctx, snapshot); err != nil {
+		t.Fatalf("update snapshot: %v", err)
+	}
+	runtime.startState = model.RuntimeState{RuntimeID: "rt-start", Status: model.SandboxStatusRunning, Running: true}
+	runtime.stopErr = errors.New("stop should not be called")
+	if _, err := svc.StartSandbox(ctx, tenantA.ID, sandbox.ID, quota); err != nil {
+		t.Fatalf("start sandbox: %v", err)
+	}
+
+	if _, err := svc.RestoreSnapshot(ctx, tenantA.ID, snapshot.ID, model.RestoreSnapshotRequest{TargetSandboxID: sandbox.ID}); err == nil || !strings.Contains(err.Error(), "runtime") {
+		t.Fatalf("expected runtime compatibility error, got %v", err)
+	}
+}
+
 func TestExtractTarGzRejectsEscapingEntries(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "escape.tar.gz")
 	file, err := os.Create(archivePath)
@@ -631,6 +816,7 @@ func TestCreateSandboxPolicyAllowsAndDeniesImages(t *testing.T) {
 
 	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
 		BaseImageRef:  "ghcr.io/acme/app:1",
+		Profile:       model.GuestProfileCore,
 		CPULimit:      model.CPUCores(1),
 		MemoryLimitMB: 512,
 		PIDsLimit:     128,
@@ -659,6 +845,414 @@ func TestCreateSandboxPolicyAllowsAndDeniesImages(t *testing.T) {
 	}
 	if len(events) == 0 || events[len(events)-1].Action != "policy.create" || events[len(events)-1].Outcome != "denied" {
 		t.Fatalf("expected policy denial audit event, got %+v", events)
+	}
+}
+
+func TestCreateSandboxRejectsDangerousDockerFeaturesByDefault(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "alpine:3.20",
+		Features:      []string{"docker.host-network"},
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if !errors.Is(err, auth.ErrForbidden) {
+		t.Fatalf("expected docker feature denial, got %v", err)
+	}
+	events, err := store.ListAuditEvents(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	if len(events) == 0 || events[len(events)-1].Action != "policy.create" || events[len(events)-1].Outcome != "denied" {
+		t.Fatalf("expected docker policy denial audit event, got %+v", events)
+	}
+}
+
+func TestCreateSandboxRejectsDangerousDockerCapabilityOverrideByDefault(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "alpine:3.20",
+		Capabilities:  []string{"docker.elevated-user"},
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if !errors.Is(err, auth.ErrForbidden) {
+		t.Fatalf("expected docker capability denial, got %v", err)
+	}
+}
+
+func TestCreateSandboxAuditsAllowedDockerCapabilityOverride(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+	svc.cfg.DockerAllowDangerousOverrides = true
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "alpine:3.20",
+		Capabilities:  []string{"docker.elevated-user", "docker.extra-cap:net_bind_service"},
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("create sandbox with allowed docker override: %v", err)
+	}
+	if got := runtime.createdSpec.Capabilities; len(got) != 2 || got[0] != "docker.elevated-user" {
+		t.Fatalf("expected normalized docker capabilities in runtime spec, got %#v", got)
+	}
+	if len(sandbox.Capabilities) != 2 {
+		t.Fatalf("expected persisted docker capabilities, got %#v", sandbox.Capabilities)
+	}
+	events, err := store.ListAuditEvents(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Action == "policy.create.override" && event.Outcome == "ok" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected policy.create.override audit event, got %+v", events)
+	}
+}
+
+func TestCreateSandboxRejectsDockerProfileMismatch(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "alpine:3.20",
+		Profile:       model.GuestProfileBrowser,
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not match requested profile") {
+		t.Fatalf("expected docker profile mismatch, got %v", err)
+	}
+}
+
+func TestCreateSandboxRejectsDockerImageMissingMetadata(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "registry.example.com/custom/app:1",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err == nil || !strings.Contains(err.Error(), "missing curated profile metadata") {
+		t.Fatalf("expected missing metadata error, got %v", err)
+	}
+}
+
+func TestCreateSandboxAcceptsCustomDockerImageWithExplicitProfile(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "registry.example.com/custom/app:1",
+		Profile:       model.GuestProfileRuntime,
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("expected explicit profile to allow custom docker image, got %v", err)
+	}
+	if sandbox.Profile != model.GuestProfileRuntime {
+		t.Fatalf("expected runtime profile to persist, got %+v", sandbox)
+	}
+}
+
+func TestCreateSandboxRejectsDangerousDockerProfileByDefault(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+	svc.cfg.AllowedGuestProfiles = []model.GuestProfile{model.GuestProfileCore, model.GuestProfileContainer, model.GuestProfileDebug}
+	svc.cfg.DangerousGuestProfiles = []model.GuestProfile{model.GuestProfileContainer, model.GuestProfileDebug}
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "or3-sandbox/base-container:latest",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if !errors.Is(err, auth.ErrForbidden) {
+		t.Fatalf("expected dangerous profile denial, got %v", err)
+	}
+	events, err := store.ListAuditEvents(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	if len(events) == 0 || !strings.Contains(events[len(events)-1].Message, "dangerous-profile") {
+		t.Fatalf("expected dangerous profile audit detail, got %+v", events)
+	}
+}
+
+func TestCreateSandboxAuditsAllowedDangerousProfileOverride(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+	svc.cfg.AllowedGuestProfiles = []model.GuestProfile{model.GuestProfileCore, model.GuestProfileContainer}
+	svc.cfg.DangerousGuestProfiles = []model.GuestProfile{model.GuestProfileContainer}
+	svc.cfg.AllowDangerousProfiles = true
+
+	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "or3-sandbox/base-container:latest",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	}); err != nil {
+		t.Fatalf("expected dangerous profile create to succeed when explicitly allowed, got %v", err)
+	}
+	events, err := store.ListAuditEvents(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Action == "policy.profile.override" && event.Outcome == "ok" && strings.Contains(event.Message, "dangerous_profile_explicitly_allowed") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected dangerous profile override audit event, got %+v", events)
+	}
+}
+
+func TestCreateSandboxAdmissionRejectsNodeRunningPressure(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	runtime.startState = model.RuntimeState{RuntimeID: "rt-running", Status: model.SandboxStatusRunning, Running: true}
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.AdmissionMaxNodeRunning = 1
+
+	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	}); err != nil {
+		t.Fatalf("create first sandbox: %v", err)
+	}
+
+	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	}); err == nil || !strings.Contains(err.Error(), "node running admission limit reached") {
+		t.Fatalf("expected node running admission denial, got %v", err)
+	}
+	events, err := store.ListAuditEvents(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	if len(events) == 0 || events[len(events)-1].Action != "admission.create" {
+		t.Fatalf("expected admission.create audit event, got %+v", events)
+	}
+}
+
+func TestStartSandboxAdmissionRejectsBurstyTenantWhenConfigured(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	runtime.startState = model.RuntimeState{RuntimeID: "rt-start", Status: model.SandboxStatusRunning, Running: true}
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.AdmissionMaxTenantStarts = 1
+
+	first, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create first sandbox: %v", err)
+	}
+	second, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create second sandbox: %v", err)
+	}
+	first.Status = model.SandboxStatusStarting
+	first.RuntimeStatus = string(model.SandboxStatusStarting)
+	first.UpdatedAt = time.Now().UTC()
+	if err := store.UpdateSandboxState(ctx, first); err != nil {
+		t.Fatalf("update first sandbox state: %v", err)
+	}
+
+	if _, err := svc.StartSandbox(ctx, tenantA.ID, second.ID, quota); err == nil || !strings.Contains(err.Error(), "tenant concurrent start limit reached") {
+		t.Fatalf("expected tenant start admission denial, got %v", err)
+	}
+	metrics, err := svc.MetricsReport(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("metrics report: %v", err)
+	}
+	if !strings.Contains(metrics, `or3_sandbox_admission_denials_total{action="admission.start"} 1`) {
+		t.Fatalf("expected admission denial metric, got %s", metrics)
+	}
+}
+
+func TestCreateSandboxAdmissionIsAtomicUnderConcurrency(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	startBlock := make(chan struct{})
+	startEntered := make(chan struct{}, 1)
+	runtime.startBlock = startBlock
+	runtime.startEntered = startEntered
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.AdmissionMaxNodeRunning = 1
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+			BaseImageRef:  "guest-base.qcow2",
+			CPULimit:      model.CPUCores(1),
+			MemoryLimitMB: 512,
+			PIDsLimit:     128,
+			DiskLimitMB:   512,
+			NetworkMode:   model.NetworkModeInternetDisabled,
+			AllowTunnels:  boolPtr(false),
+			Start:         true,
+		})
+		result <- err
+	}()
+
+	select {
+	case <-startEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first sandbox start reservation")
+	}
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "node running admission limit reached") {
+		t.Fatalf("expected concurrent create admission denial, got %v", err)
+	}
+	close(startBlock)
+	if err := <-result; err != nil {
+		t.Fatalf("first create failed: %v", err)
+	}
+}
+
+func TestDeleteSandboxBypassesHeavyAdmissionLimit(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.AdmissionMaxTenantHeavyOps = 1
+
+	target, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("create target sandbox: %v", err)
+	}
+	busy, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("create busy sandbox: %v", err)
+	}
+	busy.Status = model.SandboxStatusCreating
+	busy.RuntimeStatus = string(model.SandboxStatusCreating)
+	busy.UpdatedAt = time.Now().UTC()
+	if err := store.UpdateSandboxState(ctx, busy); err != nil {
+		t.Fatalf("mark busy sandbox creating: %v", err)
+	}
+
+	if err := svc.DeleteSandbox(ctx, tenantA.ID, target.ID, false); err != nil {
+		t.Fatalf("delete should bypass heavy admission pressure: %v", err)
+	}
+}
+
+func TestDockerCuratedMetadataFixtureStaysInSync(t *testing.T) {
+	metadata, err := dockerimage.Resolve("or3-sandbox/base-container:latest")
+	if err != nil {
+		t.Fatalf("resolve container metadata: %v", err)
+	}
+	if metadata.Profile != model.GuestProfileContainer || !metadata.Dangerous {
+		t.Fatalf("unexpected metadata %+v", metadata)
 	}
 }
 
@@ -960,7 +1554,8 @@ func TestCreateSandboxAppliesFractionalCPUDefault(t *testing.T) {
 	quota.MaxCPUCores = model.MustParseCPUQuantity("2500m")
 
 	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
-		BaseImageRef:  "guest-base.qcow2",
+		BaseImageRef:  "alpine:3.20",
+		Profile:       model.GuestProfileCore,
 		MemoryLimitMB: 512,
 		PIDsLimit:     128,
 		DiskLimitMB:   512,
@@ -985,7 +1580,8 @@ func TestCreateSandboxRejectsFractionalCPUQuotaOverflow(t *testing.T) {
 	quota.MaxCPUCores = model.MustParseCPUQuantity("2")
 
 	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
-		BaseImageRef:  "guest-base.qcow2",
+		BaseImageRef:  "alpine:3.20",
+		Profile:       model.GuestProfileCore,
 		CPULimit:      model.MustParseCPUQuantity("1500m"),
 		MemoryLimitMB: 512,
 		PIDsLimit:     128,
@@ -997,7 +1593,8 @@ func TestCreateSandboxRejectsFractionalCPUQuotaOverflow(t *testing.T) {
 	}
 
 	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
-		BaseImageRef:  "guest-base.qcow2",
+		BaseImageRef:  "alpine:3.20",
+		Profile:       model.GuestProfileCore,
 		CPULimit:      model.MustParseCPUQuantity("600m"),
 		MemoryLimitMB: 512,
 		PIDsLimit:     128,
@@ -1064,7 +1661,7 @@ func TestCreateSandboxRejectsDangerousQEMUProfileByDefault(t *testing.T) {
 		AllowTunnels:  boolPtr(false),
 		Profile:       model.GuestProfileDebug,
 	})
-	if err == nil || !strings.Contains(err.Error(), "blocked by policy") {
+	if err == nil || !strings.Contains(err.Error(), "dangerous-profile policy") {
 		t.Fatalf("expected dangerous-profile rejection, got %v", err)
 	}
 }
@@ -1328,6 +1925,89 @@ func assertActualStorage(t *testing.T, store *repository.Store, tenantID string,
 	}
 }
 
+// TestCreateSandboxStampsRuntimeClass verifies that the service stamps the
+// correct RuntimeClass on sandbox creation for each backend.
+func TestCreateSandboxStampsRuntimeClass(t *testing.T) {
+	tests := []struct {
+		backend   string
+		wantClass model.RuntimeClass
+	}{
+		{"docker", model.RuntimeClassTrustedDocker},
+		{"qemu", model.RuntimeClassVM},
+	}
+	for _, tt := range tests {
+		t.Run(tt.backend, func(t *testing.T) {
+			ctx := context.Background()
+			runtime := newStubRuntime()
+			svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, tt.backend)
+			var imageRef string
+			if tt.backend == "qemu" {
+				imageRef = "guest-base.qcow2"
+			} else {
+				imageRef = "alpine:3.20"
+			}
+			sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+				BaseImageRef:  imageRef,
+				CPULimit:      model.CPUCores(1),
+				MemoryLimitMB: 512,
+				PIDsLimit:     128,
+				DiskLimitMB:   512,
+				NetworkMode:   model.NetworkModeInternetDisabled,
+				AllowTunnels:  boolPtr(false),
+			})
+			if err != nil {
+				t.Fatalf("create sandbox: %v", err)
+			}
+			if sandbox.RuntimeClass != tt.wantClass {
+				t.Errorf("RuntimeClass: got %q, want %q", sandbox.RuntimeClass, tt.wantClass)
+			}
+		})
+	}
+}
+
+// TestReconcileToleatesLegacySandboxWithNoRuntimeClass verifies that sandboxes
+// with an empty runtime_class (i.e. created before the column was added) are
+// reconciled successfully without errors, and that the class is derived from
+// the backend on subsequent reads.
+func TestReconcileToleratesLegacySandboxWithNoRuntimeClass(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	// Simulate a legacy row by clearing the runtime_class column.
+	sqlDB := store.DB()
+	if _, err := sqlDB.ExecContext(ctx, `UPDATE sandboxes SET runtime_class='' WHERE sandbox_id=?`, sandbox.ID); err != nil {
+		t.Fatalf("clear runtime_class: %v", err)
+	}
+
+	// Reconcile must succeed even when runtime_class is empty.
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile with legacy sandbox: %v", err)
+	}
+
+	// After reconcile the sandbox should still be readable with a derived class.
+	got, err := svc.GetSandbox(ctx, tenantA.ID, sandbox.ID)
+	if err != nil {
+		t.Fatalf("get sandbox after reconcile: %v", err)
+	}
+	if got.RuntimeClass != model.RuntimeClassVM {
+		t.Errorf("expected derived RuntimeClassVM for qemu backend, got %q", got.RuntimeClass)
+	}
+}
+
 func newServiceHarness(t *testing.T, runtime model.RuntimeManager, backend string) (*Service, *repository.Store, model.TenantQuota, model.Tenant, model.Tenant) {
 	t.Helper()
 	root := t.TempDir()
@@ -1434,11 +2114,17 @@ type stubRuntime struct {
 	inspectCalls      int
 	execHandleFactory func(context.Context, model.ExecRequest) model.ExecHandle
 	createdSpec       model.SandboxSpec
+	restoredSnapshot  model.Snapshot
 
-	reads   map[string]string
-	writes  []stubWrite
-	deletes []string
-	mkdirs  []string
+	reads         map[string]string
+	writes        []stubWrite
+	deletes       []string
+	mkdirs        []string
+	createBlock   chan struct{}
+	createEntered chan struct{}
+	startBlock    chan struct{}
+	startEntered  chan struct{}
+	mu            sync.Mutex
 }
 
 type stubWrite struct {
@@ -1478,7 +2164,18 @@ func newRuntimeOnlyStub() *runtimeOnlyStub {
 }
 
 func (r *stubRuntime) Create(_ context.Context, spec model.SandboxSpec) (model.RuntimeState, error) {
+	if r.createEntered != nil {
+		select {
+		case r.createEntered <- struct{}{}:
+		default:
+		}
+	}
+	if r.createBlock != nil {
+		<-r.createBlock
+	}
+	r.mu.Lock()
 	r.createdSpec = spec
+	r.mu.Unlock()
 	if r.createErr != nil {
 		return model.RuntimeState{}, r.createErr
 	}
@@ -1486,6 +2183,15 @@ func (r *stubRuntime) Create(_ context.Context, spec model.SandboxSpec) (model.R
 }
 
 func (r *stubRuntime) Start(context.Context, model.Sandbox) (model.RuntimeState, error) {
+	if r.startEntered != nil {
+		select {
+		case r.startEntered <- struct{}{}:
+		default:
+		}
+	}
+	if r.startBlock != nil {
+		<-r.startBlock
+	}
 	if r.startErr != nil {
 		return model.RuntimeState{}, r.startErr
 	}
@@ -1543,7 +2249,8 @@ func (r *stubRuntime) CreateSnapshot(context.Context, model.Sandbox, string) (mo
 	return r.snapshotInfo, nil
 }
 
-func (r *stubRuntime) RestoreSnapshot(context.Context, model.Sandbox, model.Snapshot) (model.RuntimeState, error) {
+func (r *stubRuntime) RestoreSnapshot(_ context.Context, _ model.Sandbox, snapshot model.Snapshot) (model.RuntimeState, error) {
+	r.restoredSnapshot = snapshot
 	if r.restoreErr != nil {
 		return model.RuntimeState{}, r.restoreErr
 	}

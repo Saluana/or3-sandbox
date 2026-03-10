@@ -14,10 +14,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
+	"or3-sandbox/internal/archiveutil"
 	"or3-sandbox/internal/config"
+	"or3-sandbox/internal/dockerimage"
 	"or3-sandbox/internal/guestimage"
 	"or3-sandbox/internal/model"
 	"or3-sandbox/internal/repository"
@@ -29,10 +32,11 @@ const (
 )
 
 type Service struct {
-	cfg     config.Config
-	store   *repository.Store
-	runtime model.RuntimeManager
-	log     *slog.Logger
+	cfg         config.Config
+	store       *repository.Store
+	runtime     model.RuntimeManager
+	log         *slog.Logger
+	admissionMu sync.Mutex
 }
 
 type workspaceFileRuntime interface {
@@ -65,7 +69,7 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		return model.Sandbox{}, err
 	}
 	var err error
-	req, contract, err := s.validateRuntimeCreate(req)
+	req, contract, err := s.validateRuntimeCreate(ctx, req)
 	if err != nil {
 		return model.Sandbox{}, err
 	}
@@ -81,24 +85,32 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		}
 	}
 	id := newID("sbx-")
-	storageRoot := filepath.Join(s.cfg.StorageRoot, id, "rootfs")
-	workspaceRoot := filepath.Join(s.cfg.StorageRoot, id, "workspace")
-	cacheRoot := filepath.Join(s.cfg.StorageRoot, id, "cache")
-	for _, dir := range []string{storageRoot, workspaceRoot, cacheRoot} {
+	baseDir := filepath.Join(s.cfg.StorageRoot, id)
+	storageRoot := filepath.Join(baseDir, "rootfs")
+	workspaceRoot := storageClassRoot(baseDir, model.StorageClassWorkspace)
+	cacheRoot := storageClassRoot(baseDir, model.StorageClassCache)
+	scratchRoot := storageClassRoot(baseDir, model.StorageClassScratch)
+	secretsRoot := storageClassRoot(baseDir, model.StorageClassSecrets)
+	for _, dir := range []string{storageRoot, workspaceRoot, cacheRoot, scratchRoot, secretsRoot} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return model.Sandbox{}, err
 		}
 	}
 	now := time.Now().UTC()
+	initialStatus := model.SandboxStatusCreating
+	if req.Start {
+		initialStatus = model.SandboxStatusStarting
+	}
 	sandbox := model.Sandbox{
 		ID:                       id,
 		TenantID:                 tenant.ID,
-		Status:                   model.SandboxStatusCreating,
+		Status:                   initialStatus,
 		RuntimeBackend:           s.cfg.RuntimeBackend,
+		RuntimeClass:             model.BackendToRuntimeClass(s.cfg.RuntimeBackend),
 		BaseImageRef:             req.BaseImageRef,
 		Profile:                  req.Profile,
 		Features:                 model.NormalizeFeatures(req.Features),
-		Capabilities:             append([]string(nil), contract.Capabilities...),
+		Capabilities:             s.resolvedCapabilities(req, contract),
 		ControlMode:              contract.Control.Mode,
 		ControlProtocolVersion:   contract.Control.ProtocolVersion,
 		WorkspaceContractVersion: contract.WorkspaceContractVersion,
@@ -113,12 +125,12 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		WorkspaceRoot:            workspaceRoot,
 		CacheRoot:                cacheRoot,
 		RuntimeID:                id,
-		RuntimeStatus:            string(model.SandboxStatusCreating),
+		RuntimeStatus:            string(initialStatus),
 		CreatedAt:                now,
 		UpdatedAt:                now,
 		LastActiveAt:             now,
 	}
-	if err := s.store.CreateSandbox(ctx, sandbox); err != nil {
+	if err := s.reserveSandboxCreate(ctx, tenant.ID, sandbox, req); err != nil {
 		_ = os.RemoveAll(filepath.Join(s.cfg.StorageRoot, id))
 		return model.Sandbox{}, err
 	}
@@ -142,6 +154,9 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		StorageRoot:              sandbox.StorageRoot,
 		WorkspaceRoot:            sandbox.WorkspaceRoot,
 		CacheRoot:                sandbox.CacheRoot,
+		ScratchRoot:              scratchRoot,
+		SecretsRoot:              secretsRoot,
+		NetworkPolicy:            buildNetworkPolicy(sandbox.NetworkMode, sandbox.AllowTunnels),
 	}
 	state, err := s.runtime.Create(ctx, spec)
 	if err != nil {
@@ -173,6 +188,7 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		auditKV("base_image_ref", sandbox.BaseImageRef),
 		auditKV("start_requested", req.Start),
 		auditKV("allow_tunnels", sandbox.AllowTunnels),
+		networkPolicyAuditDetail(buildNetworkPolicy(sandbox.NetworkMode, sandbox.AllowTunnels)),
 	))
 	return s.store.GetSandbox(ctx, tenant.ID, sandbox.ID)
 }
@@ -215,6 +231,10 @@ func (s *Service) RuntimeBackend() string {
 	return s.cfg.RuntimeBackend
 }
 
+func (s *Service) RuntimeClass() model.RuntimeClass {
+	return s.cfg.RuntimeClass()
+}
+
 func (s *Service) ListSandboxes(ctx context.Context, tenantID string) ([]model.Sandbox, error) {
 	return s.store.ListSandboxes(ctx, tenantID)
 }
@@ -228,7 +248,7 @@ func (s *Service) GetTenantQuotaView(ctx context.Context, tenantID string) (Tena
 	if err != nil {
 		return TenantQuotaView{}, err
 	}
-	return buildTenantQuotaView(quota, usage), nil
+	return buildTenantQuotaView(s.cfg, quota, usage), nil
 }
 
 func (s *Service) RuntimeHealth(ctx context.Context, tenantID string) (model.RuntimeHealth, error) {
@@ -285,20 +305,21 @@ func (s *Service) RuntimeHealth(ctx context.Context, tenantID string) (model.Run
 }
 
 func (s *Service) StartSandbox(ctx context.Context, tenantID, sandboxID string, quota model.TenantQuota) (model.Sandbox, error) {
-	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
-	if err != nil {
-		return model.Sandbox{}, err
-	}
-	if err := s.enforceLifecyclePolicy(ctx, sandbox, "start"); err != nil {
-		return model.Sandbox{}, err
-	}
+	var err error
 	if err := s.checkRunningQuota(ctx, tenantID, quota); err != nil {
 		return model.Sandbox{}, err
 	}
-	return s.transitionSandbox(ctx, tenantID, sandboxID, "sandbox.start", model.SandboxStatusStarting, func(sandbox model.Sandbox) (model.RuntimeState, model.SandboxStatus, error) {
-		state, err := s.runtime.Start(ctx, sandbox)
-		return state, model.SandboxStatusRunning, err
-	}, model.SandboxStatusRunning)
+	sandbox, err := s.reserveLifecycleTransition(ctx, tenantID, sandboxID, "start", model.SandboxStatusStarting, admissionDelta{
+		nodeRunning:  1,
+		tenantStarts: 1,
+		tenantHeavy:  1,
+	})
+	if err != nil {
+		return model.Sandbox{}, err
+	}
+	return s.executeReservedTransition(ctx, tenantID, sandbox, "sandbox.start", model.SandboxStatusStarting, model.SandboxStatusRunning, func(sandbox model.Sandbox) (model.RuntimeState, error) {
+		return s.runtime.Start(ctx, sandbox)
+	})
 }
 
 func (s *Service) StopSandbox(ctx context.Context, tenantID, sandboxID string, force bool) (model.Sandbox, error) {
@@ -353,20 +374,21 @@ func (s *Service) SuspendSandbox(ctx context.Context, tenantID, sandboxID string
 }
 
 func (s *Service) ResumeSandbox(ctx context.Context, tenantID, sandboxID string, quota model.TenantQuota) (model.Sandbox, error) {
-	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
-	if err != nil {
-		return model.Sandbox{}, err
-	}
-	if err := s.enforceLifecyclePolicy(ctx, sandbox, "resume"); err != nil {
-		return model.Sandbox{}, err
-	}
+	var err error
 	if err := s.checkRunningQuota(ctx, tenantID, quota); err != nil {
 		return model.Sandbox{}, err
 	}
-	return s.transitionSandbox(ctx, tenantID, sandboxID, "sandbox.resume", model.SandboxStatusStarting, func(sandbox model.Sandbox) (model.RuntimeState, model.SandboxStatus, error) {
-		state, err := s.runtime.Resume(ctx, sandbox)
-		return state, model.SandboxStatusRunning, err
-	}, model.SandboxStatusRunning)
+	sandbox, err := s.reserveLifecycleTransition(ctx, tenantID, sandboxID, "resume", model.SandboxStatusStarting, admissionDelta{
+		nodeRunning:  1,
+		tenantStarts: 1,
+		tenantHeavy:  1,
+	})
+	if err != nil {
+		return model.Sandbox{}, err
+	}
+	return s.executeReservedTransition(ctx, tenantID, sandbox, "sandbox.resume", model.SandboxStatusStarting, model.SandboxStatusRunning, func(sandbox model.Sandbox) (model.RuntimeState, error) {
+		return s.runtime.Resume(ctx, sandbox)
+	})
 }
 
 func (s *Service) DeleteSandbox(ctx context.Context, tenantID, sandboxID string, preserveSnapshots bool) error {
@@ -552,11 +574,20 @@ func (s *Service) CreateTTYSession(ctx context.Context, tenantID, sandboxID stri
 		return model.Sandbox{}, model.TTYSession{}, nil, err
 	}
 	_ = s.touchSandboxActivity(ctx, sandbox)
+	s.recordAudit(ctx, tenantID, sandbox.ID, "sandbox.tty.attach", session.ID, "ok", auditDetail(
+		auditKV("command", session.Command),
+		auditKV("connected", session.Connected),
+		auditKV("last_resize", session.LastResize),
+	))
 	return sandbox, session, handle, nil
 }
 
 func (s *Service) CloseTTYSession(ctx context.Context, tenantID, sessionID string) error {
-	return s.store.CloseTTYSession(ctx, tenantID, sessionID)
+	if err := s.store.CloseTTYSession(ctx, tenantID, sessionID); err != nil {
+		return err
+	}
+	s.recordAudit(ctx, tenantID, "", "sandbox.tty.detach", sessionID, "ok", auditKV("session_id", sessionID))
+	return nil
 }
 
 func (s *Service) UpdateTTYResize(ctx context.Context, tenantID, sessionID string, rows, cols int) error {
@@ -768,6 +799,7 @@ func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, 
 	if err := s.enforceTunnelPolicy(ctx, sandbox, req); err != nil {
 		return model.Tunnel{}, err
 	}
+	policy := buildNetworkPolicy(sandbox.NetworkMode, sandbox.AllowTunnels)
 	accessToken := ""
 	tunnel := model.Tunnel{
 		ID:         id,
@@ -789,7 +821,7 @@ func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, 
 		return model.Tunnel{}, err
 	}
 	_ = s.touchSandboxActivity(ctx, sandbox)
-	s.recordAudit(ctx, tenantID, sandboxID, "tunnel.create", tunnel.ID, "ok", tunnelAuditDetail(tunnel))
+	s.recordAudit(ctx, tenantID, sandboxID, "tunnel.create", tunnel.ID, "ok", auditDetail(tunnelAuditDetail(tunnel), networkPolicyAuditDetail(policy)))
 	return tunnel, nil
 }
 
@@ -838,19 +870,24 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 	if err != nil {
 		return model.Snapshot{}, err
 	}
+	if err := s.enforceAdmission(ctx, tenantID, sandbox.ID, "snapshot_create", admissionDelta{tenantHeavy: 1}); err != nil {
+		return model.Snapshot{}, err
+	}
 	if sandbox.RuntimeBackend == "qemu" && sandbox.Status != model.SandboxStatusStopped {
 		return model.Snapshot{}, fmt.Errorf("qemu snapshots require the sandbox to be stopped")
 	}
 	snapshot := model.Snapshot{
-		ID:                     newID("snap-"),
-		SandboxID:              sandbox.ID,
-		TenantID:               tenantID,
-		Name:                   req.Name,
-		Status:                 model.SnapshotStatusCreating,
-		Profile:                sandbox.Profile,
-		ImageContractVersion:   sandbox.ImageContractVersion,
-		ControlProtocolVersion: sandbox.ControlProtocolVersion,
-		CreatedAt:              time.Now().UTC(),
+		ID:                       newID("snap-"),
+		SandboxID:                sandbox.ID,
+		TenantID:                 tenantID,
+		Name:                     req.Name,
+		Status:                   model.SnapshotStatusCreating,
+		RuntimeBackend:           sandbox.RuntimeBackend,
+		Profile:                  sandbox.Profile,
+		ImageContractVersion:     sandbox.ImageContractVersion,
+		ControlProtocolVersion:   sandbox.ControlProtocolVersion,
+		WorkspaceContractVersion: sandbox.WorkspaceContractVersion,
+		CreatedAt:                time.Now().UTC(),
 	}
 	if snapshot.Name == "" {
 		snapshot.Name = snapshot.ID
@@ -903,7 +940,7 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 		snapshot.ImageRef = info.ImageRef
 	}
 	if info.WorkspaceTar != "" {
-		targetTar := filepath.Join(snapshotDir, "workspace.img")
+		targetTar := filepath.Join(snapshotDir, "workspace.tar.gz")
 		if info.WorkspaceTar != targetTar {
 			stage = "copy_workspace_artifact"
 			if err := copyFile(targetTar, info.WorkspaceTar); err != nil {
@@ -960,6 +997,26 @@ func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID stri
 	if err != nil {
 		return model.Sandbox{}, err
 	}
+	if err := s.enforceAdmission(ctx, tenantID, sandbox.ID, "snapshot_restore", admissionDelta{tenantHeavy: 1}); err != nil {
+		return model.Sandbox{}, err
+	}
+	if err := s.validateSnapshotCompatibility(snapshot, sandbox); err != nil {
+		s.recordAudit(ctx, tenantID, sandbox.ID, "snapshot.restore", snapshot.ID, "denied", auditDetail(
+			auditKV("stage", "compatibility_check"),
+			auditKV("target_sandbox_id", sandbox.ID),
+			auditKV("forced_stop", false),
+		), "error", err)
+		return model.Sandbox{}, err
+	}
+	snapshot, err = s.ensureSnapshotArtifacts(ctx, sandbox, snapshot)
+	if err != nil {
+		s.recordAudit(ctx, tenantID, sandbox.ID, "snapshot.restore", snapshot.ID, "error", auditDetail(
+			auditKV("stage", "ensure_artifacts"),
+			auditKV("target_sandbox_id", sandbox.ID),
+			auditKV("forced_stop", false),
+		), "error", err)
+		return model.Sandbox{}, err
+	}
 	forcedStop := false
 	if sandbox.Status == model.SandboxStatusRunning || sandbox.Status == model.SandboxStatusSuspended {
 		forcedStop = true
@@ -973,14 +1030,6 @@ func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID stri
 		}
 		sandbox, _ = s.store.GetSandbox(ctx, tenantID, sandbox.ID)
 	}
-	if err := s.ensureSnapshotArtifacts(ctx, sandbox, snapshot); err != nil {
-		s.recordAudit(ctx, tenantID, sandbox.ID, "snapshot.restore", snapshot.ID, "error", auditDetail(
-			auditKV("stage", "ensure_artifacts"),
-			auditKV("target_sandbox_id", sandbox.ID),
-			auditKV("forced_stop", forcedStop),
-		), "error", err)
-		return model.Sandbox{}, err
-	}
 	state, err := s.runtime.RestoreSnapshot(ctx, sandbox, snapshot)
 	if err != nil {
 		s.recordAudit(ctx, tenantID, sandbox.ID, "snapshot.restore", snapshot.ID, "error", auditDetail(
@@ -992,12 +1041,12 @@ func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID stri
 	}
 	sandbox.Status = model.SandboxStatusStopped
 	sandbox.RuntimeStatus = string(state.Status)
+	sandbox.Profile = snapshot.Profile
+	sandbox.ImageContractVersion = snapshot.ImageContractVersion
+	sandbox.ControlProtocolVersion = snapshot.ControlProtocolVersion
+	sandbox.WorkspaceContractVersion = snapshot.WorkspaceContractVersion
 	if sandbox.RuntimeBackend != "qemu" {
 		sandbox.BaseImageRef = snapshot.ImageRef
-	} else {
-		sandbox.Profile = snapshot.Profile
-		sandbox.ImageContractVersion = snapshot.ImageContractVersion
-		sandbox.ControlProtocolVersion = snapshot.ControlProtocolVersion
 	}
 	sandbox.UpdatedAt = time.Now().UTC()
 	if err := s.store.UpdateSandboxState(ctx, sandbox); err != nil {
@@ -1139,15 +1188,33 @@ func (s *Service) refreshStorage(ctx context.Context, sandbox model.Sandbox) err
 		if err != nil {
 			return err
 		}
-		snapshotExportBytes, _ := dirSize(filepath.Join(s.cfg.SnapshotRoot, sandbox.ID))
+		snapshotExportBytes, snapshotExportEntries, _ := dirUsage(filepath.Join(s.cfg.SnapshotRoot, sandbox.ID))
 		usage.SnapshotBytes += snapshotExportBytes
-		return s.store.UpdateStorageUsage(ctx, sandbox.ID, usage.RootfsBytes, usage.WorkspaceBytes, usage.CacheBytes, usage.SnapshotBytes)
+		usage.SnapshotEntries += snapshotExportEntries
+		if err := s.auditStoragePressure(ctx, sandbox, usage); err != nil {
+			return err
+		}
+		return s.store.UpdateStorageUsage(ctx, sandbox.ID, usage.RootfsBytes, usage.WorkspaceBytes, usage.CacheBytes, usage.SnapshotBytes, usage.RootfsEntries, usage.WorkspaceEntries, usage.CacheEntries, usage.SnapshotEntries)
 	}
-	rootfsBytes, _ := dirSize(sandbox.StorageRoot)
-	workspaceBytes, _ := dirSize(sandbox.WorkspaceRoot)
-	cacheBytes, _ := dirSize(sandbox.CacheRoot)
-	snapshotBytes, _ := dirSize(filepath.Join(s.cfg.SnapshotRoot, sandbox.ID))
-	return s.store.UpdateStorageUsage(ctx, sandbox.ID, rootfsBytes, workspaceBytes, cacheBytes, snapshotBytes)
+	rootfsBytes, rootfsEntries, _ := dirUsage(sandbox.StorageRoot)
+	workspaceBytes, workspaceEntries, _ := dirUsage(sandbox.WorkspaceRoot)
+	cacheBytes, cacheEntries, _ := dirUsage(sandbox.CacheRoot)
+	scratchBytes, scratchEntries, _ := dirUsage(scratchRootFromStorageRoot(sandbox.StorageRoot))
+	snapshotBytes, snapshotEntries, _ := dirUsage(filepath.Join(s.cfg.SnapshotRoot, sandbox.ID))
+	usage := model.StorageUsage{
+		RootfsBytes:      rootfsBytes,
+		WorkspaceBytes:   workspaceBytes,
+		CacheBytes:       cacheBytes + scratchBytes,
+		SnapshotBytes:    snapshotBytes,
+		RootfsEntries:    rootfsEntries,
+		WorkspaceEntries: workspaceEntries,
+		CacheEntries:     cacheEntries + scratchEntries,
+		SnapshotEntries:  snapshotEntries,
+	}
+	if err := s.auditStoragePressure(ctx, sandbox, usage); err != nil {
+		return err
+	}
+	return s.store.UpdateStorageUsage(ctx, sandbox.ID, usage.RootfsBytes, usage.WorkspaceBytes, usage.CacheBytes, usage.SnapshotBytes, usage.RootfsEntries, usage.WorkspaceEntries, usage.CacheEntries, usage.SnapshotEntries)
 }
 
 func (s *Service) refreshStorageIfStale(ctx context.Context, sandbox model.Sandbox, force bool) error {
@@ -1182,6 +1249,7 @@ func (s *Service) applyCreateDefaults(req model.CreateSandboxRequest) model.Crea
 		req.Profile = model.GuestProfileCore
 	}
 	req.Features = model.NormalizeFeatures(req.Features)
+	req.Capabilities = model.NormalizeCapabilities(req.Capabilities)
 	if req.CPULimit == 0 {
 		req.CPULimit = s.cfg.DefaultCPULimit
 	}
@@ -1220,12 +1288,37 @@ func validateCreate(req model.CreateSandboxRequest) error {
 	return nil
 }
 
-func (s *Service) validateRuntimeCreate(req model.CreateSandboxRequest) (model.CreateSandboxRequest, guestimage.Contract, error) {
+func (s *Service) validateRuntimeCreate(ctx context.Context, req model.CreateSandboxRequest) (model.CreateSandboxRequest, guestimage.Contract, error) {
+	req.Capabilities = model.NormalizeCapabilities(req.Capabilities)
 	if s.cfg.RuntimeBackend == "qemu" && req.CPULimit.MilliValue()%1000 != 0 {
 		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("qemu runtime requires whole CPU cores until fractional throttling is implemented")
 	}
+	if s.cfg.RuntimeBackend == "docker" {
+		metadata, err := dockerimage.ResolveWithDockerLabels(ctx, req.BaseImageRef)
+		profile := req.Profile
+		switch {
+		case err == nil && profile == "":
+			profile = metadata.Profile
+		case err == nil && profile != metadata.Profile:
+			return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("docker image profile %q does not match requested profile %q", metadata.Profile, profile)
+		case err != nil && !errors.Is(err, dockerimage.ErrMetadataUnavailable):
+			return model.CreateSandboxRequest{}, guestimage.Contract{}, err
+		}
+		if err != nil && profile == "" {
+			return model.CreateSandboxRequest{}, guestimage.Contract{}, err
+		}
+		if !profile.IsValid() {
+			return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("docker runtime requires a valid guest profile")
+		}
+		req.Profile = profile
+		req.Features = model.NormalizeFeatures(req.Features)
+		return req, guestimage.Contract{}, nil
+	}
 	if s.cfg.RuntimeBackend != "qemu" {
 		return req, guestimage.Contract{}, nil
+	}
+	if len(req.Capabilities) > 0 {
+		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("qemu runtime does not accept requested capability overrides")
 	}
 	resolved, err := s.resolveQEMUBaseImageRef(req.BaseImageRef)
 	if err != nil {
@@ -1248,12 +1341,6 @@ func (s *Service) validateRuntimeCreate(req model.CreateSandboxRequest) (model.C
 	if profile != contract.Profile {
 		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("guest image profile %q does not match requested profile %q", contract.Profile, profile)
 	}
-	if !s.cfg.IsAllowedQEMUProfile(profile) {
-		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("guest profile %q is not allowed by policy", profile)
-	}
-	if s.cfg.IsDangerousQEMUProfile(profile) && !s.cfg.QEMUAllowDangerousProfiles {
-		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("guest profile %q is blocked by policy until SANDBOX_QEMU_ALLOW_DANGEROUS_PROFILES=true", profile)
-	}
 	if contract.Control.Mode == model.GuestControlModeSSHCompat && !s.cfg.QEMUAllowSSHCompat {
 		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("ssh-compat guest images are blocked by policy until SANDBOX_QEMU_ALLOW_SSH_COMPAT=true")
 	}
@@ -1264,6 +1351,13 @@ func (s *Service) validateRuntimeCreate(req model.CreateSandboxRequest) (model.C
 	req.Profile = profile
 	req.Features = model.NormalizeFeatures(req.Features)
 	return req, contract, nil
+}
+
+func (s *Service) resolvedCapabilities(req model.CreateSandboxRequest, contract guestimage.Contract) []string {
+	if s.cfg.RuntimeBackend == "qemu" {
+		return append([]string(nil), contract.Capabilities...)
+	}
+	return append([]string(nil), model.NormalizeCapabilities(req.Capabilities)...)
 }
 
 func (s *Service) resolveQEMUBaseImageRef(value string) (string, error) {
@@ -1368,6 +1462,84 @@ func (s *Service) transitionSandbox(ctx context.Context, tenantID, sandboxID, au
 	return s.store.GetSandbox(ctx, tenantID, sandbox.ID)
 }
 
+func (s *Service) reserveSandboxCreate(ctx context.Context, tenantID string, sandbox model.Sandbox, req model.CreateSandboxRequest) error {
+	createDelta := admissionDelta{nodeSandboxes: 1, tenantHeavy: 1}
+	if req.Start {
+		createDelta.nodeRunning = 1
+		createDelta.runningCPU = req.CPULimit
+		createDelta.runningMemory = req.MemoryLimitMB
+		createDelta.tenantStarts = 1
+	}
+	s.admissionMu.Lock()
+	defer s.admissionMu.Unlock()
+	if err := s.enforceAdmission(ctx, tenantID, sandbox.ID, "create", createDelta); err != nil {
+		return err
+	}
+	return s.store.CreateSandbox(ctx, sandbox)
+}
+
+func (s *Service) reserveLifecycleTransition(ctx context.Context, tenantID, sandboxID, action string, transitional model.SandboxStatus, delta admissionDelta) (model.Sandbox, error) {
+	s.admissionMu.Lock()
+	defer s.admissionMu.Unlock()
+	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
+	if err != nil {
+		return model.Sandbox{}, err
+	}
+	if delta.runningCPU == 0 {
+		delta.runningCPU = sandbox.CPULimit
+	}
+	if delta.runningMemory == 0 {
+		delta.runningMemory = sandbox.MemoryLimitMB
+	}
+	if err := s.enforceLifecyclePolicy(ctx, sandbox, action); err != nil {
+		return model.Sandbox{}, err
+	}
+	if err := s.enforceAdmission(ctx, tenantID, sandbox.ID, action, delta); err != nil {
+		return model.Sandbox{}, err
+	}
+	sandbox.Status = transitional
+	sandbox.RuntimeStatus = string(transitional)
+	sandbox.UpdatedAt = time.Now().UTC()
+	if err := s.store.UpdateSandboxState(ctx, sandbox); err != nil {
+		return model.Sandbox{}, err
+	}
+	return sandbox, nil
+}
+
+func (s *Service) executeReservedTransition(ctx context.Context, tenantID string, sandbox model.Sandbox, auditAction string, transitional, finalStatus model.SandboxStatus, action func(model.Sandbox) (model.RuntimeState, error)) (model.Sandbox, error) {
+	state, err := action(sandbox)
+	if err != nil {
+		sandbox.Status = model.SandboxStatusError
+		sandbox.RuntimeStatus = string(model.SandboxStatusError)
+		sandbox.LastRuntimeError = err.Error()
+		sandbox.UpdatedAt = time.Now().UTC()
+		_ = s.store.UpdateSandboxState(ctx, sandbox)
+		s.recordAudit(ctx, tenantID, sandbox.ID, auditAction, sandbox.ID, "error", auditDetail(
+			auditKV("transitional_status", transitional),
+			auditKV("requested_status", finalStatus),
+		), "error", err)
+		return model.Sandbox{}, err
+	}
+	sandbox.Status = finalStatus
+	sandbox.RuntimeStatus = string(state.Status)
+	sandbox.UpdatedAt = time.Now().UTC()
+	sandbox.LastActiveAt = sandbox.UpdatedAt
+	if err := s.store.UpdateSandboxState(ctx, sandbox); err != nil {
+		return model.Sandbox{}, err
+	}
+	if err := s.store.UpdateRuntimeState(ctx, sandbox.ID, state); err != nil {
+		return model.Sandbox{}, err
+	}
+	if err := s.refreshStorage(ctx, sandbox); err != nil {
+		return model.Sandbox{}, err
+	}
+	s.recordAudit(ctx, tenantID, sandbox.ID, auditAction, sandbox.ID, "ok", auditDetail(
+		auditKV("transitional_status", transitional),
+		auditKV("result_status", finalStatus),
+	))
+	return s.store.GetSandbox(ctx, tenantID, sandbox.ID)
+}
+
 func dirSize(root string) (int64, error) {
 	var total int64
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -1387,6 +1559,45 @@ func dirSize(root string) (int64, error) {
 	return total, err
 }
 
+func (s *Service) snapshotExtractLimits() archiveutil.Limits {
+	return archiveutil.Limits{
+		MaxBytes:          s.cfg.SnapshotMaxBytes,
+		MaxFiles:          s.cfg.SnapshotMaxFiles,
+		MaxExpansionRatio: s.cfg.SnapshotMaxExpansionRatio,
+	}
+}
+
+func (s *Service) validateSnapshotCompatibility(snapshot model.Snapshot, sandbox model.Sandbox) error {
+	if snapshot.RuntimeBackend != "" && snapshot.RuntimeBackend != sandbox.RuntimeBackend {
+		return fmt.Errorf("snapshot runtime %q does not match target sandbox runtime %q", snapshot.RuntimeBackend, sandbox.RuntimeBackend)
+	}
+	if snapshot.Profile != "" && sandbox.Profile != "" && snapshot.Profile != sandbox.Profile {
+		return fmt.Errorf("snapshot profile %q does not match target sandbox profile %q", snapshot.Profile, sandbox.Profile)
+	}
+	if snapshot.WorkspaceContractVersion != "" && sandbox.WorkspaceContractVersion != "" && snapshot.WorkspaceContractVersion != sandbox.WorkspaceContractVersion {
+		return fmt.Errorf("snapshot workspace contract version %q does not match target sandbox workspace contract version %q", snapshot.WorkspaceContractVersion, sandbox.WorkspaceContractVersion)
+	}
+	return nil
+}
+
+func (s *Service) auditStoragePressure(ctx context.Context, sandbox model.Sandbox, usage model.StorageUsage) error {
+	if s.cfg.StorageWarningFileCount <= 0 {
+		return nil
+	}
+	entries := usage.RootfsEntries + usage.WorkspaceEntries + usage.CacheEntries + usage.SnapshotEntries
+	if entries <= int64(s.cfg.StorageWarningFileCount) {
+		return nil
+	}
+	s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "sandbox.storage_pressure", sandbox.ID, "ok", auditDetail(
+		auditKV("entries", entries),
+		auditKV("warning_threshold", s.cfg.StorageWarningFileCount),
+		auditKV("workspace_entries", usage.WorkspaceEntries),
+		auditKV("cache_entries", usage.CacheEntries),
+		auditKV("snapshot_entries", usage.SnapshotEntries),
+	))
+	return nil
+}
+
 func (s *Service) exportSnapshotBundle(ctx context.Context, sandbox model.Sandbox, snapshot model.Snapshot) (string, error) {
 	snapshotDir := filepath.Join(s.cfg.SnapshotRoot, sandbox.ID, snapshot.ID)
 	bundle, err := os.CreateTemp(filepath.Dir(snapshotDir), snapshot.ID+"-*.tar.gz")
@@ -1402,7 +1613,7 @@ func (s *Service) exportSnapshotBundle(ctx context.Context, sandbox model.Sandbo
 	return putSnapshotBundle(ctx, s.cfg.OptionalSnapshotExport, sandbox.ID, snapshot.ID, bundlePath)
 }
 
-func (s *Service) ensureSnapshotArtifacts(ctx context.Context, sandbox model.Sandbox, snapshot model.Snapshot) error {
+func (s *Service) ensureSnapshotArtifacts(ctx context.Context, sandbox model.Sandbox, snapshot model.Snapshot) (model.Snapshot, error) {
 	haveLocal := true
 	for _, path := range []string{snapshot.ImageRef, snapshot.WorkspaceTar} {
 		if path == "" {
@@ -1417,21 +1628,33 @@ func (s *Service) ensureSnapshotArtifacts(ctx context.Context, sandbox model.San
 		}
 	}
 	if haveLocal {
-		return nil
+		return snapshot, nil
 	}
 	if snapshot.ExportLocation == "" {
-		return nil
+		return snapshot, nil
 	}
 	targetDir := filepath.Join(s.cfg.SnapshotRoot, sandbox.ID, snapshot.ID)
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
-		return err
+		return model.Snapshot{}, err
 	}
 	tempBundle := filepath.Join(targetDir, "snapshot.restore.tar.gz")
 	if err := fetchSnapshotBundle(ctx, snapshot.ExportLocation, tempBundle); err != nil {
-		return err
+		return model.Snapshot{}, err
 	}
 	defer os.Remove(tempBundle)
-	return extractTarGz(tempBundle, targetDir)
+	if _, err := archiveutil.ExtractTarGz(tempBundle, targetDir, s.snapshotExtractLimits()); err != nil {
+		return model.Snapshot{}, err
+	}
+	snapshot.ImageRef = rebindSnapshotArtifactPath(targetDir, snapshot.ImageRef)
+	snapshot.WorkspaceTar = rebindSnapshotArtifactPath(targetDir, snapshot.WorkspaceTar)
+	return snapshot, nil
+}
+
+func rebindSnapshotArtifactPath(targetDir, original string) string {
+	if !looksLikeFilesystemPath(original) {
+		return original
+	}
+	return filepath.Join(targetDir, filepath.Base(original))
 }
 
 func putSnapshotBundle(ctx context.Context, exportRoot, sandboxID, snapshotID, localBundle string) (string, error) {
@@ -1517,53 +1740,10 @@ func writeTarGz(destination, root string) error {
 }
 
 func extractTarGz(source, destination string) error {
-	file, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	gr, err := gzip.NewReader(file)
-	if err != nil {
-		return err
-	}
-	defer gr.Close()
-	tr := tar.NewReader(gr)
-	cleanDestination := filepath.Clean(destination)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(cleanDestination, filepath.Clean(header.Name))
-		if target != cleanDestination && !strings.HasPrefix(target, cleanDestination+string(os.PathSeparator)) {
-			return fmt.Errorf("tar entry escapes destination: %s", header.Name)
-		}
-		switch header.Typeflag {
-		case tar.TypeSymlink, tar.TypeLink:
-			return fmt.Errorf("unsupported tar entry type for %s", header.Name)
-		}
-		if header.FileInfo().IsDir() {
-			if err := os.MkdirAll(target, header.FileInfo().Mode()); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, header.FileInfo().Mode())
-		if err != nil {
-			return err
-		}
-		if _, err := io.Copy(out, tr); err != nil {
-			out.Close()
-			return err
-		}
-		if err := out.Close(); err != nil {
-			return err
-		}
-	}
+	_, err := archiveutil.ExtractTarGz(source, destination, archiveutil.Limits{
+		MaxBytes:          256 * 1024 * 1024,
+		MaxFiles:          4096,
+		MaxExpansionRatio: 32,
+	})
+	return err
 }

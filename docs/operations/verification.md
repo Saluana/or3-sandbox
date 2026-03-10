@@ -97,9 +97,10 @@ The repository now also includes host-gated operator drill scripts:
 	- exercises core-profile exec, file transfer, suspend/resume, snapshot create/restore, and optional daemon restart reconciliation
 - `./scripts/qemu-recovery-drill.sh`
 	- disruptive drill guarded by `OR3_ALLOW_DISRUPTIVE=1`
-	- verifies restart durability when `SANDBOXD_RESTART_COMMAND` is supplied and checks conservative stopped-state restore behavior
+	- verifies restart durability when `SANDBOXD_RESTART_COMMAND` is supplied and checks conservative stopped-state restore behavior, partial restore failure handling, and owned-root cleanup
 - `./scripts/qemu-resource-abuse.sh`
 	- bounded memory/disk/file-count/PID/stdout abuse scenarios against a core-profile sandbox
+	- includes startup-spam and fairness probes; set `EXPECT_ADMISSION_LIMITS=1` when the host is expected to deny bursty starts
 
 These scripts are intentionally host-gated and may skip or refuse destructive steps until the required environment variables are provided.
 
@@ -113,3 +114,5 @@ Before using “production-ready” language for a deployment, run at least:
 4. one daemon restart and reconcile drill via `./scripts/qemu-recovery-drill.sh`
 5. one bounded abuse drill via `./scripts/qemu-resource-abuse.sh`
 6. one QEMU host integration drill in a prepared environment
+
+For runtime-affecting changes, treat the smoke, recovery, and abuse scripts as a release gate rather than optional extra coverage.

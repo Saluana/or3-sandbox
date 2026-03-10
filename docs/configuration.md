@@ -30,6 +30,10 @@ There are four big groups:
 | `SANDBOX_STORAGE_ROOT` | `./data/storage` | sandbox runtime files |
 | `SANDBOX_SNAPSHOT_ROOT` | `./data/snapshots` | snapshot files |
 | `SANDBOX_OPERATOR_HOST` | `http://127.0.0.1:8080` | public host used in generated endpoints |
+| `SANDBOX_STORAGE_WARNING_FILE_COUNT` | `10000` | warning threshold for total stored files across workspace, cache, scratch, and snapshots |
+| `SANDBOX_SNAPSHOT_MAX_MB` | `1024` | max extracted snapshot bundle size |
+| `SANDBOX_SNAPSHOT_MAX_FILES` | `8192` | max files allowed while restoring a snapshot bundle |
+| `SANDBOX_SNAPSHOT_MAX_EXPANSION_RATIO` | `32` | max extracted-to-compressed expansion ratio for snapshot restore |
 
 ## Deployment mode
 
@@ -59,13 +63,18 @@ Important truth:
 - This is on purpose, so the operator must clearly opt in to Docker's shared-kernel model
 - In production mode, startup also fails unless `SANDBOX_RUNTIME=qemu`
 
+Platform note:
+
+- on Linux, trusted Docker sandboxes also request `--storage-opt size=...` as a best-effort writable-layer quota hint
+- on macOS and other non-Linux developer hosts, Docker storage limits remain best-effort because the local VM-backed Docker engine may not honor the same kernel quota features
+
 ## Sandbox defaults
 
 These values are used when a request does not provide its own values.
 
 | Setting | Default |
 | --- | --- |
-| `SANDBOX_BASE_IMAGE` | `mcr.microsoft.com/playwright:v1.51.1-noble` |
+| `SANDBOX_BASE_IMAGE` | `alpine:3.20` |
 | `SANDBOX_DEFAULT_CPU` | `2` |
 | `SANDBOX_DEFAULT_MEMORY_MB` | `2048` |
 | `SANDBOX_DEFAULT_PIDS` | `512` |
@@ -141,6 +150,8 @@ Important truth:
 Tunnel signing note:
 
 - signed browser tunnel URLs and the bootstrap cookie are HMAC-protected
+- the signed URL plus bootstrap cookie is a tunnel-scoped capability, not a general browser session
+- the current model is intentionally narrow and does not claim device binding, cross-site protection for unrelated endpoints, or global revocation beyond tunnel revoke/expiry
 - if you do not set an explicit tunnel signing secret, the daemon derives a stable fallback from the current auth configuration
 - an explicit shared secret is still the recommended operator choice for multi-replica deployments because it makes signing independent from auth-secret rotation
 
@@ -178,6 +189,14 @@ Important truth:
 - policy answers "what is the operator willing to allow at all?"
 - policy denials happen before risky actions continue, and the API returns a clear error message instead of silently changing the request
 
+Curated image/profile guidance:
+
+- the default Docker path now uses a lightweight `core` image posture instead of a browser-heavy image
+- `images/base/Dockerfile` documents a larger curated `runtime` image you can build locally with `docker build -t or3-sandbox/base:runtime images/base`
+- browser tooling should stay on explicit `browser` images such as the Playwright example
+- production operators should prefer digest-pinned curated refs in `SANDBOX_POLICY_ALLOWED_IMAGES`, for example `or3-sandbox/base@sha256:...` or `mcr.microsoft.com/playwright@sha256:...`
+- dangerous profiles such as `container` and `debug` stay blocked unless `SANDBOX_ALLOW_DANGEROUS_PROFILES=true`
+
 ## Timing settings
 
 | Setting | Default | Meaning |
@@ -187,6 +206,14 @@ Important truth:
 | `SANDBOX_CLEANUP_INTERVAL` | `5m` | cleanup loop timing |
 
 The reconcile loop also helps clean up orphaned exec records and incomplete snapshots after a daemon restart.
+
+## Snapshot and storage safety limits
+
+These settings help fail closed when a restore bundle or a tenant workload creates too much pressure:
+
+- `SANDBOX_STORAGE_WARNING_FILE_COUNT` raises audit and metrics pressure signals when file counts grow too large
+- `SANDBOX_SNAPSHOT_MAX_MB`, `SANDBOX_SNAPSHOT_MAX_FILES`, and `SANDBOX_SNAPSHOT_MAX_EXPANSION_RATIO` bound snapshot restore extraction
+- restore validation rejects unsupported special files and normalizes restored file permissions
 
 ## QEMU-specific settings
 

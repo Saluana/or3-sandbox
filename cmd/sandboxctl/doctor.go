@@ -86,6 +86,12 @@ func runProductionQEMUDoctor() doctorSummary {
 	} else {
 		add("pass", "runtime", "runtime backend is qemu")
 	}
+	runtimeClass := model.BackendToRuntimeClass(cfg.RuntimeBackend)
+	if !runtimeClass.IsVMBacked() {
+		add("fail", "runtime-class", fmt.Sprintf("runtime backend %q resolves to class %q which is not VM-backed; production requires a VM-backed class", cfg.RuntimeBackend, runtimeClass))
+	} else {
+		add("pass", "runtime-class", fmt.Sprintf("runtime backend %q resolves to VM-backed class %q", cfg.RuntimeBackend, runtimeClass))
+	}
 	if cfg.AuthMode != "jwt-hs256" {
 		add("fail", "auth", "production qemu requires SANDBOX_AUTH_MODE=jwt-hs256")
 	} else {

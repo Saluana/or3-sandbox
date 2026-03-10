@@ -64,7 +64,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
-		log.Info("daemon listening", "event", "daemon.listen", "addr", cfg.ListenAddress, "runtime", cfg.RuntimeBackend, "mode", cfg.DeploymentMode, "auth_mode", cfg.AuthMode, "tls_enabled", cfg.TLSCertPath != "", "trusted_proxy", cfg.TrustedProxyHeaders)
+		log.Info("daemon listening", "event", "daemon.listen", "addr", cfg.ListenAddress, "runtime", cfg.RuntimeBackend, "runtime_class", string(cfg.RuntimeClass()), "mode", cfg.DeploymentMode, "auth_mode", cfg.AuthMode, "tls_enabled", cfg.TLSCertPath != "", "trusted_proxy", cfg.TrustedProxyHeaders)
 		var err error
 		if cfg.TLSCertPath != "" {
 			err = server.ListenAndServeTLS(cfg.TLSCertPath, cfg.TLSKeyPath)
@@ -88,7 +88,17 @@ func main() {
 func buildRuntime(cfg config.Config) (model.RuntimeManager, error) {
 	switch cfg.RuntimeBackend {
 	case "docker":
-		return runtimedocker.New(), nil
+		return runtimedocker.New(runtimedocker.Options{
+			User:                      cfg.DockerUser,
+			TmpfsSizeMB:               cfg.DockerTmpfsSizeMB,
+			SeccompProfile:            cfg.DockerSeccompProfile,
+			AppArmorProfile:           cfg.DockerAppArmorProfile,
+			SELinuxLabel:              cfg.DockerSELinuxLabel,
+			AllowDangerousOverrides:   cfg.DockerAllowDangerousOverrides,
+			SnapshotMaxBytes:          cfg.SnapshotMaxBytes,
+			SnapshotMaxFiles:          cfg.SnapshotMaxFiles,
+			SnapshotMaxExpansionRatio: cfg.SnapshotMaxExpansionRatio,
+		}), nil
 	case "qemu":
 		return runtimeqemu.New(runtimeqemu.Options{
 			Binary:         cfg.QEMUBinary,

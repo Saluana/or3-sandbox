@@ -5,14 +5,28 @@ This guide describes the supported single-node production deployment shape for `
 ## Supported production boundary
 
 - use `SANDBOX_MODE=production`
-- use `SANDBOX_RUNTIME=qemu`
+- use `SANDBOX_RUNTIME=qemu` (the only backend whose runtime class is VM-backed)
 - use the agent-based `core` guest profile unless there is an explicitly approved reason to use a heavier profile
 - use JWT auth, not static bearer tokens
 - terminate TLS either inside `sandboxd` or at a trusted reverse proxy
 
 `docker` is not the hostile multi-tenant production boundary in this repo.
 
+The production gate is enforced through **runtime classes**, not through ad-hoc backend name checks. `SANDBOX_MODE=production` rejects any backend that does not resolve to the `vm` runtime class. `docker` resolves to `trusted-docker` and is therefore always rejected in production mode.
+
+| Backend | Runtime class | Production eligible |
+| --- | --- | --- |
+| `docker` | `trusted-docker` | No |
+| `qemu` | `vm` | Yes |
+
 The supported hostile-production target is Linux with KVM-backed QEMU. macOS remains useful for development and local validation, but it is not the production reference posture.
+
+For production planning, separate sandbox isolation from tenant isolation:
+
+- one sandbox maps to one VM-backed workload boundary
+- one tenant may own many sandbox records, but fairness and isolation between those records are enforced by quotas, admission control, audit events, and recovery policy in the control plane
+
+Do not treat many tenant sandboxes sharing one guest VM as the normal production shape for this repo.
 
 ## Host prerequisites
 
@@ -26,6 +40,16 @@ The production host needs:
 - enough RAM for the daemon plus the guest memory assigned to each concurrent QEMU sandbox
 
 The daemon already validates the critical QEMU settings at startup and fails fast if the binary, guest image, sidecar contract, profile policy, or accelerator support is missing.
+
+If you enable Phase 4 admission gates, review these settings as part of deployment capacity planning:
+
+- `SANDBOX_ADMISSION_MAX_NODE_SANDBOXES`
+- `SANDBOX_ADMISSION_MAX_NODE_RUNNING`
+- `SANDBOX_ADMISSION_MAX_NODE_CPU`
+- `SANDBOX_ADMISSION_MAX_NODE_MEMORY_MB`
+- `SANDBOX_ADMISSION_MIN_NODE_FREE_STORAGE_MB`
+- `SANDBOX_ADMISSION_MAX_TENANT_STARTS`
+- `SANDBOX_ADMISSION_MAX_TENANT_HEAVY_OPS`
 
 SSH material is only required for explicit `ssh-compat` / `debug` guest images.
 
@@ -149,8 +173,17 @@ Check these first:
 - `/healthz` for basic daemon reachability
 - `/v1/runtime/health` for runtime backend and per-sandbox state
 - `/v1/runtime/capacity` for quota pressure, snapshot counts, degraded sandboxes, and guest profile/capability mix
-- `/metrics` for scrape-friendly counters and ratios, including guest profile mix and declared capability counts
+- `/metrics` for scrape-friendly counters and ratios, including guest profile mix, declared capability counts, audit-event counters, admission denials, lifecycle failures, snapshot activity, exec/TTY activity, and tunnel changes
 - the JSON logs from `sandboxd` for `component=daemon`, `component=auth`, `component=api`, and `component=service`
+
+## Curated image approval and rebuild cadence
+
+For production-approved images and guest artifacts:
+
+- prefer digest-pinned curated image refs whenever a mutable tag would otherwise be used in a trusted Docker workflow
+- keep guest image paths and sidecar contracts under explicit change control
+- record rebuild cadence and approval in the release checklist
+- require explicit operator approval before enabling dangerous profiles or compatibility-only images
 
 ## Startup failures
 
@@ -158,7 +191,7 @@ Common production startup failures are:
 
 - missing or unreadable JWT secret files
 - missing TLS key or certificate when using in-process TLS
-- unsupported runtime choice in production mode
+- unsupported runtime class in production mode (e.g. `docker` resolves to `trusted-docker`, which is not VM-backed)
 - missing QEMU binary, guest image, sidecar contract, or KVM support
 - use of `ssh-compat` or `debug` images without the explicit allow flags
 - unreadable storage or snapshot roots

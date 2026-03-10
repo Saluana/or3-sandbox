@@ -797,6 +797,18 @@ func TestMeasureStorageAggregatesSandboxArtifacts(t *testing.T) {
 	if usage.SnapshotBytes < int64(len("snapshot-bytes")) {
 		t.Fatalf("unexpected snapshot bytes: %d", usage.SnapshotBytes)
 	}
+	if usage.RootfsEntries != 1 {
+		t.Fatalf("unexpected rootfs entries: %d", usage.RootfsEntries)
+	}
+	if usage.WorkspaceEntries != 1 {
+		t.Fatalf("unexpected workspace entries: %d", usage.WorkspaceEntries)
+	}
+	if usage.CacheEntries != 1 {
+		t.Fatalf("unexpected cache entries: %d", usage.CacheEntries)
+	}
+	if usage.SnapshotEntries != 1 {
+		t.Fatalf("unexpected snapshot entries: %d", usage.SnapshotEntries)
+	}
 }
 
 func TestRemoteExecScriptsIncludeWorkingDirEnvAndPidTracking(t *testing.T) {

@@ -26,6 +26,9 @@ type SandboxSpec struct {
 	StorageRoot              string
 	WorkspaceRoot            string
 	CacheRoot                string
+	ScratchRoot              string
+	SecretsRoot              string
+	NetworkPolicy            NetworkPolicy
 }
 
 type RuntimeState struct {
@@ -80,10 +83,38 @@ type SnapshotInfo struct {
 }
 
 type StorageUsage struct {
-	RootfsBytes    int64
-	WorkspaceBytes int64
-	CacheBytes     int64
-	SnapshotBytes  int64
+	RootfsBytes      int64
+	WorkspaceBytes   int64
+	CacheBytes       int64
+	SnapshotBytes    int64
+	RootfsEntries    int64
+	WorkspaceEntries int64
+	CacheEntries     int64
+	SnapshotEntries  int64
+}
+
+type StorageClass string
+
+const (
+	StorageClassWorkspace StorageClass = "workspace"
+	StorageClassCache     StorageClass = "cache"
+	StorageClassScratch   StorageClass = "scratch"
+	StorageClassSecrets   StorageClass = "secrets"
+	StorageClassSnapshot  StorageClass = "snapshot"
+)
+
+type NetworkPolicy struct {
+	Internet     bool
+	LoopbackOnly bool
+	AllowTunnels bool
+}
+
+func ResolveNetworkPolicy(mode NetworkMode, allowTunnels bool) NetworkPolicy {
+	policy := NetworkPolicy{LoopbackOnly: true, AllowTunnels: allowTunnels}
+	if mode == NetworkModeInternetEnabled {
+		policy.Internet = true
+	}
+	return policy
 }
 
 type RuntimeManager interface {

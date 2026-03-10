@@ -18,8 +18,32 @@ func TestValidateRuntimeConfigDockerRequiresTrustedFlag(t *testing.T) {
 	}
 
 	cfg.TrustedDockerRuntime = true
+	cfg.DockerUser = "10001:10001"
+	cfg.DockerTmpfsSizeMB = 64
 	if err := validateRuntimeConfig(cfg, runtimeValidationProbe{}); err != nil {
 		t.Fatalf("expected docker config to validate, got %v", err)
+	}
+}
+
+func TestValidateRuntimeConfigDockerSecurityProfile(t *testing.T) {
+	profile := filepath.Join(t.TempDir(), "seccomp.json")
+	if err := os.WriteFile(profile, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		RuntimeBackend:       "docker",
+		TrustedDockerRuntime: true,
+		DockerUser:           "10001:10001",
+		DockerTmpfsSizeMB:    64,
+		DockerSeccompProfile: profile,
+	}
+	if err := validateRuntimeConfig(cfg, runtimeValidationProbe{fileReadable: requireReadableFile}); err != nil {
+		t.Fatalf("expected docker seccomp config to validate, got %v", err)
+	}
+	cfg.DockerTmpfsSizeMB = -1
+	err := validateRuntimeConfig(cfg, runtimeValidationProbe{fileReadable: requireReadableFile})
+	if err == nil || !strings.Contains(err.Error(), "SANDBOX_DOCKER_TMPFS_MB") {
+		t.Fatalf("expected tmpfs validation error, got %v", err)
 	}
 }
 
@@ -150,7 +174,7 @@ func TestValidateProductionModeRejectsUnsafeSettings(t *testing.T) {
 		Tenants:            []TenantConfig{{ID: "tenant-a", Name: "Tenant A", Token: "token-a"}},
 	}
 	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "SANDBOX_RUNTIME=qemu") || !strings.Contains(err.Error(), "SANDBOX_AUTH_MODE=jwt-hs256") || !strings.Contains(err.Error(), "SANDBOX_TRUST_PROXY_HEADERS=true") {
+	if err == nil || !strings.Contains(err.Error(), "VM-backed runtime class") || !strings.Contains(err.Error(), "SANDBOX_AUTH_MODE=jwt-hs256") || !strings.Contains(err.Error(), "SANDBOX_TRUST_PROXY_HEADERS=true") {
 		t.Fatalf("expected production mode validation errors, got %v", err)
 	}
 }
@@ -203,6 +227,151 @@ func TestLoadParsesFractionalCPUDefaultsAndQuota(t *testing.T) {
 	}
 	if cfg.PolicyMaxIdleTimeout != 90*time.Minute {
 		t.Fatalf("unexpected idle timeout policy %v", cfg.PolicyMaxIdleTimeout)
+	}
+	if cfg.BaseImageRef != "alpine:3.20" {
+		t.Fatalf("expected lightweight default base image, got %q", cfg.BaseImageRef)
+	}
+}
+
+func TestLoadParsesAdmissionControls(t *testing.T) {
+	t.Setenv("SANDBOX_RUNTIME", "docker")
+	t.Setenv("SANDBOX_TRUSTED_DOCKER_RUNTIME", "true")
+	t.Setenv("SANDBOX_TOKENS", "token-a=tenant-a")
+	t.Setenv("SANDBOX_ADMISSION_MAX_NODE_SANDBOXES", "12")
+	t.Setenv("SANDBOX_ADMISSION_MAX_NODE_RUNNING", "6")
+	t.Setenv("SANDBOX_ADMISSION_MAX_NODE_CPU", "3500m")
+	t.Setenv("SANDBOX_ADMISSION_MAX_NODE_MEMORY_MB", "8192")
+	t.Setenv("SANDBOX_ADMISSION_MIN_NODE_FREE_STORAGE_MB", "2048")
+	t.Setenv("SANDBOX_ADMISSION_MAX_TENANT_STARTS", "2")
+	t.Setenv("SANDBOX_ADMISSION_MAX_TENANT_HEAVY_OPS", "3")
+
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.AdmissionMaxNodeSandboxes != 12 || cfg.AdmissionMaxNodeRunning != 6 {
+		t.Fatalf("unexpected node sandbox admission controls: %+v", cfg)
+	}
+	if cfg.AdmissionMaxNodeCPU != model.MustParseCPUQuantity("3500m") {
+		t.Fatalf("unexpected admission node cpu %v", cfg.AdmissionMaxNodeCPU)
+	}
+	if cfg.AdmissionMaxNodeMemoryMB != 8192 || cfg.AdmissionMinNodeFreeStorageMB != 2048 {
+		t.Fatalf("unexpected memory/storage admission controls: %+v", cfg)
+	}
+	if cfg.AdmissionMaxTenantStarts != 2 || cfg.AdmissionMaxTenantHeavyOps != 3 {
+		t.Fatalf("unexpected tenant admission controls: %+v", cfg)
+	}
+}
+
+func TestValidateRejectsNegativeAdmissionControls(t *testing.T) {
+	cfg := Config{
+		ListenAddress:        ":8080",
+		DatabasePath:         "/tmp/test.db",
+		StorageRoot:          t.TempDir(),
+		SnapshotRoot:         t.TempDir(),
+		BaseImageRef:         "alpine:3.20",
+		RuntimeBackend:       "docker",
+		TrustedDockerRuntime: true,
+		AuthMode:             "static",
+		DefaultCPULimit:      model.CPUCores(1),
+		DefaultQuota: model.TenantQuota{
+			MaxCPUCores: model.CPUCores(4),
+		},
+		DefaultNetworkMode:            model.NetworkModeInternetEnabled,
+		OperatorHost:                  "http://sandbox.invalid",
+		Tenants:                       []TenantConfig{{ID: "tenant-a", Name: "Tenant A", Token: "token-a"}},
+		AdmissionMaxNodeSandboxes:     -1,
+		AdmissionMaxNodeRunning:       -1,
+		AdmissionMaxNodeCPU:           -1,
+		AdmissionMaxNodeMemoryMB:      -1,
+		AdmissionMinNodeFreeStorageMB: -1,
+		AdmissionMaxTenantStarts:      -1,
+		AdmissionMaxTenantHeavyOps:    -1,
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "admission max node sandboxes") || !strings.Contains(err.Error(), "admission max tenant heavy ops") {
+		t.Fatalf("expected admission validation errors, got %v", err)
+	}
+}
+
+func TestValidateRuntimeConfigUsesGenericGuestProfileDefaults(t *testing.T) {
+	cfg := Config{
+		RuntimeBackend:        "qemu",
+		QEMUBinary:            "qemu-system-x86_64",
+		QEMUAccel:             "kvm",
+		QEMUBaseImagePath:     "/images/base.qcow2",
+		QEMUControlMode:       model.GuestControlModeAgent,
+		AllowedGuestProfiles:  []model.GuestProfile{model.GuestProfileCore, model.GuestProfileDebug},
+		QEMUBootTimeout:       time.Minute,
+		QEMUSSHUser:           "sandbox",
+		QEMUSSHPrivateKeyPath: "/keys/id_ed25519",
+		QEMUSSHHostKeyPath:    "/keys/guest_host_ed25519.pub",
+	}
+	probe := runtimeValidationProbe{
+		goos:          "linux",
+		commandExists: func(string) error { return nil },
+		fileReadable:  func(string) error { return nil },
+		kvmAvailable:  func() error { return nil },
+		hvfAvailable:  func() error { return nil },
+	}
+	if err := validateRuntimeConfig(cfg, probe); err != nil {
+		t.Fatalf("expected qemu config to accept generic guest profiles, got %v", err)
+	}
+	if !cfg.IsAllowedGuestProfile("qemu", model.GuestProfileDebug) {
+		t.Fatal("expected debug profile to be allowed via generic guest profile list")
+	}
+}
+
+func TestLoadKeepsQEMUProfileFlagsScopedToQEMU(t *testing.T) {
+	t.Setenv("SANDBOX_RUNTIME", "docker")
+	t.Setenv("SANDBOX_TRUSTED_DOCKER_RUNTIME", "true")
+	t.Setenv("SANDBOX_TOKENS", "token-a=tenant-a")
+
+	cfg, err := Load([]string{
+		"--qemu-allowed-profiles=core",
+		"--qemu-dangerous-profiles=debug",
+		"--qemu-allow-dangerous-profiles=true",
+	})
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.IsAllowedGuestProfile("qemu", model.GuestProfileCore) || cfg.IsAllowedGuestProfile("qemu", model.GuestProfileBrowser) {
+		t.Fatalf("expected qemu flag policy to allow only core, got %#v", cfg.QEMUAllowedProfiles)
+	}
+	if !cfg.IsAllowedGuestProfile("docker", model.GuestProfileBrowser) {
+		t.Fatal("expected docker policy to keep default profile allowances")
+	}
+	if cfg.IsDangerousGuestProfile("qemu", model.GuestProfileContainer) || !cfg.IsDangerousGuestProfile("qemu", model.GuestProfileDebug) {
+		t.Fatalf("expected qemu dangerous-profile flag to apply, got %#v", cfg.QEMUDangerousProfiles)
+	}
+	if cfg.AllowsDangerousGuestProfiles("docker") || !cfg.AllowsDangerousGuestProfiles("qemu") {
+		t.Fatal("expected dangerous-profile allow flag to stay scoped to qemu")
+	}
+}
+
+func TestLoadKeepsLegacyQEMUProfileEnvOutOfDockerPolicy(t *testing.T) {
+	t.Setenv("SANDBOX_RUNTIME", "docker")
+	t.Setenv("SANDBOX_TRUSTED_DOCKER_RUNTIME", "true")
+	t.Setenv("SANDBOX_TOKENS", "token-a=tenant-a")
+	t.Setenv("SANDBOX_QEMU_ALLOWED_PROFILES", "core")
+	t.Setenv("SANDBOX_QEMU_DANGEROUS_PROFILES", "debug")
+	t.Setenv("SANDBOX_QEMU_ALLOW_DANGEROUS_PROFILES", "true")
+
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.IsAllowedGuestProfile("qemu", model.GuestProfileBrowser) {
+		t.Fatal("expected legacy qemu env to keep browser blocked for qemu")
+	}
+	if !cfg.IsAllowedGuestProfile("docker", model.GuestProfileBrowser) {
+		t.Fatal("expected legacy qemu env to leave docker profile policy unchanged")
+	}
+	if cfg.AllowsDangerousGuestProfiles("docker") {
+		t.Fatal("expected qemu dangerous-profile env to stay out of docker policy")
+	}
+	if !cfg.AllowsDangerousGuestProfiles("qemu") {
+		t.Fatal("expected qemu dangerous-profile env to apply to qemu")
 	}
 }
 
@@ -304,6 +473,53 @@ func TestEffectiveQEMUAllowedBaseImagePathsIncludesDefaultAndDeduplicates(t *tes
 	got := cfg.EffectiveQEMUAllowedBaseImagePaths()
 	if len(got) != 2 || got[0] != "/images/extra.qcow2" || got[1] != "/images/base.qcow2" {
 		t.Fatalf("unexpected allowed qemu images %#v", got)
+	}
+}
+
+func TestProductionModeRejectsNonVMClass(t *testing.T) {
+	base := Config{
+		ListenAddress:        ":8080",
+		DatabasePath:         "/tmp/test.db",
+		StorageRoot:          t.TempDir(),
+		SnapshotRoot:         t.TempDir(),
+		BaseImageRef:         "alpine:3.20",
+		TrustedDockerRuntime: true,
+		DeploymentMode:       "production",
+		AuthMode:             "jwt-hs256",
+		AuthJWTIssuer:        "issuer.example",
+		AuthJWTAudience:      "sandbox-api",
+		TrustedProxyHeaders:  true,
+		OperatorHost:         "https://sandbox.example",
+		DefaultCPULimit:      model.CPUCores(1),
+		DefaultQuota:         model.TenantQuota{MaxCPUCores: model.CPUCores(4)},
+		DefaultNetworkMode:   model.NetworkModeInternetEnabled,
+		Tenants:              []TenantConfig{{ID: "tenant-a", Name: "Tenant A", Token: "token-a"}},
+	}
+
+	// docker backend (trusted-docker class) must fail in production mode
+	dockerCfg := base
+	dockerCfg.RuntimeBackend = "docker"
+	err := dockerCfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "VM-backed runtime class") {
+		t.Fatalf("expected production to reject docker (non-VM class), got %v", err)
+	}
+}
+
+func TestRuntimeClassMethodDerivesFromBackend(t *testing.T) {
+	tests := []struct {
+		backend string
+		want    string
+	}{
+		{"docker", "trusted-docker"},
+		{"qemu", "vm"},
+		{"unknown", ""},
+	}
+	for _, tt := range tests {
+		cfg := Config{RuntimeBackend: tt.backend}
+		got := string(cfg.RuntimeClass())
+		if got != tt.want {
+			t.Errorf("backend %q: RuntimeClass() = %q, want %q", tt.backend, got, tt.want)
+		}
 	}
 }
 

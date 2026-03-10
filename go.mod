@@ -6,9 +6,9 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/golang-jwt/jwt/v5 v5.2.2
 	github.com/gorilla/websocket v1.5.3
-	gopkg.in/yaml.v3 v3.0.1
 	golang.org/x/term v0.40.0
 	golang.org/x/time v0.11.0
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.38.2
 )
 

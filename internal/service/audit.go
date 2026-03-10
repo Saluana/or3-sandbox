@@ -134,6 +134,23 @@ func snapshotAuditDetail(snapshot model.Snapshot) string {
 	return auditDetail(
 		auditKV("name", snapshot.Name),
 		auditKV("status", snapshot.Status),
+		auditKV("runtime", snapshot.RuntimeBackend),
+		auditKV("profile", snapshot.Profile),
 		auditKV("exported", snapshot.ExportLocation != ""),
+	)
+}
+
+func networkPolicyAuditDetail(policy model.NetworkPolicy) string {
+	return auditDetail(
+		auditKV("internet", policy.Internet),
+		auditKV("loopback_only", policy.LoopbackOnly),
+		auditKV("allow_tunnels", policy.AllowTunnels),
+	)
+}
+
+func dockerOverrideAuditDetail(features, capabilities []string) string {
+	return auditDetail(
+		auditKV("docker_features", strings.Join(features, ",")),
+		auditKV("docker_capabilities", strings.Join(capabilities, ",")),
 	)
 }

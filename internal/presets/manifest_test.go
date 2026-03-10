@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"or3-sandbox/internal/model"
 )
 
 func TestLoadManifestNormalizesDefaults(t *testing.T) {
@@ -130,5 +132,29 @@ sandbox:
 	_, err := LoadManifest(manifestPath)
 	if err == nil || !strings.Contains(err.Error(), "runtime.profile") {
 		t.Fatalf("expected invalid runtime profile error, got %v", err)
+	}
+}
+
+func TestShippedDockerExamplesUseExplicitProfiles(t *testing.T) {
+	examplesDir := filepath.Clean(filepath.Join("..", "..", "examples"))
+	for _, testCase := range []struct {
+		name    string
+		profile model.GuestProfile
+		image   string
+	}{
+		{name: "claude-code", profile: model.GuestProfileRuntime, image: "node:22-bookworm"},
+		{name: "openclaw", profile: model.GuestProfileRuntime, image: "ghcr.io/openclaw/openclaw:latest"},
+		{name: "playwright", profile: model.GuestProfileBrowser, image: "mcr.microsoft.com/playwright:v1.51.1-noble"},
+	} {
+		manifest, err := LoadManifest(filepath.Join(examplesDir, testCase.name, ManifestFileName))
+		if err != nil {
+			t.Fatalf("load %s manifest: %v", testCase.name, err)
+		}
+		if model.GuestProfile(manifest.Runtime.Profile) != testCase.profile {
+			t.Fatalf("expected %s profile %q, got %q", testCase.name, testCase.profile, manifest.Runtime.Profile)
+		}
+		if manifest.Sandbox.Image != testCase.image {
+			t.Fatalf("expected %s image %q, got %q", testCase.name, testCase.image, manifest.Sandbox.Image)
+		}
 	}
 }
