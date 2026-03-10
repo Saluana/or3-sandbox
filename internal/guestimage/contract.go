@@ -21,6 +21,14 @@ type ControlContract struct {
 	SupportedTransports []string               `json:"supported_transports,omitempty"`
 }
 
+type ProvenanceContract struct {
+	BaseImageSource         string `json:"base_image_source,omitempty"`
+	BaseImageSHA256         string `json:"base_image_sha256,omitempty"`
+	BaseImageExpectedSHA256 string `json:"base_image_expected_sha256,omitempty"`
+	ResolvedProfileSHA256   string `json:"resolved_profile_sha256,omitempty"`
+	PackageInventorySHA256  string `json:"package_inventory_sha256,omitempty"`
+}
+
 type Contract struct {
 	ContractVersion          string             `json:"contract_version"`
 	ImagePath                string             `json:"image_path,omitempty"`
@@ -36,6 +44,7 @@ type Contract struct {
 	Dangerous                bool               `json:"dangerous,omitempty"`
 	Debug                    bool               `json:"debug,omitempty"`
 	PackageInventory         []string           `json:"package_inventory,omitempty"`
+	Provenance               ProvenanceContract `json:"provenance,omitempty"`
 }
 
 func SidecarPath(imagePath string) string {

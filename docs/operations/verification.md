@@ -73,7 +73,7 @@ Output classes:
 - `FAIL`
 	- blocking issue; do not treat the host as production-ready until it is fixed
 
-The doctor verifies runtime/auth posture, KVM/QEMU availability, required paths and secrets, and approved guest image sidecar contracts.
+The doctor verifies runtime/auth posture, KVM/QEMU availability, filesystem free-space posture for the database/storage/snapshot roots, tunnel-signing-key posture, basic cgroup-controller posture, and approved guest image sidecar contracts.
 
 Capacity and metrics outputs should also show the currently admitted guest profile mix and declared capability mix so operators can spot accidental drift away from the intended `core`-heavy production posture.
 
@@ -89,6 +89,16 @@ BASE_IMAGE=$PWD/images/guest/or3-guest-debug.qcow2 images/guest/smoke-ssh.sh
 ```
 
 Use `smoke-agent.sh` for production-default profiles and reserve `smoke-ssh.sh` for the explicit debug/compatibility image.
+
+For release promotion, retain the full guest-image bundle together:
+
+- the qcow2 image
+- the `*.or3.json` sidecar
+- the resolved profile manifest copy
+- the package inventory text file
+
+The sidecar provenance fields are a promotion record, not a proof of bit-for-bit reproducibility.
+Use `EXPECTED_BASE_IMAGE_SHA256` during release builds when the promotion process needs to pin the upstream cloud-image input explicitly.
 
 The repository now also includes host-gated operator drill scripts:
 

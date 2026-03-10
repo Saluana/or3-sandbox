@@ -2,6 +2,8 @@ package qemu
 
 import (
 	"context"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -260,6 +262,97 @@ systemctl is-active or3-workload-smoke.service
 		restartSandbox(t, ctx, runtime, sandbox)
 		mustExecContain(t, runtime, sandbox, []string{"sh", "-lc", `systemctl is-active or3-workload-smoke.service && test -s /workspace/service.log && echo service-ok`}, "service-ok")
 	})
+}
+
+func TestHostSandboxLocalBridge(t *testing.T) {
+	cfg := requireHostIntegrationConfig(t)
+	ctx := context.Background()
+
+	runtime, err := New(Options{
+		Binary:         cfg.binary,
+		Accel:          cfg.accel,
+		BaseImagePath:  cfg.baseImagePath,
+		SSHUser:        cfg.sshUser,
+		SSHKeyPath:     cfg.sshKeyPath,
+		SSHHostKeyPath: cfg.sshHostKeyPath,
+		BootTimeout:    2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+
+	root := t.TempDir()
+	spec := model.SandboxSpec{
+		SandboxID:     "sbx-local-bridge",
+		TenantID:      "tenant-local-bridge",
+		BaseImageRef:  cfg.baseImagePath,
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 1024,
+		PIDsLimit:     256,
+		DiskLimitMB:   64,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		StorageRoot:   filepath.Join(root, "rootfs"),
+		WorkspaceRoot: filepath.Join(root, "workspace"),
+		CacheRoot:     filepath.Join(root, "cache"),
+	}
+	state, err := runtime.Create(ctx, spec)
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	sandbox := model.Sandbox{
+		ID:            spec.SandboxID,
+		TenantID:      spec.TenantID,
+		RuntimeID:     state.RuntimeID,
+		BaseImageRef:  spec.BaseImageRef,
+		CPULimit:      spec.CPULimit,
+		MemoryLimitMB: spec.MemoryLimitMB,
+		PIDsLimit:     spec.PIDsLimit,
+		DiskLimitMB:   spec.DiskLimitMB,
+		NetworkMode:   spec.NetworkMode,
+		StorageRoot:   spec.StorageRoot,
+		WorkspaceRoot: spec.WorkspaceRoot,
+		CacheRoot:     spec.CacheRoot,
+	}
+	defer runtime.Destroy(context.Background(), sandbox)
+
+	if _, err := runtime.Start(ctx, sandbox); err != nil {
+		t.Fatalf("start sandbox: %v", err)
+	}
+	handle, err := runtime.Exec(ctx, sandbox, model.ExecRequest{
+		Command: []string{"sh", "-lc", `systemd-socket-activate -l 127.0.0.1:18080 /bin/sh -lc 'printf "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"'`},
+		Cwd:     "/workspace",
+		Timeout: 2 * time.Minute,
+		Detached: true,
+	}, model.ExecStreams{})
+	if err != nil {
+		t.Fatalf("start guest bridge server: %v", err)
+	}
+	_ = handle.Wait()
+
+	var conn net.Conn
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err = runtime.OpenSandboxLocalConn(ctx, sandbox, 18080)
+		if err == nil {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("open sandbox local conn: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatalf("write request through bridge: %v", err)
+	}
+	response, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("read response through bridge: %v", err)
+	}
+	if !strings.Contains(string(response), "\r\n\r\nok") {
+		t.Fatalf("unexpected bridged response %q", string(response))
+	}
 }
 
 type hostIntegrationConfig struct {

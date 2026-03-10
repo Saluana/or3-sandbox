@@ -5,29 +5,41 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
-const ProtocolVersion = "1"
-
-const MaxMessageSize = 16 * 1024 * 1024
+const ProtocolVersion = "2"
 
 const (
-	OpHello      = "hello"
-	OpReady      = "ready"
-	OpExec       = "exec"
-	OpPTYOpen    = "pty_open"
-	OpPTYData    = "pty_data"
-	OpPTYResize  = "pty_resize"
-	OpPTYClose   = "pty_close"
-	OpFileRead   = "file_read"
-	OpFileWrite  = "file_write"
-	OpFileDelete = "file_delete"
-	OpMkdir      = "mkdir"
-	OpShutdown   = "shutdown"
+	MaxMessageSize      = 16 * 1024 * 1024
+	MaxRequestIDLength  = 128
+	MaxFileTransferSize = 64 * 1024 * 1024
+	MaxFileChunkSize    = 256 * 1024
+	MaxBridgeChunkSize  = 32 * 1024
 )
+
+const (
+	OpHello         = "hello"
+	OpReady         = "ready"
+	OpExec          = "exec"
+	OpPTYOpen       = "pty_open"
+	OpPTYData       = "pty_data"
+	OpPTYResize     = "pty_resize"
+	OpPTYClose      = "pty_close"
+	OpFileRead      = "file_read"
+	OpFileWrite     = "file_write"
+	OpFileDelete    = "file_delete"
+	OpMkdir         = "mkdir"
+	OpTCPBridgeOpen = "tcp_bridge_open"
+	OpTCPBridgeData = "tcp_bridge_data"
+	OpShutdown      = "shutdown"
+)
+
+var ErrProtocol = errors.New("guest agent protocol error")
 
 type Message struct {
 	ID     string          `json:"id,omitempty"`
@@ -94,17 +106,26 @@ type PTYResizeRequest struct {
 }
 
 type FileReadRequest struct {
-	Path string `json:"path"`
+	Path     string `json:"path"`
+	Offset   int64  `json:"offset,omitempty"`
+	MaxBytes int    `json:"max_bytes,omitempty"`
 }
 
 type FileReadResult struct {
 	Path    string `json:"path"`
-	Content string `json:"content"`
+	Content string `json:"content,omitempty"`
+	Offset  int64  `json:"offset,omitempty"`
+	Size    int64  `json:"size,omitempty"`
+	EOF     bool   `json:"eof,omitempty"`
 }
 
 type FileWriteRequest struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path      string `json:"path"`
+	Content   string `json:"content"`
+	Offset    int64  `json:"offset,omitempty"`
+	TotalSize int64  `json:"total_size,omitempty"`
+	Truncate  bool   `json:"truncate,omitempty"`
+	EOF       bool   `json:"eof,omitempty"`
 }
 
 type PathRequest struct {
@@ -113,6 +134,21 @@ type PathRequest struct {
 
 type ShutdownRequest struct {
 	Reboot bool `json:"reboot,omitempty"`
+}
+
+type TCPBridgeOpenRequest struct {
+	TargetPort int `json:"target_port"`
+}
+
+type TCPBridgeOpenResult struct {
+	SessionID string `json:"session_id"`
+}
+
+type TCPBridgeData struct {
+	SessionID string `json:"session_id"`
+	Data      string `json:"data,omitempty"`
+	EOF       bool   `json:"eof,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 func EncodeBytes(data []byte) string {
@@ -124,6 +160,9 @@ func DecodeBytes(value string) ([]byte, error) {
 }
 
 func WriteMessage(w io.Writer, message Message) error {
+	if err := ValidateEnvelope(message); err != nil {
+		return err
+	}
 	payload, err := json.Marshal(message)
 	if err != nil {
 		return err
@@ -158,9 +197,60 @@ func ReadMessage(r io.Reader) (Message, error) {
 	}
 	var message Message
 	if err := json.Unmarshal(payload, &message); err != nil {
+		return Message{}, fmt.Errorf("%w: invalid json: %v", ErrProtocol, err)
+	}
+	if err := ValidateEnvelope(message); err != nil {
 		return Message{}, err
 	}
 	return message, nil
+}
+
+func ValidateEnvelope(message Message) error {
+	if strings.TrimSpace(message.Op) == "" {
+		return fmt.Errorf("%w: agent message op is required", ErrProtocol)
+	}
+	if len(strings.TrimSpace(message.ID)) > MaxRequestIDLength {
+		return fmt.Errorf("%w: agent message id exceeds max length of %d bytes", ErrProtocol, MaxRequestIDLength)
+	}
+	return nil
+}
+
+func ValidateRequest(message Message) error {
+	if err := ValidateEnvelope(message); err != nil {
+		return err
+	}
+	if RequiresRequestID(message.Op) && strings.TrimSpace(message.ID) == "" {
+		return fmt.Errorf("%w: request id is required for %s", ErrProtocol, message.Op)
+	}
+	if message.OK {
+		return fmt.Errorf("%w: requests must not set ok=true", ErrProtocol)
+	}
+	return nil
+}
+
+func ValidateResponse(message Message, expectedOp, expectedID string) error {
+	if err := ValidateEnvelope(message); err != nil {
+		return err
+	}
+	if strings.TrimSpace(message.ID) == "" {
+		return fmt.Errorf("%w: response id is required", ErrProtocol)
+	}
+	if expectedID != "" && message.ID != expectedID {
+		return fmt.Errorf("%w: response id mismatch: expected %q got %q", ErrProtocol, expectedID, message.ID)
+	}
+	if expectedOp != "" && message.Op != expectedOp {
+		return fmt.Errorf("%w: response op mismatch: expected %q got %q", ErrProtocol, expectedOp, message.Op)
+	}
+	return nil
+}
+
+func RequiresRequestID(op string) bool {
+	switch op {
+	case OpPTYData, OpPTYResize, OpPTYClose, OpTCPBridgeData:
+		return false
+	default:
+		return true
+	}
 }
 
 func NewBufferedReadWriter(conn io.ReadWriter) *bufio.ReadWriter {

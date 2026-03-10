@@ -925,6 +925,9 @@ func (r *Runtime) probeReady(ctx context.Context, sandbox model.Sandbox, layout 
 		return err
 	}
 	if transport.mode == model.GuestControlModeAgent {
+		if _, err := r.agentHandshakeForSandbox(ctx, layout, sandbox); err != nil {
+			return err
+		}
 		return r.agentReady(ctx, layout)
 	}
 	return r.sshReady(ctx, target)

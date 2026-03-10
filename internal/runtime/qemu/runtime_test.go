@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -206,14 +207,232 @@ func TestAgentHandshakeRejectsProtocolMismatch(t *testing.T) {
 			return
 		}
 		defer conn.Close()
-		_, _ = agentproto.ReadMessage(conn)
+		request, _ := agentproto.ReadMessage(conn)
 		result, _ := json.Marshal(agentproto.HelloResult{ProtocolVersion: "999", WorkspaceContractVersion: model.DefaultWorkspaceContractVersion})
-		_ = agentproto.WriteMessage(conn, agentproto.Message{Op: agentproto.OpHello, OK: true, Result: result})
+		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: agentproto.OpHello, OK: true, Result: result})
 	}()
 	r := &Runtime{}
 	_, err = r.agentHandshake(context.Background(), sandboxLayout{agentSocketPath: socketPath})
 	if err == nil || !strings.Contains(err.Error(), "protocol mismatch") {
 		t.Fatalf("expected protocol mismatch error, got %v", err)
+	}
+}
+
+func TestAgentRoundTripRejectsMissingResponseID(t *testing.T) {
+	socketPath := startTestAgentSocket(t, func(conn net.Conn) {
+		defer conn.Close()
+		request, _ := agentproto.ReadMessage(conn)
+		result, _ := json.Marshal(agentproto.ReadyResult{Ready: true})
+		_ = agentproto.WriteMessage(conn, agentproto.Message{Op: request.Op, OK: true, Result: result})
+	})
+	r := &Runtime{}
+	err := r.agentReady(context.Background(), sandboxLayout{agentSocketPath: socketPath})
+	if err == nil || !strings.Contains(err.Error(), "response id is required") {
+		t.Fatalf("expected missing id error, got %v", err)
+	}
+}
+
+func TestAgentRoundTripRejectsMismatchedResponseID(t *testing.T) {
+	socketPath := startTestAgentSocket(t, func(conn net.Conn) {
+		defer conn.Close()
+		request, _ := agentproto.ReadMessage(conn)
+		result, _ := json.Marshal(agentproto.ReadyResult{Ready: true})
+		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID + "-wrong", Op: request.Op, OK: true, Result: result})
+	})
+	r := &Runtime{}
+	err := r.agentReady(context.Background(), sandboxLayout{agentSocketPath: socketPath})
+	if err == nil || !strings.Contains(err.Error(), "response id mismatch") {
+		t.Fatalf("expected mismatched id error, got %v", err)
+	}
+}
+
+func TestAgentHandshakeRejectsCapabilityMismatch(t *testing.T) {
+	imagePath := writeTestQEMUBaseImage(t)
+	socketPath := startTestAgentSocket(t, func(conn net.Conn) {
+		defer conn.Close()
+		request, _ := agentproto.ReadMessage(conn)
+		result, _ := json.Marshal(agentproto.HelloResult{
+			ProtocolVersion:          agentproto.ProtocolVersion,
+			WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
+			Capabilities:             []string{"exec", "files"},
+		})
+		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+	})
+	r := &Runtime{}
+	_, err := r.agentHandshakeForSandbox(context.Background(), sandboxLayout{agentSocketPath: socketPath}, model.Sandbox{BaseImageRef: imagePath})
+	if err == nil || !strings.Contains(err.Error(), "capabilities mismatch") {
+		t.Fatalf("expected capability mismatch error, got %v", err)
+	}
+}
+
+func TestAgentRoundTripRejectsOversizeResponse(t *testing.T) {
+	socketPath := startTestAgentSocket(t, func(conn net.Conn) {
+		defer conn.Close()
+		_, _ = agentproto.ReadMessage(conn)
+		_, _ = conn.Write([]byte{0xff, 0xff, 0xff, 0xff})
+	})
+	r := &Runtime{}
+	err := r.agentReady(context.Background(), sandboxLayout{agentSocketPath: socketPath})
+	if err == nil || !strings.Contains(err.Error(), "exceeds max size") {
+		t.Fatalf("expected oversize response error, got %v", err)
+	}
+}
+
+func TestAgentWriteWorkspaceFileBytesChunksLargeFiles(t *testing.T) {
+	content := []byte(strings.Repeat("abcdef", agentproto.MaxFileChunkSize/6+5))
+	expectedChunks := (len(content) + agentproto.MaxFileChunkSize - 1) / agentproto.MaxFileChunkSize
+	type writeChunk struct {
+		Offset    int64
+		TotalSize int64
+		Truncate  bool
+		EOF       bool
+		Data      []byte
+	}
+	chunksCh := make(chan writeChunk, expectedChunks)
+	socketPath := startTestAgentSocketLoop(t, expectedChunks, func(conn net.Conn) {
+		defer conn.Close()
+		request, _ := agentproto.ReadMessage(conn)
+		var payload agentproto.FileWriteRequest
+		if err := json.Unmarshal(request.Result, &payload); err != nil {
+			t.Errorf("unmarshal file write request: %v", err)
+			return
+		}
+		data, err := agentproto.DecodeBytes(payload.Content)
+		if err != nil {
+			t.Errorf("decode file write chunk: %v", err)
+			return
+		}
+		chunksCh <- writeChunk{Offset: payload.Offset, TotalSize: payload.TotalSize, Truncate: payload.Truncate, EOF: payload.EOF, Data: data}
+		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true})
+	})
+	r := &Runtime{}
+	if err := r.agentWriteWorkspaceFileBytes(context.Background(), sandboxLayout{agentSocketPath: socketPath}, "nested/file.txt", content); err != nil {
+		t.Fatalf("write workspace file bytes: %v", err)
+	}
+	close(chunksCh)
+	var rebuilt []byte
+	for chunk := range chunksCh {
+		if chunk.TotalSize != int64(len(content)) {
+			t.Fatalf("unexpected total size %d", chunk.TotalSize)
+		}
+		if chunk.Truncate != (chunk.Offset == 0) {
+			t.Fatalf("unexpected truncate flag for offset %d", chunk.Offset)
+		}
+		rebuilt = append(rebuilt, chunk.Data...)
+	}
+	if string(rebuilt) != string(content) {
+		t.Fatal("chunked write content mismatch")
+	}
+}
+
+func TestAgentWriteWorkspaceFileBytesRejectsOversizePayload(t *testing.T) {
+	r := &Runtime{}
+	content := []byte(strings.Repeat("x", agentproto.MaxFileTransferSize+1))
+	err := r.agentWriteWorkspaceFileBytes(context.Background(), sandboxLayout{agentSocketPath: filepath.Join(t.TempDir(), "unused.sock")}, "large.bin", content)
+	if err == nil || !strings.Contains(err.Error(), "transfer limit") {
+		t.Fatalf("expected oversize write rejection, got %v", err)
+	}
+}
+
+func TestAgentReadWorkspaceFileBytesAssemblesChunks(t *testing.T) {
+	content := []byte(strings.Repeat("chunk-", agentproto.MaxFileChunkSize/6+3))
+	expectedChunks := (len(content) + agentproto.MaxFileChunkSize - 1) / agentproto.MaxFileChunkSize
+	socketPath := startTestAgentSocketLoop(t, expectedChunks, func(conn net.Conn) {
+		defer conn.Close()
+		request, _ := agentproto.ReadMessage(conn)
+		var payload agentproto.FileReadRequest
+		if err := json.Unmarshal(request.Result, &payload); err != nil {
+			t.Errorf("unmarshal file read request: %v", err)
+			return
+		}
+		end := int(payload.Offset) + agentproto.MaxFileChunkSize
+		if end > len(content) {
+			end = len(content)
+		}
+		result, _ := json.Marshal(agentproto.FileReadResult{
+			Path:    payload.Path,
+			Content: agentproto.EncodeBytes(content[int(payload.Offset):end]),
+			Offset:  payload.Offset,
+			Size:    int64(len(content)),
+			EOF:     end == len(content),
+		})
+		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+	})
+	r := &Runtime{}
+	data, err := r.agentReadWorkspaceFileBytes(context.Background(), sandboxLayout{agentSocketPath: socketPath}, "nested/file.txt")
+	if err != nil {
+		t.Fatalf("read workspace file bytes: %v", err)
+	}
+	if string(data) != string(content) {
+		t.Fatal("chunked read content mismatch")
+	}
+}
+
+func TestAgentTTYHandleRejectsWrongSessionData(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	reader, writer := io.Pipe()
+	handle := &agentTTYHandle{
+		conn:      clientConn,
+		sessionID: "pty-123",
+		reader:    reader,
+		writer:    writer,
+	}
+	go handle.readLoop()
+
+	payload, _ := json.Marshal(agentproto.PTYData{SessionID: "wrong-session", Data: agentproto.EncodeBytes([]byte("nope"))})
+	if err := agentproto.WriteMessage(serverConn, agentproto.Message{ID: "server-1", Op: agentproto.OpPTYData, OK: true, Result: payload}); err != nil {
+		t.Fatalf("write PTY payload: %v", err)
+	}
+	buf := make([]byte, 1)
+	if n, err := reader.Read(buf); err != io.EOF || n != 0 {
+		t.Fatalf("expected PTY reader EOF after wrong session, got n=%d err=%v", n, err)
+	}
+}
+
+func TestAgentTTYHandleCloseIsIdempotent(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	reader, writer := io.Pipe()
+	handle := &agentTTYHandle{
+		conn:      clientConn,
+		sessionID: "pty-123",
+		reader:    reader,
+		writer:    writer,
+	}
+	if err := handle.Close(); err != nil {
+		t.Fatalf("first close failed: %v", err)
+	}
+	if err := handle.Close(); err != nil {
+		t.Fatalf("second close failed: %v", err)
+	}
+}
+
+func TestAgentTTYHandleStopsAfterEOFFrame(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	reader, writer := io.Pipe()
+	handle := &agentTTYHandle{
+		conn:      clientConn,
+		sessionID: "pty-123",
+		reader:    reader,
+		writer:    writer,
+	}
+	go handle.readLoop()
+
+	payload, _ := json.Marshal(agentproto.PTYData{SessionID: "pty-123", EOF: true})
+	if err := agentproto.WriteMessage(serverConn, agentproto.Message{ID: "server-1", Op: agentproto.OpPTYData, OK: true, Result: payload}); err != nil {
+		t.Fatalf("write PTY EOF payload: %v", err)
+	}
+	buf := make([]byte, 1)
+	if n, err := reader.Read(buf); err != io.EOF || n != 0 {
+		t.Fatalf("expected EOF after PTY exit frame, got n=%d err=%v", n, err)
 	}
 }
 
@@ -695,6 +914,53 @@ func TestWorkspaceGuestPathRejectsEscapes(t *testing.T) {
 	}
 }
 
+func startTestAgentSocket(t *testing.T, handler func(net.Conn)) string {
+	t.Helper()
+	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("or3-agent-%d.sock", time.Now().UnixNano()))
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+	})
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		handler(conn)
+	}()
+	return socketPath
+}
+
+func startTestAgentSocketLoop(t *testing.T, accepts int, handler func(net.Conn)) string {
+	t.Helper()
+	socketPath := filepath.Join(os.TempDir(), fmt.Sprintf("or3-agent-loop-%d.sock", time.Now().UnixNano()))
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < accepts; i++ {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			handler(conn)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = os.Remove(socketPath)
+		<-done
+	})
+	return socketPath
+}
+
 func writeTestQEMUBaseImage(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "base.qcow2")
@@ -711,7 +977,7 @@ func writeTestQEMUBaseImage(t *testing.T) string {
 		ImageSHA256:              sha,
 		BuildVersion:             "test",
 		Profile:                  model.GuestProfileCore,
-		Capabilities:             []string{"exec", "files", "pty"},
+		Capabilities:             []string{"exec", "files", "pty", "tcp_bridge"},
 		Control:                  guestimage.ControlContract{Mode: model.GuestControlModeAgent, ProtocolVersion: model.DefaultGuestControlProtocolVersion, SupportedTransports: []string{"virtio-serial"}},
 		WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
 		SSHPresent:               false,

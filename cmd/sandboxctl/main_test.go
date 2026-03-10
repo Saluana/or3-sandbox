@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"or3-sandbox/internal/config"
+	"or3-sandbox/internal/guestimage"
 	"or3-sandbox/internal/model"
 )
 
@@ -248,4 +249,200 @@ func TestProductionQEMUDoctorAccumulatesChecksAfterConfigLoadFailure(t *testing.
 			t.Fatalf("expected %s check after config failure, got %#v", name, summary.Checks)
 		}
 	}
+}
+
+func TestProductionQEMUDoctorReportsFreeSpaceAndPostureWarnings(t *testing.T) {
+	restore := captureDoctorGlobals()
+	defer restore()
+
+	root := t.TempDir()
+	dbDir := filepath.Join(root, "db")
+	storageRoot := filepath.Join(root, "storage")
+	snapshotRoot := filepath.Join(root, "snapshots")
+	keyDir := filepath.Join(root, "secrets")
+	for _, dir := range []string{dbDir, storageRoot, snapshotRoot, keyDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.Chmod(storageRoot, 0o777); err != nil {
+		t.Fatalf("chmod storage root: %v", err)
+	}
+	dbPath := filepath.Join(dbDir, "sandbox.db")
+	keyPath := filepath.Join(keyDir, "tunnel.key")
+	secretPath := filepath.Join(root, "jwt.secret")
+	imagePath := filepath.Join(root, "guest.qcow2")
+	if err := os.WriteFile(secretPath, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write jwt secret: %v", err)
+	}
+	if err := os.WriteFile(keyPath, []byte("signing"), 0o644); err != nil {
+		t.Fatalf("write tunnel key: %v", err)
+	}
+	if err := writeDoctorGuestContract(imagePath); err != nil {
+		t.Fatalf("write guest contract: %v", err)
+	}
+
+	doctorHostOS = "linux"
+	doctorLookPath = func(string) (string, error) { return "/usr/bin/true", nil }
+	doctorStat = func(path string) (os.FileInfo, error) {
+		if path == "/dev/kvm" {
+			return os.Stat(secretPath)
+		}
+		if path == "/sys/fs/cgroup" {
+			return os.Stat(storageRoot)
+		}
+		return os.Stat(path)
+	}
+	doctorReadFile = func(path string) ([]byte, error) {
+		if path == "/sys/fs/cgroup/cgroup.controllers" {
+			return []byte("cpu pids"), nil
+		}
+		return os.ReadFile(path)
+	}
+	doctorStatFS = func(path string) (doctorFSInfo, error) {
+		switch path {
+		case dbDir:
+			return doctorFSInfo{AvailableBytes: 2 << 30}, nil
+		case storageRoot:
+			return doctorFSInfo{AvailableBytes: 512 << 20}, nil
+		case snapshotRoot:
+			return doctorFSInfo{AvailableBytes: 8 << 30}, nil
+		default:
+			return doctorFSInfo{AvailableBytes: 8 << 30}, nil
+		}
+	}
+	doctorConfigLoader = func([]string) (config.Config, error) {
+		return config.Config{
+			RuntimeBackend:            "qemu",
+			AuthMode:                  "jwt-hs256",
+			AuthJWTSecretPaths:        []string{secretPath},
+			DatabasePath:              dbPath,
+			StorageRoot:               storageRoot,
+			SnapshotRoot:              snapshotRoot,
+			QEMUBinary:                "qemu-system-x86_64",
+			TunnelSigningKeyPath:      keyPath,
+			QEMUAllowedBaseImagePaths: []string{imagePath},
+		}, nil
+	}
+
+	summary := runProductionQEMUDoctor()
+	assertDoctorCheck(t, summary.Checks, "free-space", "fail", "storage filesystem")
+	assertDoctorCheck(t, summary.Checks, "free-space", "warn", "database filesystem")
+	assertDoctorCheck(t, summary.Checks, "tunnel-signing-key", "warn", "broader than 0600")
+	assertDoctorCheck(t, summary.Checks, "path-posture", "warn", "storage-root")
+	assertDoctorCheck(t, summary.Checks, "cgroup", "warn", "missing controllers: memory")
+}
+
+func TestProductionQEMUDoctorFailsUnreadableTunnelSigningKeyPath(t *testing.T) {
+	restore := captureDoctorGlobals()
+	defer restore()
+
+	root := t.TempDir()
+	dbDir := filepath.Join(root, "db")
+	storageRoot := filepath.Join(root, "storage")
+	snapshotRoot := filepath.Join(root, "snapshots")
+	secretPath := filepath.Join(root, "jwt.secret")
+	imagePath := filepath.Join(root, "guest.qcow2")
+	for _, dir := range []string{dbDir, storageRoot, snapshotRoot} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(secretPath, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write jwt secret: %v", err)
+	}
+	if err := writeDoctorGuestContract(imagePath); err != nil {
+		t.Fatalf("write guest contract: %v", err)
+	}
+
+	doctorHostOS = "linux"
+	doctorLookPath = func(string) (string, error) { return "/usr/bin/true", nil }
+	doctorStat = func(path string) (os.FileInfo, error) {
+		if path == "/dev/kvm" {
+			return os.Stat(secretPath)
+		}
+		if path == "/sys/fs/cgroup" {
+			return os.Stat(storageRoot)
+		}
+		if strings.Contains(path, "missing-tunnel.key") {
+			return nil, os.ErrNotExist
+		}
+		return os.Stat(path)
+	}
+	doctorReadFile = func(path string) ([]byte, error) {
+		if path == "/sys/fs/cgroup/cgroup.controllers" {
+			return []byte("cpu memory pids"), nil
+		}
+		return os.ReadFile(path)
+	}
+	doctorStatFS = func(string) (doctorFSInfo, error) {
+		return doctorFSInfo{AvailableBytes: 8 << 30}, nil
+	}
+	doctorConfigLoader = func([]string) (config.Config, error) {
+		return config.Config{
+			RuntimeBackend:            "qemu",
+			AuthMode:                  "jwt-hs256",
+			AuthJWTSecretPaths:        []string{secretPath},
+			DatabasePath:              filepath.Join(dbDir, "sandbox.db"),
+			StorageRoot:               storageRoot,
+			SnapshotRoot:              snapshotRoot,
+			QEMUBinary:                "qemu-system-x86_64",
+			TunnelSigningKeyPath:      filepath.Join(root, "missing-tunnel.key"),
+			QEMUAllowedBaseImagePaths: []string{imagePath},
+		}, nil
+	}
+
+	summary := runProductionQEMUDoctor()
+	assertDoctorCheck(t, summary.Checks, "tunnel-signing-key", "fail", "not readable")
+}
+
+func captureDoctorGlobals() func() {
+	loader := doctorConfigLoader
+	hostOS := doctorHostOS
+	lookPath := doctorLookPath
+	stat := doctorStat
+	readFile := doctorReadFile
+	statFS := doctorStatFS
+	return func() {
+		doctorConfigLoader = loader
+		doctorHostOS = hostOS
+		doctorLookPath = lookPath
+		doctorStat = stat
+		doctorReadFile = readFile
+		doctorStatFS = statFS
+	}
+}
+
+func assertDoctorCheck(t *testing.T, checks []doctorCheck, name, level, detail string) {
+	t.Helper()
+	for _, check := range checks {
+		if check.Name == name && check.Level == level && strings.Contains(check.Detail, detail) {
+			return
+		}
+	}
+	t.Fatalf("missing doctor check name=%s level=%s detail=%q in %#v", name, level, detail, checks)
+}
+
+func writeDoctorGuestContract(imagePath string) error {
+	if err := os.WriteFile(imagePath, []byte("guest"), 0o644); err != nil {
+		return err
+	}
+	sha, err := guestimage.ComputeSHA256(imagePath)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(guestimage.Contract{
+		ContractVersion:          model.DefaultImageContractVersion,
+		ImagePath:                imagePath,
+		ImageSHA256:              sha,
+		BuildVersion:             "test",
+		Profile:                  model.GuestProfileCore,
+		Capabilities:             []string{"exec", "files", "pty"},
+		Control:                  guestimage.ControlContract{Mode: model.GuestControlModeAgent, ProtocolVersion: model.DefaultGuestControlProtocolVersion},
+		WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
+	})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(guestimage.SidecarPath(imagePath), payload, 0o644)
 }

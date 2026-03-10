@@ -39,6 +39,7 @@ The guest agent is inside the guest boundary. It is trusted only to the same deg
 The current production claims rely on these controls:
 
 - immutable approved guest image paths with sidecar contracts and checksums
+- sidecar-recorded provenance for the promoted base image, resolved manifest, and package inventory
 - fixed guest profiles with explicit capability declarations
 - agent-first control for production-default images
 - explicit opt-in for SSH compatibility and dangerous debug profiles
@@ -72,6 +73,7 @@ It is not a trust anchor by itself. The host still makes policy decisions using:
 
 - approved image paths
 - sidecar contracts
+- recorded provenance bundled with the promoted image
 - profile policy
 - control-mode validation
 

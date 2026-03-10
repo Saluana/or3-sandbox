@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,6 +146,138 @@ func TestLocalFileOpsStayScopedToWorkspaceAndMeasuredStorage(t *testing.T) {
 	}
 	if _, err := svc.ReadFile(ctx, tenantB.ID, sandbox.ID, "nested/value.txt", ""); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("expected cross-tenant read denial, got %v", err)
+	}
+}
+
+func TestOpenSandboxLocalConnUsesRuntimeBridge(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	serverConn, clientConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = serverConn.Close()
+		_ = clientConn.Close()
+	})
+	runtime.localConnFactory = func(context.Context, model.Sandbox, int) (net.Conn, error) {
+		return clientConn, nil
+	}
+	runtime.startState = model.RuntimeState{RuntimeID: "rt-bridge", Status: model.SandboxStatusRunning, Running: true}
+	svc, _, quota, tenant, _ := newServiceHarness(t, runtime, "qemu")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenant, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	conn, err := svc.OpenSandboxLocalConn(ctx, sandbox, 8080)
+	if err != nil {
+		t.Fatalf("open sandbox local conn: %v", err)
+	}
+	defer conn.Close()
+
+	go func() {
+		_, _ = serverConn.Write([]byte("hello"))
+		buf := make([]byte, 5)
+		_, _ = io.ReadFull(serverConn, buf)
+	}()
+
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read bridged bytes: %v", err)
+	}
+	if string(buf) != "hello" {
+		t.Fatalf("unexpected bridged payload %q", string(buf))
+	}
+	if _, err := conn.Write([]byte("world")); err != nil {
+		t.Fatalf("write bridged bytes: %v", err)
+	}
+}
+
+func TestOpenSandboxLocalConnRejectsInvalidTargetPort(t *testing.T) {
+	runtime := newStubRuntime()
+	svc, _, _, _, _ := newServiceHarness(t, runtime, "qemu")
+	_, err := svc.OpenSandboxLocalConn(context.Background(), model.Sandbox{ID: "sbx-port", Status: model.SandboxStatusRunning}, 70000)
+	if err == nil || !strings.Contains(err.Error(), "target port must be between 1 and 65535") {
+		t.Fatalf("expected target port validation error, got %v", err)
+	}
+}
+
+func TestOpenSandboxLocalConnPropagatesEOF(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	serverConn, clientConn := net.Pipe()
+	runtime.localConnFactory = func(context.Context, model.Sandbox, int) (net.Conn, error) {
+		return clientConn, nil
+	}
+	runtime.startState = model.RuntimeState{RuntimeID: "rt-bridge-eof", Status: model.SandboxStatusRunning, Running: true}
+	svc, _, quota, tenant, _ := newServiceHarness(t, runtime, "qemu")
+	sandbox, err := svc.CreateSandbox(ctx, tenant, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	conn, err := svc.OpenSandboxLocalConn(ctx, sandbox, 9090)
+	if err != nil {
+		t.Fatalf("open sandbox local conn: %v", err)
+	}
+	defer conn.Close()
+	go func() {
+		_, _ = serverConn.Write([]byte("ok"))
+		_ = serverConn.Close()
+	}()
+	data := make([]byte, 2)
+	if _, err := io.ReadFull(conn, data); err != nil {
+		t.Fatalf("read bridged bytes: %v", err)
+	}
+	if string(data) != "ok" {
+		t.Fatalf("unexpected bridged bytes %q", string(data))
+	}
+	buf := make([]byte, 1)
+	if n, err := conn.Read(buf); err != io.EOF || n != 0 {
+		t.Fatalf("expected EOF after bridged peer close, got n=%d err=%v", n, err)
+	}
+}
+
+func TestOpenSandboxLocalConnUnavailablePortFailsDeterministically(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	runtime.localConnErr = errors.New("sandbox-local tunnel bridge failed to connect: connection refused")
+	runtime.startState = model.RuntimeState{RuntimeID: "rt-bridge-fail", Status: model.SandboxStatusRunning, Running: true}
+	svc, _, quota, tenant, _ := newServiceHarness(t, runtime, "qemu")
+	sandbox, err := svc.CreateSandbox(ctx, tenant, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	_, err = svc.OpenSandboxLocalConn(ctx, sandbox, 1234)
+	if err == nil || !strings.Contains(err.Error(), "failed to connect") {
+		t.Fatalf("expected deterministic bridge failure, got %v", err)
 	}
 }
 
@@ -2035,7 +2168,7 @@ func newServiceHarness(t *testing.T, runtime model.RuntimeManager, backend strin
 			ImagePath:                qemuImage,
 			BuildVersion:             "test",
 			Profile:                  model.GuestProfileCore,
-			Capabilities:             []string{"exec", "files", "pty"},
+			Capabilities:             []string{"exec", "files", "pty", "tcp_bridge"},
 			Control:                  guestimage.ControlContract{Mode: model.GuestControlModeAgent, ProtocolVersion: model.DefaultGuestControlProtocolVersion},
 			WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
 		})
@@ -2111,8 +2244,10 @@ type stubRuntime struct {
 	destroyErr        error
 	restoreErr        error
 	inspectErr        error
+	localConnErr      error
 	inspectCalls      int
 	execHandleFactory func(context.Context, model.ExecRequest) model.ExecHandle
+	localConnFactory  func(context.Context, model.Sandbox, int) (net.Conn, error)
 	createdSpec       model.SandboxSpec
 	restoredSnapshot  model.Snapshot
 
@@ -2239,6 +2374,16 @@ func (r *stubRuntime) Exec(ctx context.Context, _ model.Sandbox, req model.ExecR
 }
 
 func (r *stubRuntime) AttachTTY(context.Context, model.Sandbox, model.TTYRequest) (model.TTYHandle, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (r *stubRuntime) OpenSandboxLocalConn(ctx context.Context, sandbox model.Sandbox, targetPort int) (net.Conn, error) {
+	if r.localConnFactory != nil {
+		return r.localConnFactory(ctx, sandbox, targetPort)
+	}
+	if r.localConnErr != nil {
+		return nil, r.localConnErr
+	}
 	return nil, errors.New("not implemented")
 }
 

@@ -33,6 +33,7 @@ fi
 
 BASE_IMAGE_URL="${BASE_IMAGE_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
 DOWNLOAD_PATH="${DOWNLOAD_PATH:-$ROOT_DIR/.cache/base-cloudimg.qcow2}"
+EXPECTED_BASE_IMAGE_SHA256="${EXPECTED_BASE_IMAGE_SHA256:-}"
 OUTPUT_IMAGE="${OUTPUT_IMAGE:-$ROOT_DIR/or3-guest-$PROFILE.qcow2}"
 PROFILE_RESOLVED_OUTPUT="${PROFILE_RESOLVED_OUTPUT:-$OUTPUT_IMAGE.profile.json}"
 PACKAGE_INVENTORY_OUTPUT="${PACKAGE_INVENTORY_OUTPUT:-$OUTPUT_IMAGE.packages.txt}"
@@ -177,6 +178,21 @@ if [ ! -f "$DOWNLOAD_PATH" ]; then
   curl -L "$BASE_IMAGE_URL" -o "$DOWNLOAD_PATH"
 fi
 
+python3 - "$DOWNLOAD_PATH" <<'PY' > "$WORK_DIR/base-image.sha256"
+import hashlib
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+sha = hashlib.sha256(path.read_bytes()).hexdigest()
+print(sha)
+PY
+base_image_sha="$(tr -d '\n' < "$WORK_DIR/base-image.sha256")"
+if [ -n "$EXPECTED_BASE_IMAGE_SHA256" ] && [ "$base_image_sha" != "$EXPECTED_BASE_IMAGE_SHA256" ]; then
+  echo "base image checksum mismatch: expected $EXPECTED_BASE_IMAGE_SHA256 got $base_image_sha" >&2
+  exit 1
+fi
+
 cp "$DOWNLOAD_PATH" "$WORK_DIR/base.qcow2"
 
 sed \
@@ -220,11 +236,13 @@ import os
 import socket
 import struct
 import sys
+import time
 
 sock_path = os.environ["OR3_AGENT_SOCKET_PATH"]
 op = os.environ["OR3_AGENT_OP"]
 payload = os.environ.get("OR3_AGENT_PAYLOAD", "null")
 message = {"op": op}
+message["id"] = f"build-{time.time_ns()}"
 if payload and payload != "null":
     message["result"] = json.loads(payload)
 raw = json.dumps(message).encode("utf-8")
@@ -325,6 +343,28 @@ fi
 
 verify_profile_artifacts
 
+python3 - "$WORK_DIR/profile.json" <<'PY' > "$WORK_DIR/profile.sha256"
+import hashlib
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+sha = hashlib.sha256(path.read_bytes()).hexdigest()
+print(sha)
+PY
+resolved_profile_sha="$(tr -d '\n' < "$WORK_DIR/profile.sha256")"
+
+python3 - "$PACKAGE_INVENTORY_OUTPUT" <<'PY' > "$WORK_DIR/package-inventory.sha256"
+import hashlib
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+sha = hashlib.sha256(path.read_bytes()).hexdigest()
+print(sha)
+PY
+package_inventory_sha="$(tr -d '\n' < "$WORK_DIR/package-inventory.sha256")"
+
 if [ "$ssh_present" = "true" ]; then
 	host_key_json="$(agent_rpc exec "$(jq -cn '{command:["sh","-lc","cat /etc/ssh/ssh_host_ed25519_key.pub"],cwd:"/"}')")"
 	printf '%s\n' "$(printf '%s' "$host_key_json" | jq -r '.stdout_preview' | tr -d '\r')" > "$SSH_HOST_PUBLIC_KEY_OUTPUT"
@@ -368,6 +408,11 @@ jq -n \
 	--arg image_sha "$image_sha" \
 	--arg build_version "$BUILD_VERSION" \
 	--arg git_sha "$GIT_SHA" \
+	--arg base_image_source "$BASE_IMAGE_URL" \
+	--arg base_image_sha "$base_image_sha" \
+	--arg base_image_expected_sha "$EXPECTED_BASE_IMAGE_SHA256" \
+	--arg resolved_profile_sha "$resolved_profile_sha" \
+	--arg package_inventory_sha "$package_inventory_sha" \
 	'{
 		contract_version: "1",
 		image_path: $image_path,
@@ -382,7 +427,14 @@ jq -n \
 		ssh_present: ($manifest[0].ssh_present // false),
 		dangerous: ($manifest[0].dangerous // false),
 		debug: ($manifest[0].debug // false),
-		package_inventory: ($manifest[0].packages // [])
+		package_inventory: ($manifest[0].packages // []),
+		provenance: {
+			base_image_source: $base_image_source,
+			base_image_sha256: $base_image_sha,
+			base_image_expected_sha256: $base_image_expected_sha,
+			resolved_profile_sha256: $resolved_profile_sha,
+			package_inventory_sha256: $package_inventory_sha
+		}
 	}' > "$CONTRACT_OUTPUT"
 
 cat <<EOF

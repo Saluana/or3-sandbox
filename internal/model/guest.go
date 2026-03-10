@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-const DefaultGuestControlProtocolVersion = "1"
+const DefaultGuestControlProtocolVersion = "2"
 const DefaultWorkspaceContractVersion = "1"
 const DefaultImageContractVersion = "1"
 

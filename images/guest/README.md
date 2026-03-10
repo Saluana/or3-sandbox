@@ -140,6 +140,12 @@ Build the default production profile:
 images/guest/build-base-image.sh
 ```
 
+Optionally pin the upstream cloud-image input during promotion builds:
+
+```bash
+EXPECTED_BASE_IMAGE_SHA256=<sha256> images/guest/build-base-image.sh
+```
+
 Build a heavier profile:
 
 ```bash
@@ -161,6 +167,13 @@ Each build produces:
 - a package inventory text file with the guest-observed Debian package versions for the selected profile packages
 - a host-side `*.or3.json` contract file
 
+The sidecar now also records release-promotion provenance:
+
+- the selected base-image source identifier
+- the base-image SHA-256 seen by the build
+- the resolved profile manifest SHA-256
+- the package inventory SHA-256
+
 ## Reproducibility expectations
 
 This pipeline does not yet fully vendor or mirror the upstream Ubuntu package repositories, so exact bit-for-bit rebuilds are still constrained by the moving cloud image and apt repository state.
@@ -169,8 +182,13 @@ The current reproducibility contract is:
 
 - profile manifests may carry exact apt selections when the operator needs to use `package=version` syntax
 - every build records the resolved package versions observed inside the booted guest in the emitted package inventory file
-- every build records the image checksum and build metadata in the sidecar contract
+- every build records the image checksum, build metadata, base-image checksum, and manifest/package inventory checksums in the sidecar contract
 - release promotion should retain the qcow2 image, its `*.or3.json` contract, the resolved manifest copy, and the versioned package inventory together
+
+Recorded provenance is not the same as full reproducibility:
+
+- it proves which base image, resolved manifest, and observed package inventory were promoted
+- it does not guarantee bit-for-bit rebuilds from third-party mirrors without additional artifact pinning or mirroring
 
 For production release candidates, treat the package inventory as the authoritative record of what was actually admitted into the guest image.
 

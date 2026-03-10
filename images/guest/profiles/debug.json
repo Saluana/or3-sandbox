@@ -4,7 +4,7 @@
   "description": "Compatibility and troubleshooting profile with SSH and elevated convenience tools.",
   "control": {
     "mode": "ssh-compat",
-    "protocol_version": "1",
+    "protocol_version": "2",
     "supported_transports": [
       "virtio-serial",
       "ssh"

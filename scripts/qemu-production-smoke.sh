@@ -28,6 +28,7 @@ sandboxctl() {
 require_cmd jq
 require_cmd mktemp
 require_cmd go
+require_cmd curl
 
 if [ -z "$CORE_IMAGE" ]; then
   echo "set CORE_IMAGE or SANDBOX_QEMU_BASE_IMAGE_PATH before running this smoke script" >&2
@@ -56,11 +57,12 @@ create_qemu_sandbox() {
   local image="$1"
   local profile="$2"
   local features="${3:-}"
+  local allow_tunnels="${4:-false}"
   local json
   if [ -n "$features" ]; then
-    json="$(sandboxctl create --image "$image" --profile "$profile" --features "$features" --cpu 1 --memory-mb 1024 --disk-mb 2048 --network internet-disabled --allow-tunnels=false --start=true)"
+    json="$(sandboxctl create --image "$image" --profile "$profile" --features "$features" --cpu 1 --memory-mb 1024 --disk-mb 2048 --network internet-disabled --allow-tunnels="$allow_tunnels" --start=true)"
   else
-    json="$(sandboxctl create --image "$image" --profile "$profile" --cpu 1 --memory-mb 1024 --disk-mb 2048 --network internet-disabled --allow-tunnels=false --start=true)"
+    json="$(sandboxctl create --image "$image" --profile "$profile" --cpu 1 --memory-mb 1024 --disk-mb 2048 --network internet-disabled --allow-tunnels="$allow_tunnels" --start=true)"
   fi
   local sandbox_id
   sandbox_id="$(printf '%s' "$json" | jq -r '.id')"
@@ -113,11 +115,44 @@ assert_container_profile() {
   sandboxctl exec "$sandbox_id" sh -lc 'command -v docker >/dev/null 2>&1 && getent group docker >/dev/null 2>&1'
 }
 
+assert_core_tunnel_bridge() {
+  local sandbox_id="$1"
+  sandboxctl exec "$sandbox_id" sh -lc '
+set -eu
+command -v systemd-socket-activate >/dev/null 2>&1
+nohup systemd-socket-activate -l 127.0.0.1:8080 /bin/sh -lc '"'"'printf "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"'"'"' >/tmp/or3-smoke-http.log 2>&1 &
+'
+  local tunnel_json tunnel_id endpoint token
+  tunnel_json="$(sandboxctl tunnel-create --port 8080 "$sandbox_id")"
+  tunnel_id="$(printf '%s' "$tunnel_json" | jq -r '.id')"
+  endpoint="$(printf '%s' "$tunnel_json" | jq -r '.endpoint')"
+  token="$(printf '%s' "$tunnel_json" | jq -r '.access_token')"
+  if [ -z "$tunnel_id" ] || [ "$tunnel_id" = "null" ] || [ -z "$endpoint" ] || [ "$endpoint" = "null" ]; then
+    echo "failed to parse tunnel metadata" >&2
+    printf '%s\n' "$tunnel_json" >&2
+    exit 1
+  fi
+  trap 'sandboxctl tunnel-revoke "$tunnel_id" >/dev/null 2>&1 || true' RETURN
+  local response
+  for _ in $(seq 1 20); do
+    if response="$(curl -fsS -H "X-Tunnel-Token: $token" "$endpoint/" 2>/dev/null)"; then
+      break
+    fi
+    sleep 1
+  done
+  if [ "${response:-}" != "ok" ]; then
+    echo "core tunnel bridge response mismatch: ${response:-<empty>}" >&2
+    exit 1
+  fi
+  sandboxctl tunnel-revoke "$tunnel_id" >/dev/null
+  trap - RETURN
+}
+
 log 'running production doctor'
 sandboxctl doctor --production-qemu >/dev/null
 
 log 'creating core sandbox'
-core_id="$(create_qemu_sandbox "$CORE_IMAGE" core)"
+core_id="$(create_qemu_sandbox "$CORE_IMAGE" core "" true)"
 wait_for_status "$core_id" running
 
 printf 'uploaded-from-host\n' > "$WORK_DIR/input.txt"
@@ -130,6 +165,9 @@ if [ "$(cat "$WORK_DIR/output.txt")" != 'uploaded-from-host' ]; then
   exit 1
 fi
 assert_core_substrate "$core_id"
+
+log 'verifying core local tunnel bridge'
+assert_core_tunnel_bridge "$core_id"
 
 log 'verifying suspend/resume'
 sandboxctl suspend "$core_id" >/dev/null

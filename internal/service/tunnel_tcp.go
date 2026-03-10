@@ -14,6 +14,10 @@ import (
 	"or3-sandbox/internal/model"
 )
 
+type sandboxLocalConnRuntime interface {
+	OpenSandboxLocalConn(ctx context.Context, sandbox model.Sandbox, targetPort int) (net.Conn, error)
+}
+
 const sandboxLocalBridgeReady = "__OR3_TUNNEL_BRIDGE_READY__"
 
 func (s *Service) OpenSandboxLocalConn(ctx context.Context, sandbox model.Sandbox, targetPort int) (net.Conn, error) {
@@ -22,6 +26,14 @@ func (s *Service) OpenSandboxLocalConn(ctx context.Context, sandbox model.Sandbo
 	}
 	if targetPort < 1 || targetPort > 65535 {
 		return nil, fmt.Errorf("target port must be between 1 and 65535")
+	}
+	if runtime, ok := s.runtime.(sandboxLocalConnRuntime); ok {
+		conn, err := runtime.OpenSandboxLocalConn(ctx, sandbox, targetPort)
+		if err != nil {
+			return nil, err
+		}
+		_ = s.touchSandboxActivity(ctx, sandbox)
+		return conn, nil
 	}
 	handle, err := s.runtime.AttachTTY(ctx, sandbox, model.TTYRequest{
 		Command: []string{"sh", "-lc", sandboxLocalTCPBridgeScript},
@@ -47,34 +59,6 @@ func (s *Service) OpenSandboxLocalConn(ctx context.Context, sandbox model.Sandbo
 		local:  tunnelBridgeAddr("daemon"),
 		remote: tunnelBridgeAddr(fmt.Sprintf("sandbox:%s:127.0.0.1:%d", sandbox.ID, targetPort)),
 	}, nil
-}
-
-func awaitSandboxLocalBridgeReady(reader *bufio.Reader) error {
-	type result struct {
-		line string
-		err  error
-	}
-	readyCh := make(chan result, 1)
-	go func() {
-		line, err := reader.ReadString('\n')
-		readyCh <- result{line: line, err: err}
-	}()
-	select {
-	case res := <-readyCh:
-		if res.err != nil {
-			return fmt.Errorf("timed out opening sandbox-local tunnel bridge")
-		}
-		line := strings.TrimSpace(res.line)
-		if line != sandboxLocalBridgeReady {
-			if line == "" {
-				return errors.New("sandbox-local tunnel bridge did not become ready")
-			}
-			return fmt.Errorf("sandbox-local tunnel bridge failed: %s", line)
-		}
-		return nil
-	case <-time.After(5 * time.Second):
-		return fmt.Errorf("timed out opening sandbox-local tunnel bridge")
-	}
 }
 
 type sandboxLocalConn struct {
@@ -186,6 +170,34 @@ func (a tunnelBridgeAddr) Network() string {
 
 func (a tunnelBridgeAddr) String() string {
 	return string(a)
+}
+
+func awaitSandboxLocalBridgeReady(reader *bufio.Reader) error {
+	type result struct {
+		line string
+		err  error
+	}
+	readyCh := make(chan result, 1)
+	go func() {
+		line, err := reader.ReadString('\n')
+		readyCh <- result{line: line, err: err}
+	}()
+	select {
+	case res := <-readyCh:
+		if res.err != nil {
+			return fmt.Errorf("timed out opening sandbox-local tunnel bridge")
+		}
+		line := strings.TrimSpace(res.line)
+		if line != sandboxLocalBridgeReady {
+			if line == "" {
+				return errors.New("sandbox-local tunnel bridge did not become ready")
+			}
+			return fmt.Errorf("sandbox-local tunnel bridge failed: %s", line)
+		}
+		return nil
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("timed out opening sandbox-local tunnel bridge")
+	}
 }
 
 const sandboxLocalTCPBridgeScript = `

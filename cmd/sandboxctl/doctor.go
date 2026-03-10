@@ -11,6 +11,7 @@ import (
 	goruntime "runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"or3-sandbox/internal/config"
@@ -23,7 +24,18 @@ var (
 	doctorHostOS       = goruntime.GOOS
 	doctorLookPath     = exec.LookPath
 	doctorStat         = os.Stat
+	doctorReadFile     = os.ReadFile
+	doctorStatFS       = statDoctorFS
 )
+
+const (
+	doctorWarnFreeBytes = 5 << 30
+	doctorFailFreeBytes = 1 << 30
+)
+
+type doctorFSInfo struct {
+	AvailableBytes uint64
+}
 
 type doctorCheck struct {
 	Level  string `json:"level"`
@@ -119,6 +131,7 @@ func runProductionQEMUDoctor() doctorSummary {
 		} else {
 			add("pass", "kvm", "/dev/kvm is available")
 		}
+		checkDoctorCgroupPosture(add)
 	}
 	for _, root := range []string{cfg.StorageRoot, cfg.SnapshotRoot, filepath.Dir(cfg.DatabasePath)} {
 		if root == "" {
@@ -135,6 +148,16 @@ func runProductionQEMUDoctor() doctorSummary {
 		}
 		add("pass", "path", fmt.Sprintf("path %q is accessible", root))
 	}
+	for _, target := range []struct {
+		name string
+		path string
+	}{
+		{name: "database", path: filepath.Dir(cfg.DatabasePath)},
+		{name: "storage", path: cfg.StorageRoot},
+		{name: "snapshot", path: cfg.SnapshotRoot},
+	} {
+		checkDoctorFreeSpace(add, target.name, target.path)
+	}
 	for _, secret := range cfg.AuthJWTSecretPaths {
 		if info, err := doctorStat(secret); err != nil {
 			add("fail", "secret", fmt.Sprintf("jwt secret %q is not readable: %v", secret, err))
@@ -143,6 +166,17 @@ func runProductionQEMUDoctor() doctorSummary {
 		} else {
 			add("pass", "secret", fmt.Sprintf("jwt secret %q is readable with restrictive permissions", secret))
 		}
+	}
+	checkDoctorTunnelSigningKey(add, cfg)
+	for _, root := range []struct {
+		name string
+		path string
+	}{
+		{name: "storage-root", path: cfg.StorageRoot},
+		{name: "snapshot-root", path: cfg.SnapshotRoot},
+		{name: "database-root", path: filepath.Dir(cfg.DatabasePath)},
+	} {
+		checkDoctorDirectoryPosture(add, root.name, root.path)
 	}
 	allowed := cfg.EffectiveQEMUAllowedBaseImagePaths()
 	sort.Strings(allowed)
@@ -187,6 +221,8 @@ func doctorConfigFromEnv() config.Config {
 		DatabasePath:               env("SANDBOX_DB_PATH", ""),
 		StorageRoot:                env("SANDBOX_STORAGE_ROOT", ""),
 		SnapshotRoot:               env("SANDBOX_SNAPSHOT_ROOT", ""),
+		TunnelSigningKey:           env("SANDBOX_TUNNEL_SIGNING_KEY", ""),
+		TunnelSigningKeyPath:       env("SANDBOX_TUNNEL_SIGNING_KEY_PATH", ""),
 		QEMUBinary:                 env("SANDBOX_QEMU_BINARY", ""),
 		QEMUBaseImagePath:          env("SANDBOX_QEMU_BASE_IMAGE_PATH", ""),
 		QEMUAllowedBaseImagePaths:  splitCommaSeparated(env("SANDBOX_QEMU_ALLOWED_BASE_IMAGE_PATHS", "")),
@@ -194,6 +230,126 @@ func doctorConfigFromEnv() config.Config {
 		QEMUAllowDangerousProfiles: strings.EqualFold(env("SANDBOX_QEMU_ALLOW_DANGEROUS_PROFILES", "false"), "true"),
 		QEMUAllowSSHCompat:         strings.EqualFold(env("SANDBOX_QEMU_ALLOW_SSH_COMPAT", "false"), "true"),
 	}
+}
+
+func statDoctorFS(path string) (doctorFSInfo, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return doctorFSInfo{}, err
+	}
+	return doctorFSInfo{AvailableBytes: stat.Bavail * uint64(stat.Bsize)}, nil
+}
+
+func checkDoctorFreeSpace(add func(string, string, string), name, path string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	info, err := doctorStatFS(path)
+	if err != nil {
+		add("warn", "free-space", fmt.Sprintf("%s filesystem %q could not be measured: %v", name, path, err))
+		return
+	}
+	switch {
+	case info.AvailableBytes < doctorFailFreeBytes:
+		add("fail", "free-space", fmt.Sprintf("%s filesystem %q has only %s free; keep at least %s free for supported production operation", name, path, humanBytes(info.AvailableBytes), humanBytes(doctorFailFreeBytes)))
+	case info.AvailableBytes < doctorWarnFreeBytes:
+		add("warn", "free-space", fmt.Sprintf("%s filesystem %q has %s free; production operators should keep at least %s free", name, path, humanBytes(info.AvailableBytes), humanBytes(doctorWarnFreeBytes)))
+	default:
+		add("pass", "free-space", fmt.Sprintf("%s filesystem %q has %s free", name, path, humanBytes(info.AvailableBytes)))
+	}
+}
+
+func checkDoctorTunnelSigningKey(add func(string, string, string), cfg config.Config) {
+	switch {
+	case strings.TrimSpace(cfg.TunnelSigningKeyPath) != "":
+		info, err := doctorStat(cfg.TunnelSigningKeyPath)
+		if err != nil {
+			add("fail", "tunnel-signing-key", fmt.Sprintf("tunnel signing key path %q is not readable: %v", cfg.TunnelSigningKeyPath, err))
+			return
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			add("warn", "tunnel-signing-key", fmt.Sprintf("tunnel signing key %q permissions are broader than 0600", cfg.TunnelSigningKeyPath))
+		} else {
+			add("pass", "tunnel-signing-key", fmt.Sprintf("tunnel signing key %q is readable with restrictive permissions", cfg.TunnelSigningKeyPath))
+		}
+		checkDoctorDirectoryPosture(add, "tunnel-signing-key-parent", filepath.Dir(cfg.TunnelSigningKeyPath))
+	case strings.TrimSpace(cfg.TunnelSigningKey) != "":
+		add("warn", "tunnel-signing-key", "inline tunnel signing key is configured; prefer SANDBOX_TUNNEL_SIGNING_KEY_PATH for read-only production posture")
+	default:
+		add("warn", "tunnel-signing-key", "no tunnel signing key is configured; signed tunnel URLs and browser bootstrap cookies will not survive process restarts")
+	}
+}
+
+func checkDoctorDirectoryPosture(add func(string, string, string), name, path string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	info, err := doctorStat(path)
+	if err != nil {
+		add("warn", "path-posture", fmt.Sprintf("%s %q is not accessible for posture checks: %v", name, path, err))
+		return
+	}
+	if !info.IsDir() {
+		add("warn", "path-posture", fmt.Sprintf("%s %q is not a directory", name, path))
+		return
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		add("warn", "path-posture", fmt.Sprintf("%s %q is group/world writable; tighten parent-directory permissions", name, path))
+		return
+	}
+	add("pass", "path-posture", fmt.Sprintf("%s %q is not group/world writable", name, path))
+}
+
+func checkDoctorCgroupPosture(add func(string, string, string)) {
+	root := "/sys/fs/cgroup"
+	if _, err := doctorStat(root); err != nil {
+		add("warn", "cgroup", fmt.Sprintf("%s is not accessible: %v", root, err))
+		return
+	}
+	data, err := doctorReadFile(filepath.Join(root, "cgroup.controllers"))
+	if err != nil {
+		add("warn", "cgroup", fmt.Sprintf("cgroup v2 controller list is not readable: %v", err))
+		return
+	}
+	controllers := strings.Fields(string(data))
+	if len(controllers) == 0 {
+		add("warn", "cgroup", "cgroup v2 controller list is empty")
+		return
+	}
+	required := []string{"cpu", "memory", "pids"}
+	missing := make([]string, 0, len(required))
+	for _, controller := range required {
+		if !containsString(controllers, controller) {
+			missing = append(missing, controller)
+		}
+	}
+	if len(missing) > 0 {
+		add("warn", "cgroup", fmt.Sprintf("cgroup v2 is present but missing controllers: %s", strings.Join(missing, ", ")))
+		return
+	}
+	add("pass", "cgroup", fmt.Sprintf("cgroup v2 controllers available: %s", strings.Join(required, ", ")))
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), target) {
+			return true
+		}
+	}
+	return false
+}
+
+func humanBytes(value uint64) string {
+	const unit = 1024
+	if value < unit {
+		return fmt.Sprintf("%d B", value)
+	}
+	div, exp := uint64(unit), 0
+	for n := value / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(value)/float64(div), "KMGTPE"[exp])
 }
 
 func splitCommaSeparated(raw string) []string {

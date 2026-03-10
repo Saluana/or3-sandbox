@@ -3,7 +3,7 @@
   "description": "Minimal production profile with agent-based control and no SSH or inner Docker.",
   "control": {
     "mode": "agent",
-    "protocol_version": "1",
+    "protocol_version": "2",
     "supported_transports": [
       "virtio-serial"
     ]
@@ -12,7 +12,8 @@
   "capabilities": [
     "exec",
     "files",
-    "pty"
+    "pty",
+    "tcp_bridge"
   ],
   "allowed_features": [],
   "packages": [
