@@ -119,12 +119,12 @@ When a sandbox is created, the service layer does roughly this:
 
 1. apply default values
 2. validate the request
-3. check tenant quota
+3. check tenant quota and local admission pressure
 4. create workspace directories
 5. write the sandbox record to SQLite
 6. call `runtime.Create(...)`
 7. optionally call `runtime.Start(...)`
-8. update state and storage usage
+8. update state, storage usage, and audit-visible outcomes
 
 That gives the project one central place to decide what "create" really means.
 
@@ -163,6 +163,11 @@ Docker CLI terms. This boundary means:
 
 The production policy gate is backed by runtime class, not by ad hoc backend
 name checks. `SANDBOX_MODE=production` fails closed to VM-backed classes only.
+
+In production terms, one sandbox maps to one VM-backed workload boundary. Tenant
+isolation then comes from control-plane policy — quotas, admission checks,
+audit visibility, and recovery rules — rather than by treating one guest VM as
+a general host for many tenant sandboxes.
 
 ## 6. Docker runtime
 

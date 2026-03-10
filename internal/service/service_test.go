@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1025,6 +1026,226 @@ func TestCreateSandboxRejectsDangerousDockerProfileByDefault(t *testing.T) {
 	}
 }
 
+func TestCreateSandboxAuditsAllowedDangerousProfileOverride(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "docker")
+	svc.cfg.AllowedGuestProfiles = []model.GuestProfile{model.GuestProfileCore, model.GuestProfileContainer}
+	svc.cfg.DangerousGuestProfiles = []model.GuestProfile{model.GuestProfileContainer}
+	svc.cfg.AllowDangerousProfiles = true
+
+	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "or3-sandbox/base-container:latest",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	}); err != nil {
+		t.Fatalf("expected dangerous profile create to succeed when explicitly allowed, got %v", err)
+	}
+	events, err := store.ListAuditEvents(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Action == "policy.profile.override" && event.Outcome == "ok" && strings.Contains(event.Message, "dangerous_profile_explicitly_allowed") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected dangerous profile override audit event, got %+v", events)
+	}
+}
+
+func TestCreateSandboxAdmissionRejectsNodeRunningPressure(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	runtime.startState = model.RuntimeState{RuntimeID: "rt-running", Status: model.SandboxStatusRunning, Running: true}
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.AdmissionMaxNodeRunning = 1
+
+	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	}); err != nil {
+		t.Fatalf("create first sandbox: %v", err)
+	}
+
+	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	}); err == nil || !strings.Contains(err.Error(), "node running admission limit reached") {
+		t.Fatalf("expected node running admission denial, got %v", err)
+	}
+	events, err := store.ListAuditEvents(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	if len(events) == 0 || events[len(events)-1].Action != "admission.create" {
+		t.Fatalf("expected admission.create audit event, got %+v", events)
+	}
+}
+
+func TestStartSandboxAdmissionRejectsBurstyTenantWhenConfigured(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	runtime.startState = model.RuntimeState{RuntimeID: "rt-start", Status: model.SandboxStatusRunning, Running: true}
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.AdmissionMaxTenantStarts = 1
+
+	first, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create first sandbox: %v", err)
+	}
+	second, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create second sandbox: %v", err)
+	}
+	first.Status = model.SandboxStatusStarting
+	first.RuntimeStatus = string(model.SandboxStatusStarting)
+	first.UpdatedAt = time.Now().UTC()
+	if err := store.UpdateSandboxState(ctx, first); err != nil {
+		t.Fatalf("update first sandbox state: %v", err)
+	}
+
+	if _, err := svc.StartSandbox(ctx, tenantA.ID, second.ID, quota); err == nil || !strings.Contains(err.Error(), "tenant concurrent start limit reached") {
+		t.Fatalf("expected tenant start admission denial, got %v", err)
+	}
+	metrics, err := svc.MetricsReport(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("metrics report: %v", err)
+	}
+	if !strings.Contains(metrics, `or3_sandbox_admission_denials_total{action="admission.start"} 1`) {
+		t.Fatalf("expected admission denial metric, got %s", metrics)
+	}
+}
+
+func TestCreateSandboxAdmissionIsAtomicUnderConcurrency(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	startBlock := make(chan struct{})
+	startEntered := make(chan struct{}, 1)
+	runtime.startBlock = startBlock
+	runtime.startEntered = startEntered
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.AdmissionMaxNodeRunning = 1
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+			BaseImageRef:  "guest-base.qcow2",
+			CPULimit:      model.CPUCores(1),
+			MemoryLimitMB: 512,
+			PIDsLimit:     128,
+			DiskLimitMB:   512,
+			NetworkMode:   model.NetworkModeInternetDisabled,
+			AllowTunnels:  boolPtr(false),
+			Start:         true,
+		})
+		result <- err
+	}()
+
+	select {
+	case <-startEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first sandbox start reservation")
+	}
+
+	_, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "node running admission limit reached") {
+		t.Fatalf("expected concurrent create admission denial, got %v", err)
+	}
+	close(startBlock)
+	if err := <-result; err != nil {
+		t.Fatalf("first create failed: %v", err)
+	}
+}
+
+func TestDeleteSandboxBypassesHeavyAdmissionLimit(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.AdmissionMaxTenantHeavyOps = 1
+
+	target, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("create target sandbox: %v", err)
+	}
+	busy, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+	})
+	if err != nil {
+		t.Fatalf("create busy sandbox: %v", err)
+	}
+	busy.Status = model.SandboxStatusCreating
+	busy.RuntimeStatus = string(model.SandboxStatusCreating)
+	busy.UpdatedAt = time.Now().UTC()
+	if err := store.UpdateSandboxState(ctx, busy); err != nil {
+		t.Fatalf("mark busy sandbox creating: %v", err)
+	}
+
+	if err := svc.DeleteSandbox(ctx, tenantA.ID, target.ID, false); err != nil {
+		t.Fatalf("delete should bypass heavy admission pressure: %v", err)
+	}
+}
+
 func TestDockerCuratedMetadataFixtureStaysInSync(t *testing.T) {
 	metadata, err := dockerimage.Resolve("or3-sandbox/base-container:latest")
 	if err != nil {
@@ -1895,10 +2116,15 @@ type stubRuntime struct {
 	createdSpec       model.SandboxSpec
 	restoredSnapshot  model.Snapshot
 
-	reads   map[string]string
-	writes  []stubWrite
-	deletes []string
-	mkdirs  []string
+	reads         map[string]string
+	writes        []stubWrite
+	deletes       []string
+	mkdirs        []string
+	createBlock   chan struct{}
+	createEntered chan struct{}
+	startBlock    chan struct{}
+	startEntered  chan struct{}
+	mu            sync.Mutex
 }
 
 type stubWrite struct {
@@ -1938,7 +2164,18 @@ func newRuntimeOnlyStub() *runtimeOnlyStub {
 }
 
 func (r *stubRuntime) Create(_ context.Context, spec model.SandboxSpec) (model.RuntimeState, error) {
+	if r.createEntered != nil {
+		select {
+		case r.createEntered <- struct{}{}:
+		default:
+		}
+	}
+	if r.createBlock != nil {
+		<-r.createBlock
+	}
+	r.mu.Lock()
 	r.createdSpec = spec
+	r.mu.Unlock()
 	if r.createErr != nil {
 		return model.RuntimeState{}, r.createErr
 	}
@@ -1946,6 +2183,15 @@ func (r *stubRuntime) Create(_ context.Context, spec model.SandboxSpec) (model.R
 }
 
 func (r *stubRuntime) Start(context.Context, model.Sandbox) (model.RuntimeState, error) {
+	if r.startEntered != nil {
+		select {
+		case r.startEntered <- struct{}{}:
+		default:
+		}
+	}
+	if r.startBlock != nil {
+		<-r.startBlock
+	}
 	if r.startErr != nil {
 		return model.RuntimeState{}, r.startErr
 	}

@@ -75,6 +75,13 @@ func (s *Service) enforceGuestProfilePolicy(ctx context.Context, tenantID, sandb
 		s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, auditKV("runtime", runtimeBackend)))
 		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
 	}
+	if s.cfg.IsDangerousGuestProfile(runtimeBackend, profile) && s.cfg.AllowsDangerousGuestProfiles(runtimeBackend) && action == "policy.create" {
+		s.recordAudit(ctx, tenantID, sandboxID, "policy.profile.override", sandboxID, "ok", auditDetail(
+			auditKV("runtime", runtimeBackend),
+			auditKV("profile", profile),
+			auditKV("reason", "dangerous_profile_explicitly_allowed"),
+		))
+	}
 	return nil
 }
 

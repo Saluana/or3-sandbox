@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -31,10 +32,11 @@ const (
 )
 
 type Service struct {
-	cfg     config.Config
-	store   *repository.Store
-	runtime model.RuntimeManager
-	log     *slog.Logger
+	cfg         config.Config
+	store       *repository.Store
+	runtime     model.RuntimeManager
+	log         *slog.Logger
+	admissionMu sync.Mutex
 }
 
 type workspaceFileRuntime interface {
@@ -95,10 +97,14 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		}
 	}
 	now := time.Now().UTC()
+	initialStatus := model.SandboxStatusCreating
+	if req.Start {
+		initialStatus = model.SandboxStatusStarting
+	}
 	sandbox := model.Sandbox{
 		ID:                       id,
 		TenantID:                 tenant.ID,
-		Status:                   model.SandboxStatusCreating,
+		Status:                   initialStatus,
 		RuntimeBackend:           s.cfg.RuntimeBackend,
 		RuntimeClass:             model.BackendToRuntimeClass(s.cfg.RuntimeBackend),
 		BaseImageRef:             req.BaseImageRef,
@@ -119,12 +125,12 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		WorkspaceRoot:            workspaceRoot,
 		CacheRoot:                cacheRoot,
 		RuntimeID:                id,
-		RuntimeStatus:            string(model.SandboxStatusCreating),
+		RuntimeStatus:            string(initialStatus),
 		CreatedAt:                now,
 		UpdatedAt:                now,
 		LastActiveAt:             now,
 	}
-	if err := s.store.CreateSandbox(ctx, sandbox); err != nil {
+	if err := s.reserveSandboxCreate(ctx, tenant.ID, sandbox, req); err != nil {
 		_ = os.RemoveAll(filepath.Join(s.cfg.StorageRoot, id))
 		return model.Sandbox{}, err
 	}
@@ -299,20 +305,21 @@ func (s *Service) RuntimeHealth(ctx context.Context, tenantID string) (model.Run
 }
 
 func (s *Service) StartSandbox(ctx context.Context, tenantID, sandboxID string, quota model.TenantQuota) (model.Sandbox, error) {
-	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
-	if err != nil {
-		return model.Sandbox{}, err
-	}
-	if err := s.enforceLifecyclePolicy(ctx, sandbox, "start"); err != nil {
-		return model.Sandbox{}, err
-	}
+	var err error
 	if err := s.checkRunningQuota(ctx, tenantID, quota); err != nil {
 		return model.Sandbox{}, err
 	}
-	return s.transitionSandbox(ctx, tenantID, sandboxID, "sandbox.start", model.SandboxStatusStarting, func(sandbox model.Sandbox) (model.RuntimeState, model.SandboxStatus, error) {
-		state, err := s.runtime.Start(ctx, sandbox)
-		return state, model.SandboxStatusRunning, err
-	}, model.SandboxStatusRunning)
+	sandbox, err := s.reserveLifecycleTransition(ctx, tenantID, sandboxID, "start", model.SandboxStatusStarting, admissionDelta{
+		nodeRunning:  1,
+		tenantStarts: 1,
+		tenantHeavy:  1,
+	})
+	if err != nil {
+		return model.Sandbox{}, err
+	}
+	return s.executeReservedTransition(ctx, tenantID, sandbox, "sandbox.start", model.SandboxStatusStarting, model.SandboxStatusRunning, func(sandbox model.Sandbox) (model.RuntimeState, error) {
+		return s.runtime.Start(ctx, sandbox)
+	})
 }
 
 func (s *Service) StopSandbox(ctx context.Context, tenantID, sandboxID string, force bool) (model.Sandbox, error) {
@@ -367,20 +374,21 @@ func (s *Service) SuspendSandbox(ctx context.Context, tenantID, sandboxID string
 }
 
 func (s *Service) ResumeSandbox(ctx context.Context, tenantID, sandboxID string, quota model.TenantQuota) (model.Sandbox, error) {
-	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
-	if err != nil {
-		return model.Sandbox{}, err
-	}
-	if err := s.enforceLifecyclePolicy(ctx, sandbox, "resume"); err != nil {
-		return model.Sandbox{}, err
-	}
+	var err error
 	if err := s.checkRunningQuota(ctx, tenantID, quota); err != nil {
 		return model.Sandbox{}, err
 	}
-	return s.transitionSandbox(ctx, tenantID, sandboxID, "sandbox.resume", model.SandboxStatusStarting, func(sandbox model.Sandbox) (model.RuntimeState, model.SandboxStatus, error) {
-		state, err := s.runtime.Resume(ctx, sandbox)
-		return state, model.SandboxStatusRunning, err
-	}, model.SandboxStatusRunning)
+	sandbox, err := s.reserveLifecycleTransition(ctx, tenantID, sandboxID, "resume", model.SandboxStatusStarting, admissionDelta{
+		nodeRunning:  1,
+		tenantStarts: 1,
+		tenantHeavy:  1,
+	})
+	if err != nil {
+		return model.Sandbox{}, err
+	}
+	return s.executeReservedTransition(ctx, tenantID, sandbox, "sandbox.resume", model.SandboxStatusStarting, model.SandboxStatusRunning, func(sandbox model.Sandbox) (model.RuntimeState, error) {
+		return s.runtime.Resume(ctx, sandbox)
+	})
 }
 
 func (s *Service) DeleteSandbox(ctx context.Context, tenantID, sandboxID string, preserveSnapshots bool) error {
@@ -566,11 +574,20 @@ func (s *Service) CreateTTYSession(ctx context.Context, tenantID, sandboxID stri
 		return model.Sandbox{}, model.TTYSession{}, nil, err
 	}
 	_ = s.touchSandboxActivity(ctx, sandbox)
+	s.recordAudit(ctx, tenantID, sandbox.ID, "sandbox.tty.attach", session.ID, "ok", auditDetail(
+		auditKV("command", session.Command),
+		auditKV("connected", session.Connected),
+		auditKV("last_resize", session.LastResize),
+	))
 	return sandbox, session, handle, nil
 }
 
 func (s *Service) CloseTTYSession(ctx context.Context, tenantID, sessionID string) error {
-	return s.store.CloseTTYSession(ctx, tenantID, sessionID)
+	if err := s.store.CloseTTYSession(ctx, tenantID, sessionID); err != nil {
+		return err
+	}
+	s.recordAudit(ctx, tenantID, "", "sandbox.tty.detach", sessionID, "ok", auditKV("session_id", sessionID))
+	return nil
 }
 
 func (s *Service) UpdateTTYResize(ctx context.Context, tenantID, sessionID string, rows, cols int) error {
@@ -853,6 +870,9 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 	if err != nil {
 		return model.Snapshot{}, err
 	}
+	if err := s.enforceAdmission(ctx, tenantID, sandbox.ID, "snapshot_create", admissionDelta{tenantHeavy: 1}); err != nil {
+		return model.Snapshot{}, err
+	}
 	if sandbox.RuntimeBackend == "qemu" && sandbox.Status != model.SandboxStatusStopped {
 		return model.Snapshot{}, fmt.Errorf("qemu snapshots require the sandbox to be stopped")
 	}
@@ -975,6 +995,9 @@ func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID stri
 	}
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, req.TargetSandboxID)
 	if err != nil {
+		return model.Sandbox{}, err
+	}
+	if err := s.enforceAdmission(ctx, tenantID, sandbox.ID, "snapshot_restore", admissionDelta{tenantHeavy: 1}); err != nil {
 		return model.Sandbox{}, err
 	}
 	if err := s.validateSnapshotCompatibility(snapshot, sandbox); err != nil {
@@ -1420,6 +1443,84 @@ func (s *Service) transitionSandbox(ctx context.Context, tenantID, sandboxID, au
 		return model.Sandbox{}, err
 	}
 	sandbox.Status = nextStatus
+	sandbox.RuntimeStatus = string(state.Status)
+	sandbox.UpdatedAt = time.Now().UTC()
+	sandbox.LastActiveAt = sandbox.UpdatedAt
+	if err := s.store.UpdateSandboxState(ctx, sandbox); err != nil {
+		return model.Sandbox{}, err
+	}
+	if err := s.store.UpdateRuntimeState(ctx, sandbox.ID, state); err != nil {
+		return model.Sandbox{}, err
+	}
+	if err := s.refreshStorage(ctx, sandbox); err != nil {
+		return model.Sandbox{}, err
+	}
+	s.recordAudit(ctx, tenantID, sandbox.ID, auditAction, sandbox.ID, "ok", auditDetail(
+		auditKV("transitional_status", transitional),
+		auditKV("result_status", finalStatus),
+	))
+	return s.store.GetSandbox(ctx, tenantID, sandbox.ID)
+}
+
+func (s *Service) reserveSandboxCreate(ctx context.Context, tenantID string, sandbox model.Sandbox, req model.CreateSandboxRequest) error {
+	createDelta := admissionDelta{nodeSandboxes: 1, tenantHeavy: 1}
+	if req.Start {
+		createDelta.nodeRunning = 1
+		createDelta.runningCPU = req.CPULimit
+		createDelta.runningMemory = req.MemoryLimitMB
+		createDelta.tenantStarts = 1
+	}
+	s.admissionMu.Lock()
+	defer s.admissionMu.Unlock()
+	if err := s.enforceAdmission(ctx, tenantID, sandbox.ID, "create", createDelta); err != nil {
+		return err
+	}
+	return s.store.CreateSandbox(ctx, sandbox)
+}
+
+func (s *Service) reserveLifecycleTransition(ctx context.Context, tenantID, sandboxID, action string, transitional model.SandboxStatus, delta admissionDelta) (model.Sandbox, error) {
+	s.admissionMu.Lock()
+	defer s.admissionMu.Unlock()
+	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
+	if err != nil {
+		return model.Sandbox{}, err
+	}
+	if delta.runningCPU == 0 {
+		delta.runningCPU = sandbox.CPULimit
+	}
+	if delta.runningMemory == 0 {
+		delta.runningMemory = sandbox.MemoryLimitMB
+	}
+	if err := s.enforceLifecyclePolicy(ctx, sandbox, action); err != nil {
+		return model.Sandbox{}, err
+	}
+	if err := s.enforceAdmission(ctx, tenantID, sandbox.ID, action, delta); err != nil {
+		return model.Sandbox{}, err
+	}
+	sandbox.Status = transitional
+	sandbox.RuntimeStatus = string(transitional)
+	sandbox.UpdatedAt = time.Now().UTC()
+	if err := s.store.UpdateSandboxState(ctx, sandbox); err != nil {
+		return model.Sandbox{}, err
+	}
+	return sandbox, nil
+}
+
+func (s *Service) executeReservedTransition(ctx context.Context, tenantID string, sandbox model.Sandbox, auditAction string, transitional, finalStatus model.SandboxStatus, action func(model.Sandbox) (model.RuntimeState, error)) (model.Sandbox, error) {
+	state, err := action(sandbox)
+	if err != nil {
+		sandbox.Status = model.SandboxStatusError
+		sandbox.RuntimeStatus = string(model.SandboxStatusError)
+		sandbox.LastRuntimeError = err.Error()
+		sandbox.UpdatedAt = time.Now().UTC()
+		_ = s.store.UpdateSandboxState(ctx, sandbox)
+		s.recordAudit(ctx, tenantID, sandbox.ID, auditAction, sandbox.ID, "error", auditDetail(
+			auditKV("transitional_status", transitional),
+			auditKV("requested_status", finalStatus),
+		), "error", err)
+		return model.Sandbox{}, err
+	}
+	sandbox.Status = finalStatus
 	sandbox.RuntimeStatus = string(state.Status)
 	sandbox.UpdatedAt = time.Now().UTC()
 	sandbox.LastActiveAt = sandbox.UpdatedAt

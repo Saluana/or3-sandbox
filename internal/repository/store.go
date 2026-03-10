@@ -561,11 +561,20 @@ func (s *Store) ListSnapshots(ctx context.Context, tenantID, sandboxID string) (
 }
 
 func (s *Store) AddAuditEvent(ctx context.Context, event model.AuditEvent) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO audit_events(audit_event_id, tenant_id, sandbox_id, action, resource_id, outcome, message, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, event.ID, event.TenantID, event.SandboxID, event.Action, event.ResourceID, event.Outcome, event.Message, event.CreatedAt.UTC().Format(time.RFC3339Nano))
-	return err
+	return s.WithTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO audit_events(audit_event_id, tenant_id, sandbox_id, action, resource_id, outcome, message, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, event.ID, event.TenantID, event.SandboxID, event.Action, event.ResourceID, event.Outcome, event.Message, event.CreatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO audit_event_counts(tenant_id, action, outcome, total)
+			VALUES (?, ?, ?, 1)
+			ON CONFLICT(tenant_id, action, outcome) DO UPDATE SET total = total + 1
+		`, event.TenantID, event.Action, event.Outcome)
+		return err
+	})
 }
 
 func (s *Store) ListRunningExecutions(ctx context.Context) ([]model.Execution, error) {
@@ -692,6 +701,31 @@ func (s *Store) ListAuditEvents(ctx context.Context, tenantID string) ([]model.A
 		events = append(events, event)
 	}
 	return events, rows.Err()
+}
+
+func (s *Store) AuditEventCounts(ctx context.Context, tenantID string) (map[string]map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT action, outcome, total
+		FROM audit_event_counts
+		WHERE tenant_id = ?
+	`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := make(map[string]map[string]int)
+	for rows.Next() {
+		var action, outcome string
+		var count int
+		if err := rows.Scan(&action, &outcome, &count); err != nil {
+			return nil, err
+		}
+		if counts[action] == nil {
+			counts[action] = make(map[string]int)
+		}
+		counts[action][outcome] = count
+	}
+	return counts, rows.Err()
 }
 
 func scanSandbox(scanner interface{ Scan(...any) error }) (model.Sandbox, error) {

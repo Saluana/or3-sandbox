@@ -233,6 +233,67 @@ func TestLoadParsesFractionalCPUDefaultsAndQuota(t *testing.T) {
 	}
 }
 
+func TestLoadParsesAdmissionControls(t *testing.T) {
+	t.Setenv("SANDBOX_RUNTIME", "docker")
+	t.Setenv("SANDBOX_TRUSTED_DOCKER_RUNTIME", "true")
+	t.Setenv("SANDBOX_TOKENS", "token-a=tenant-a")
+	t.Setenv("SANDBOX_ADMISSION_MAX_NODE_SANDBOXES", "12")
+	t.Setenv("SANDBOX_ADMISSION_MAX_NODE_RUNNING", "6")
+	t.Setenv("SANDBOX_ADMISSION_MAX_NODE_CPU", "3500m")
+	t.Setenv("SANDBOX_ADMISSION_MAX_NODE_MEMORY_MB", "8192")
+	t.Setenv("SANDBOX_ADMISSION_MIN_NODE_FREE_STORAGE_MB", "2048")
+	t.Setenv("SANDBOX_ADMISSION_MAX_TENANT_STARTS", "2")
+	t.Setenv("SANDBOX_ADMISSION_MAX_TENANT_HEAVY_OPS", "3")
+
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.AdmissionMaxNodeSandboxes != 12 || cfg.AdmissionMaxNodeRunning != 6 {
+		t.Fatalf("unexpected node sandbox admission controls: %+v", cfg)
+	}
+	if cfg.AdmissionMaxNodeCPU != model.MustParseCPUQuantity("3500m") {
+		t.Fatalf("unexpected admission node cpu %v", cfg.AdmissionMaxNodeCPU)
+	}
+	if cfg.AdmissionMaxNodeMemoryMB != 8192 || cfg.AdmissionMinNodeFreeStorageMB != 2048 {
+		t.Fatalf("unexpected memory/storage admission controls: %+v", cfg)
+	}
+	if cfg.AdmissionMaxTenantStarts != 2 || cfg.AdmissionMaxTenantHeavyOps != 3 {
+		t.Fatalf("unexpected tenant admission controls: %+v", cfg)
+	}
+}
+
+func TestValidateRejectsNegativeAdmissionControls(t *testing.T) {
+	cfg := Config{
+		ListenAddress:        ":8080",
+		DatabasePath:         "/tmp/test.db",
+		StorageRoot:          t.TempDir(),
+		SnapshotRoot:         t.TempDir(),
+		BaseImageRef:         "alpine:3.20",
+		RuntimeBackend:       "docker",
+		TrustedDockerRuntime: true,
+		AuthMode:             "static",
+		DefaultCPULimit:      model.CPUCores(1),
+		DefaultQuota: model.TenantQuota{
+			MaxCPUCores: model.CPUCores(4),
+		},
+		DefaultNetworkMode:            model.NetworkModeInternetEnabled,
+		OperatorHost:                  "http://sandbox.invalid",
+		Tenants:                       []TenantConfig{{ID: "tenant-a", Name: "Tenant A", Token: "token-a"}},
+		AdmissionMaxNodeSandboxes:     -1,
+		AdmissionMaxNodeRunning:       -1,
+		AdmissionMaxNodeCPU:           -1,
+		AdmissionMaxNodeMemoryMB:      -1,
+		AdmissionMinNodeFreeStorageMB: -1,
+		AdmissionMaxTenantStarts:      -1,
+		AdmissionMaxTenantHeavyOps:    -1,
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "admission max node sandboxes") || !strings.Contains(err.Error(), "admission max tenant heavy ops") {
+		t.Fatalf("expected admission validation errors, got %v", err)
+	}
+}
+
 func TestValidateRuntimeConfigUsesGenericGuestProfileDefaults(t *testing.T) {
 	cfg := Config{
 		RuntimeBackend:        "qemu",

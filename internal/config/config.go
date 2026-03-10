@@ -43,6 +43,13 @@ type Config struct {
 	PolicyAllowPublicTunnels      bool
 	PolicyMaxSandboxLifetime      time.Duration
 	PolicyMaxIdleTimeout          time.Duration
+	AdmissionMaxNodeSandboxes     int
+	AdmissionMaxNodeRunning       int
+	AdmissionMaxNodeCPU           model.CPUQuantity
+	AdmissionMaxNodeMemoryMB      int
+	AdmissionMinNodeFreeStorageMB int
+	AdmissionMaxTenantStarts      int
+	AdmissionMaxTenantHeavyOps    int
 	StorageWarningFileCount       int
 	SnapshotMaxBytes              int64
 	SnapshotMaxFiles              int
@@ -111,6 +118,14 @@ func Load(args []string) (Config, error) {
 	fs.BoolVar(&policyAllowPublicTunnels, "policy-allow-public-tunnels", policyAllowPublicTunnels, "allow public tunnels")
 	fs.DurationVar(&cfg.PolicyMaxSandboxLifetime, "policy-max-sandbox-lifetime", envDuration("SANDBOX_POLICY_MAX_SANDBOX_LIFETIME", 0), "maximum sandbox lifetime before policy denial; 0 disables")
 	fs.DurationVar(&cfg.PolicyMaxIdleTimeout, "policy-max-idle-timeout", envDuration("SANDBOX_POLICY_MAX_IDLE_TIMEOUT", 0), "maximum sandbox idle time before policy denial; 0 disables")
+	fs.IntVar(&cfg.AdmissionMaxNodeSandboxes, "admission-max-node-sandboxes", envInt("SANDBOX_ADMISSION_MAX_NODE_SANDBOXES", 0), "maximum non-deleted sandboxes this node should admit before denying create requests; 0 disables")
+	fs.IntVar(&cfg.AdmissionMaxNodeRunning, "admission-max-node-running", envInt("SANDBOX_ADMISSION_MAX_NODE_RUNNING", 0), "maximum active sandboxes this node should admit before denying start-like requests; 0 disables")
+	admissionMaxNodeCPU := env("SANDBOX_ADMISSION_MAX_NODE_CPU", "")
+	fs.StringVar(&admissionMaxNodeCPU, "admission-max-node-cpu", admissionMaxNodeCPU, "maximum active CPU to admit on this node, for example 8 or 8000m; empty disables")
+	fs.IntVar(&cfg.AdmissionMaxNodeMemoryMB, "admission-max-node-memory-mb", envInt("SANDBOX_ADMISSION_MAX_NODE_MEMORY_MB", 0), "maximum active guest memory this node should admit before denying start-like requests; 0 disables")
+	fs.IntVar(&cfg.AdmissionMinNodeFreeStorageMB, "admission-min-node-free-storage-mb", envInt("SANDBOX_ADMISSION_MIN_NODE_FREE_STORAGE_MB", 0), "minimum free bytes required on storage and snapshot volumes before admitting heavy operations; 0 disables")
+	fs.IntVar(&cfg.AdmissionMaxTenantStarts, "admission-max-tenant-starts", envInt("SANDBOX_ADMISSION_MAX_TENANT_STARTS", 0), "maximum concurrent create/start/boot operations per tenant; 0 disables")
+	fs.IntVar(&cfg.AdmissionMaxTenantHeavyOps, "admission-max-tenant-heavy-ops", envInt("SANDBOX_ADMISSION_MAX_TENANT_HEAVY_OPS", 0), "maximum concurrent heavy lifecycle operations per tenant; 0 disables")
 	fs.IntVar(&cfg.StorageWarningFileCount, "storage-warning-file-count", envInt("SANDBOX_STORAGE_WARNING_FILE_COUNT", 10000), "warn when a sandbox exceeds this many stored files across workspace, cache, scratch, and snapshots")
 	snapshotMaxMB := envInt("SANDBOX_SNAPSHOT_MAX_MB", 1024)
 	fs.IntVar(&snapshotMaxMB, "snapshot-max-mb", snapshotMaxMB, "maximum extracted snapshot bundle size in megabytes")
@@ -172,6 +187,12 @@ func Load(args []string) (Config, error) {
 	defaultCPULimit, err := model.ParseCPUQuantity(defaultCPU)
 	if err != nil {
 		return Config{}, fmt.Errorf("parse default cpu: %w", err)
+	}
+	if strings.TrimSpace(admissionMaxNodeCPU) != "" {
+		cfg.AdmissionMaxNodeCPU, err = model.ParseCPUQuantity(admissionMaxNodeCPU)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse admission max node cpu: %w", err)
+		}
 	}
 	cfg.DefaultCPULimit = defaultCPULimit
 	maxCPUCores, err := model.ParseCPUQuantity(env("SANDBOX_QUOTA_MAX_CPU", "16"))
@@ -250,6 +271,27 @@ func (c Config) Validate() error {
 	}
 	if c.PolicyMaxIdleTimeout < 0 {
 		problems = append(problems, "policy max idle timeout must be zero or positive")
+	}
+	if c.AdmissionMaxNodeSandboxes < 0 {
+		problems = append(problems, "admission max node sandboxes must be zero or positive")
+	}
+	if c.AdmissionMaxNodeRunning < 0 {
+		problems = append(problems, "admission max node running must be zero or positive")
+	}
+	if c.AdmissionMaxNodeCPU < 0 {
+		problems = append(problems, "admission max node cpu must be zero or positive")
+	}
+	if c.AdmissionMaxNodeMemoryMB < 0 {
+		problems = append(problems, "admission max node memory must be zero or positive")
+	}
+	if c.AdmissionMinNodeFreeStorageMB < 0 {
+		problems = append(problems, "admission min node free storage must be zero or positive")
+	}
+	if c.AdmissionMaxTenantStarts < 0 {
+		problems = append(problems, "admission max tenant starts must be zero or positive")
+	}
+	if c.AdmissionMaxTenantHeavyOps < 0 {
+		problems = append(problems, "admission max tenant heavy ops must be zero or positive")
 	}
 	if c.StorageWarningFileCount < 0 {
 		problems = append(problems, "storage warning file count must be zero or positive")

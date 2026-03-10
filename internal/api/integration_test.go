@@ -261,6 +261,65 @@ func TestCreateSandboxRejectsFractionalCPUOnQEMU(t *testing.T) {
 	}, http.StatusBadRequest)
 }
 
+func TestStartAdmissionDenialAppearsInMetrics(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	h.cfg.AdmissionMaxTenantStarts = 1
+	h.service = service.New(h.cfg, h.store, h.stubRuntime)
+	h.server.Config.Handler = auth.New(h.store, h.cfg).Wrap(api.New(logging.New(), h.service, h.cfg))
+
+	first := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	second := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	first.Status = model.SandboxStatusStarting
+	first.RuntimeStatus = string(model.SandboxStatusStarting)
+	first.UpdatedAt = time.Now().UTC()
+	if err := h.store.UpdateSandboxState(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+
+	h.expectStatus(t, "token-a", http.MethodPost, "/v1/sandboxes/"+second.ID+"/start", map[string]any{}, http.StatusTooManyRequests)
+
+	request, err := http.NewRequest(http.MethodGet, h.server.URL+"/metrics", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer token-a")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected metrics status %d: %s", response.StatusCode, string(data))
+	}
+	if !strings.Contains(string(data), `or3_sandbox_admission_denials_total{action="admission.start"} 1`) {
+		t.Fatalf("expected admission denial metric, got %s", string(data))
+	}
+}
+
 func TestCreateSandboxRejectsDockerProfileMismatch(t *testing.T) {
 	h := newHarness(t)
 	defer h.close()

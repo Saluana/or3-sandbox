@@ -94,19 +94,19 @@ Design: [storage-network-snapshot-hardening/design.md](storage-network-snapshot-
 
 Design: [production-ops-hardening/design.md](production-ops-hardening/design.md)
 
-- [ ] Update `docs/operations/production-deployment.md` and `docs/architecture.md` to state that the production isolation unit is one sandbox per VM-backed workload.
-- [ ] Ensure runtime docs do not imply multi-sandbox sharing of one VM as a normal production shape.
-- [ ] Align quota and restart documentation with sandbox-level isolation and tenant-level limits.
-- [ ] Add deterministic admission checks in `internal/service/service.go` for create/start operations based on current usage and pressure.
-- [ ] Extend existing capacity or usage calculations to include node-pressure signals that matter for this repo.
-- [ ] Add small per-tenant concurrent-start or heavy-operation limits in config and service policy if current quotas are insufficient.
-- [ ] Add service tests proving a bursty tenant cannot monopolize starts when limits are configured.
-- [ ] Extend `scripts/qemu-recovery-drill.sh` to cover daemon restart, orphan cleanup, tunnel recovery, and partial snapshot failures.
-- [ ] Extend `scripts/qemu-resource-abuse.sh` with startup-spam and fairness scenarios in addition to OOM, PID, disk, and stdout pressure.
-- [ ] Update release guidance so runtime-affecting changes run the bounded abuse and recovery scripts before production signoff.
-- [ ] Review `internal/service/observability.go` and add only the counters needed for lifecycle failures, storage pressure, OOM, PID exhaustion, snapshot operations, exec/TTY attach, and tunnel exposure changes.
-- [ ] Extend `internal/service/audit.go` so dangerous profile use, elevated capabilities, and admission denials are easy to query.
-- [ ] Update operator docs with rebuild cadence, digest pinning expectations, and approval workflow for curated images.
-- [ ] Update `docs/operations/verification.md`, `docs/operations/daemon-restart-recovery.md`, `docs/operations/host-disk-full.md`, and `docs/operations/incidents.md` with the new recovery and admission behavior.
-- [ ] Ensure the runbooks point to actual metrics, health endpoints, and audit evidence already exposed by the repo.
-- [ ] Document what remains manual versus automatic during host or daemon recovery.
+- [x] Update `docs/operations/production-deployment.md` and `docs/architecture.md` to state that the production isolation unit is one sandbox per VM-backed workload.
+- [x] Ensure runtime docs do not imply multi-sandbox sharing of one VM as a normal production shape.
+- [x] Align quota and restart documentation with sandbox-level isolation and tenant-level limits.
+- [x] Add deterministic admission checks in `internal/service/service.go` for create/start operations based on current usage and pressure.
+- [x] Extend existing capacity or usage calculations to include node-pressure signals that matter for this repo.
+- [x] Add small per-tenant concurrent-start or heavy-operation limits in config and service policy if current quotas are insufficient.
+- [x] Add service tests proving a bursty tenant cannot monopolize starts when limits are configured.
+- [x] Extend `scripts/qemu-recovery-drill.sh` to cover daemon restart, orphan cleanup, tunnel recovery, and partial snapshot failures.
+- [x] Extend `scripts/qemu-resource-abuse.sh` with startup-spam and fairness scenarios in addition to OOM, PID, disk, and stdout pressure.
+- [x] Update release guidance so runtime-affecting changes run the bounded abuse and recovery scripts before production signoff.
+- [x] Review `internal/service/observability.go` and add only the counters needed for lifecycle failures, storage pressure, OOM, PID exhaustion, snapshot operations, exec/TTY attach, and tunnel exposure changes.
+- [x] Extend `internal/service/audit.go` so dangerous profile use, elevated capabilities, and admission denials are easy to query.
+- [x] Update operator docs with rebuild cadence, digest pinning expectations, and approval workflow for curated images.
+- [x] Update `docs/operations/verification.md`, `docs/operations/daemon-restart-recovery.md`, `docs/operations/host-disk-full.md`, and `docs/operations/incidents.md` with the new recovery and admission behavior.
+- [x] Ensure the runbooks point to actual metrics, health endpoints, and audit evidence already exposed by the repo.
+- [x] Document what remains manual versus automatic during host or daemon recovery.

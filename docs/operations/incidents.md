@@ -11,6 +11,7 @@ For any incident, collect these first:
 3. `curl -fsS -H "Authorization: Bearer $SANDBOX_TOKEN" "$SANDBOX_API/v1/runtime/capacity"`
 4. `curl -fsS -H "Authorization: Bearer $SANDBOX_TOKEN" "$SANDBOX_API/metrics"`
 5. recent daemon logs filtered by `component=daemon`, `component=auth`, `component=api`, and `component=service`
+6. recent audit counters and denial lines for `admission.*`, `snapshot.*`, `sandbox.exec*`, `sandbox.tty.*`, and `tunnel.*`
 
 Useful database checks:
 
@@ -45,7 +46,7 @@ Do not log or paste raw bearer tokens into tickets or shells.
 Inspect:
 
 - `/v1/runtime/capacity` alerts and storage pressure ratios
-- `/metrics` values such as `or3_sandbox_actual_storage_bytes` and `or3_sandbox_storage_pressure_ratio`
+- `/metrics` values such as `or3_sandbox_actual_storage_bytes`, `or3_sandbox_storage_pressure_ratio`, `or3_sandbox_admission_denials_total`, and `or3_sandbox_snapshot_operations_total`
 - free disk space on the database, storage, and snapshot volumes
 - the snapshot root for missing or partial artifacts
 
@@ -65,6 +66,7 @@ Inspect:
 3. Run `runtime-health` immediately after restart.
 4. Check for `sandbox.exec.reconcile`, `snapshot.reconcile`, and `sandbox.reconcile` audit events.
 5. Verify that running or suspended sandboxes were reconciled conservatively instead of silently deleted.
+6. Confirm whether recovery was automatic or manual from the audit trail and drill notes before reopening traffic.
 
 If the daemon cannot restart cleanly, restore from backup and follow the restore guide.
 

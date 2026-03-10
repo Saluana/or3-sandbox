@@ -7,6 +7,8 @@ DISK_FILL_MB="${DISK_FILL_MB:-64}"
 FILE_COUNT="${FILE_COUNT:-2000}"
 PID_FANOUT="${PID_FANOUT:-32}"
 STDOUT_LINES="${STDOUT_LINES:-4000}"
+START_SPAM_COUNT="${START_SPAM_COUNT:-4}"
+EXPECT_ADMISSION_LIMITS="${EXPECT_ADMISSION_LIMITS:-0}"
 WORK_DIR="$(mktemp -d)"
 SANDBOX_ID=""
 trap 'if [ -n "$SANDBOX_ID" ]; then sandboxctl delete "$SANDBOX_ID" >/dev/null 2>&1 || true; fi; rm -rf "$WORK_DIR"' EXIT
@@ -76,9 +78,34 @@ sandboxctl exec "$SANDBOX_ID" sh -lc "dd if=/dev/zero of=/workspace/fill.bin bs=
 log 'running bounded pid fan-out drill'
 sandboxctl exec "$SANDBOX_ID" sh -lc "children=''; i=0; while [ \"\$i\" -lt $PID_FANOUT ]; do sleep 2 & children=\"\$children \$!\"; i=\$((i+1)); done; wait \$children"
 
+log 'running startup-spam fairness drill'
+spam_ids=()
+denied_starts=0
+for i in $(seq 1 "$START_SPAM_COUNT"); do
+  spam_json="$(sandboxctl create --image "$CORE_IMAGE" --profile core --cpu 1 --memory-mb 512 --disk-mb 1024 --network internet-disabled --allow-tunnels=false --start=false)"
+  spam_id="$(printf '%s' "$spam_json" | jq -r '.id')"
+  spam_ids+=("$spam_id")
+done
+for spam_id in "${spam_ids[@]}"; do
+  if ! sandboxctl start "$spam_id" >/dev/null 2>&1; then
+    denied_starts=$((denied_starts+1))
+  fi
+done
+printf '%s\n' "$denied_starts" > "$WORK_DIR/start-denials.txt"
+for spam_id in "${spam_ids[@]}"; do
+  sandboxctl delete "$spam_id" >/dev/null 2>&1 || true
+done
+if [ "$EXPECT_ADMISSION_LIMITS" = '1' ] && [ "$denied_starts" -eq 0 ]; then
+  echo 'expected at least one denied start during startup-spam fairness drill' >&2
+  exit 1
+fi
+
 log 'capturing runtime health and quota views'
 sandboxctl runtime-health > "$WORK_DIR/runtime-health.json"
 sandboxctl quota > "$WORK_DIR/quota.json"
+if [ -n "${SANDBOX_API:-}" ] && [ -n "${SANDBOX_TOKEN:-}" ]; then
+  curl -fsS -H "Authorization: Bearer $SANDBOX_TOKEN" "$SANDBOX_API/metrics" > "$WORK_DIR/metrics.prom" || true
+fi
 status="$(sandboxctl inspect "$SANDBOX_ID" | jq -r '.status')"
 case "$status" in
   running|degraded|stopped)

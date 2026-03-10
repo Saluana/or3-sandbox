@@ -1212,7 +1212,14 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 func handleError(w http.ResponseWriter, err error) {
+	var admissionErr service.AdmissionError
 	switch {
+	case errors.As(err, &admissionErr):
+		status := http.StatusConflict
+		if admissionErr.Retryable {
+			status = http.StatusTooManyRequests
+		}
+		http.Error(w, admissionErr.Error(), status)
 	case errors.Is(err, auth.ErrForbidden):
 		http.Error(w, "forbidden", http.StatusForbidden)
 	case errors.Is(err, repository.ErrNotFound):

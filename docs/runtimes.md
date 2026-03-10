@@ -134,6 +134,11 @@ That gives a clearer isolation boundary than Docker's shared-kernel model, but i
 
 QEMU resolves to the `vm` runtime class and is the only currently supported production boundary.
 
+For the normal production posture in this repo, treat one sandbox as one
+VM-backed workload boundary. The control plane can manage many sandboxes for a
+tenant, but it should not imply that many tenant sandboxes share one guest VM
+as the default steady state.
+
 ### How it works
 
 The QEMU backend:

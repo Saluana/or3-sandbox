@@ -187,12 +187,20 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			message TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS audit_event_counts (
+			tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+			action TEXT NOT NULL,
+			outcome TEXT NOT NULL,
+			total INTEGER NOT NULL,
+			PRIMARY KEY (tenant_id, action, outcome)
+		);`,
 		`CREATE INDEX IF NOT EXISTS idx_sandboxes_tenant_status_created ON sandboxes(tenant_id, status, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_sandboxes_status ON sandboxes(status);`,
 		`CREATE INDEX IF NOT EXISTS idx_executions_tenant_status ON executions(tenant_id, status);`,
 		`CREATE INDEX IF NOT EXISTS idx_tunnels_tenant_sandbox_revoked ON tunnels(tenant_id, sandbox_id, revoked_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_snapshots_tenant_status ON snapshots(tenant_id, status);`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_created ON audit_events(tenant_id, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_action_outcome ON audit_events(tenant_id, action, outcome);`,
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -269,6 +277,17 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE quotas SET max_cpu_millis = max_cpu_cores * 1000 WHERE max_cpu_millis = 0`); err != nil {
 		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM audit_event_counts`); err != nil {
+		return fmt.Errorf("rebuild audit event counts: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO audit_event_counts(tenant_id, action, outcome, total)
+		SELECT tenant_id, action, outcome, COUNT(*)
+		FROM audit_events
+		GROUP BY tenant_id, action, outcome
+	`); err != nil {
+		return fmt.Errorf("rebuild audit event counts: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (?, ?)`, schemaVersion, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return err

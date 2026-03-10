@@ -21,6 +21,13 @@ The production gate is enforced through **runtime classes**, not through ad-hoc 
 
 The supported hostile-production target is Linux with KVM-backed QEMU. macOS remains useful for development and local validation, but it is not the production reference posture.
 
+For production planning, separate sandbox isolation from tenant isolation:
+
+- one sandbox maps to one VM-backed workload boundary
+- one tenant may own many sandbox records, but fairness and isolation between those records are enforced by quotas, admission control, audit events, and recovery policy in the control plane
+
+Do not treat many tenant sandboxes sharing one guest VM as the normal production shape for this repo.
+
 ## Host prerequisites
 
 The production host needs:
@@ -33,6 +40,16 @@ The production host needs:
 - enough RAM for the daemon plus the guest memory assigned to each concurrent QEMU sandbox
 
 The daemon already validates the critical QEMU settings at startup and fails fast if the binary, guest image, sidecar contract, profile policy, or accelerator support is missing.
+
+If you enable Phase 4 admission gates, review these settings as part of deployment capacity planning:
+
+- `SANDBOX_ADMISSION_MAX_NODE_SANDBOXES`
+- `SANDBOX_ADMISSION_MAX_NODE_RUNNING`
+- `SANDBOX_ADMISSION_MAX_NODE_CPU`
+- `SANDBOX_ADMISSION_MAX_NODE_MEMORY_MB`
+- `SANDBOX_ADMISSION_MIN_NODE_FREE_STORAGE_MB`
+- `SANDBOX_ADMISSION_MAX_TENANT_STARTS`
+- `SANDBOX_ADMISSION_MAX_TENANT_HEAVY_OPS`
 
 SSH material is only required for explicit `ssh-compat` / `debug` guest images.
 
@@ -156,8 +173,17 @@ Check these first:
 - `/healthz` for basic daemon reachability
 - `/v1/runtime/health` for runtime backend and per-sandbox state
 - `/v1/runtime/capacity` for quota pressure, snapshot counts, degraded sandboxes, and guest profile/capability mix
-- `/metrics` for scrape-friendly counters and ratios, including guest profile mix and declared capability counts
+- `/metrics` for scrape-friendly counters and ratios, including guest profile mix, declared capability counts, audit-event counters, admission denials, lifecycle failures, snapshot activity, exec/TTY activity, and tunnel changes
 - the JSON logs from `sandboxd` for `component=daemon`, `component=auth`, `component=api`, and `component=service`
+
+## Curated image approval and rebuild cadence
+
+For production-approved images and guest artifacts:
+
+- prefer digest-pinned curated image refs whenever a mutable tag would otherwise be used in a trusted Docker workflow
+- keep guest image paths and sidecar contracts under explicit change control
+- record rebuild cadence and approval in the release checklist
+- require explicit operator approval before enabling dangerous profiles or compatibility-only images
 
 ## Startup failures
 
