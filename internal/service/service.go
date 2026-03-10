@@ -259,14 +259,14 @@ func (s *Service) ListSandboxes(ctx context.Context, tenantID string) ([]model.S
 	return s.store.ListSandboxes(ctx, tenantID)
 }
 
-func (s *Service) GetTenantQuotaView(ctx context.Context, tenantID string) (TenantQuotaView, error) {
+func (s *Service) GetTenantQuotaView(ctx context.Context, tenantID string) (model.TenantQuotaView, error) {
 	quota, err := s.store.GetQuota(ctx, tenantID)
 	if err != nil {
-		return TenantQuotaView{}, err
+		return model.TenantQuotaView{}, err
 	}
 	usage, err := s.store.TenantUsage(ctx, tenantID)
 	if err != nil {
-		return TenantQuotaView{}, err
+		return model.TenantQuotaView{}, err
 	}
 	return buildTenantQuotaView(s.cfg, quota, usage), nil
 }

@@ -87,6 +87,7 @@ func (m GuestControlMode) IsValid() bool {
 	}
 }
 
+// Sandbox is the primary lifecycle resource returned by sandbox CRUD endpoints.
 type Sandbox struct {
 	ID                       string           `json:"id"`
 	TenantID                 string           `json:"tenant_id"`
@@ -120,6 +121,7 @@ type Sandbox struct {
 	DeletedAt                *time.Time       `json:"deleted_at,omitempty"`
 }
 
+// CreateSandboxRequest is the JSON payload accepted by POST /v1/sandboxes.
 type CreateSandboxRequest struct {
 	RuntimeSelection RuntimeSelection `json:"runtime_selection,omitempty"`
 	BaseImageRef     string           `json:"base_image_ref"`
@@ -135,10 +137,19 @@ type CreateSandboxRequest struct {
 	Start            bool             `json:"start"`
 }
 
+// LifecycleRequest is the JSON payload used by lifecycle mutation endpoints.
 type LifecycleRequest struct {
 	Force bool `json:"force"`
 }
 
+// ErrorResponse is the normalized error envelope returned by API endpoints.
+type ErrorResponse struct {
+	Error  string `json:"error"`
+	Code   string `json:"code"`
+	Status int    `json:"status"`
+}
+
+// ExecRequest is the JSON payload accepted by POST /v1/sandboxes/{id}/exec.
 type ExecRequest struct {
 	Command  []string          `json:"command"`
 	Env      map[string]string `json:"env"`
@@ -147,6 +158,7 @@ type ExecRequest struct {
 	Detached bool              `json:"detached"`
 }
 
+// Execution is the command result returned by sync exec and SSE terminal events.
 type Execution struct {
 	ID              string          `json:"id"`
 	SandboxID       string          `json:"sandbox_id"`
@@ -165,6 +177,7 @@ type Execution struct {
 	DurationMS      *int64          `json:"duration_ms,omitempty"`
 }
 
+// TTYRequest is the first WebSocket frame sent when opening a TTY session.
 type TTYRequest struct {
 	Command []string          `json:"command"`
 	Env     map[string]string `json:"env"`
@@ -173,6 +186,7 @@ type TTYRequest struct {
 	Rows    int               `json:"rows"`
 }
 
+// TTYSession describes a persisted terminal session record.
 type TTYSession struct {
 	ID         string     `json:"id"`
 	SandboxID  string     `json:"sandbox_id"`
@@ -184,12 +198,14 @@ type TTYSession struct {
 	LastResize string     `json:"last_resize,omitempty"`
 }
 
+// FileWriteRequest is the JSON payload for file writes.
 type FileWriteRequest struct {
 	Content       string `json:"content,omitempty"`
 	ContentBase64 string `json:"content_base64,omitempty"`
 	Encoding      string `json:"encoding,omitempty"`
 }
 
+// FileReadResponse is the JSON payload returned by file reads.
 type FileReadResponse struct {
 	Path          string `json:"path"`
 	Content       string `json:"content,omitempty"`
@@ -198,10 +214,12 @@ type FileReadResponse struct {
 	Encoding      string `json:"encoding"`
 }
 
+// MkdirRequest is the JSON payload for directory creation.
 type MkdirRequest struct {
 	Path string `json:"path"`
 }
 
+// CreateTunnelRequest is the JSON payload accepted by tunnel creation endpoints.
 type CreateTunnelRequest struct {
 	TargetPort int            `json:"target_port"`
 	Protocol   TunnelProtocol `json:"protocol"`
@@ -209,11 +227,13 @@ type CreateTunnelRequest struct {
 	Visibility string         `json:"visibility"`
 }
 
+// CreateTunnelSignedURLRequest is the JSON payload accepted by signed browser URL issuance.
 type CreateTunnelSignedURLRequest struct {
 	Path       string `json:"path,omitempty"`
 	TTLSeconds int    `json:"ttl_seconds,omitempty"`
 }
 
+// Tunnel is the HTTP tunnel resource returned by tunnel endpoints.
 type Tunnel struct {
 	ID             string         `json:"id"`
 	SandboxID      string         `json:"sandbox_id"`
@@ -229,15 +249,18 @@ type Tunnel struct {
 	RevokedAt      *time.Time     `json:"revoked_at,omitempty"`
 }
 
+// TunnelSignedURL is the browser-launch capability returned by POST /v1/tunnels/{id}/signed-url.
 type TunnelSignedURL struct {
 	URL       string    `json:"url"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+// CreateSnapshotRequest is the JSON payload accepted by snapshot creation.
 type CreateSnapshotRequest struct {
 	Name string `json:"name"`
 }
 
+// Snapshot is the snapshot resource returned by snapshot endpoints.
 type Snapshot struct {
 	ID                       string           `json:"id"`
 	SandboxID                string           `json:"sandbox_id"`
@@ -257,10 +280,12 @@ type Snapshot struct {
 	CompletedAt              *time.Time       `json:"completed_at,omitempty"`
 }
 
+// RestoreSnapshotRequest is the JSON payload accepted by snapshot restore.
 type RestoreSnapshotRequest struct {
 	TargetSandboxID string `json:"target_sandbox_id"`
 }
 
+// RuntimeHealth is the runtime health report returned by GET /v1/runtime/health.
 type RuntimeHealth struct {
 	DefaultRuntimeSelection  RuntimeSelection       `json:"default_runtime_selection,omitempty"`
 	EnabledRuntimeSelections []RuntimeSelection     `json:"enabled_runtime_selections,omitempty"`
@@ -272,6 +297,7 @@ type RuntimeHealth struct {
 	Sandboxes                []RuntimeSandboxHealth `json:"sandboxes"`
 }
 
+// RuntimeInfo is the runtime summary returned by GET /v1/runtime/info.
 type RuntimeInfo struct {
 	Backend                  string             `json:"backend,omitempty"`
 	Class                    string             `json:"class,omitempty"`
@@ -279,6 +305,7 @@ type RuntimeInfo struct {
 	EnabledRuntimeSelections []RuntimeSelection `json:"enabled_runtime_selections,omitempty"`
 }
 
+// RuntimeSandboxHealth is one sandbox entry inside RuntimeHealth.
 type RuntimeSandboxHealth struct {
 	SandboxID        string           `json:"sandbox_id"`
 	TenantID         string           `json:"tenant_id"`
@@ -299,6 +326,7 @@ type Tenant struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// TenantQuota is the tenant quota configuration exposed through quota and capacity responses.
 type TenantQuota struct {
 	TenantID                string      `json:"tenant_id"`
 	MaxSandboxes            int         `json:"max_sandboxes"`

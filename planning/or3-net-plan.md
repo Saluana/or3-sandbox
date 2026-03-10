@@ -182,14 +182,14 @@ The tunnel contract used by `or3-net` needs a few behaviors to stay stable and d
 
 ## Tasks
 
-- [ ] **API contract audit** — Walk through every endpoint in `internal/api/router.go` and confirm the request/response types in `internal/model/model.go` are complete, have doc comments, and have consistent JSON tags. Record any gaps.
-- [ ] **Browser tunnel contract** — Document `POST /v1/tunnels/:id/signed-url`, signed browser URL TTL/path scoping, bootstrap cookie behavior, and the difference between tunnel token auth and browser launch auth.
-- [ ] **Static preview support docs** — Document file-serving behaviors and constraints that `or3-net` may rely on when building static previews from workspace output.
-- [ ] **SSE exec documentation** — Document the exact SSE event format for `?stream=1` exec: event names, data encoding, terminal event guarantees, timeout/crash behavior. Add an error event type if one doesn't exist.
-- [ ] **TTY WebSocket documentation** — Document the WebSocket handshake, `TTYRequest` init frame, binary I/O frame format, resize support (if any), and session teardown behavior.
-- [ ] **Error response normalization** — Audit all `http.Error()` and `handleError()` call sites. Ensure 4xx/5xx responses return a consistent JSON shape. Add a shared error response helper if needed.
-- [ ] **Warm-pool readiness documentation** — Document the stop→start→exec readiness sequence, idempotency of lifecycle operations, and how the adapter should verify a sandbox is healthy before reuse.
-- [ ] **Model type completeness** — Ensure all structs in `internal/model/model.go` that appear in API responses have exported fields with JSON tags and doc comments. Add any missing fields that the API actually returns but the model doesn't declare.
-- [ ] **Regression tests** — Add or extend tests for: SSE event ordering and terminal event, TTY session lifecycle, error response shapes across endpoints, lifecycle idempotency (stop an already-stopped sandbox, start an already-running one).
-- [ ] **API reference doc** — Expand `docs/api-reference.md` with typed request/response examples for the endpoints the SDK will consume most heavily: create, exec (sync + stream), files, snapshots, and runtime health.
-- [ ] **OpenClaw/service-launch docs** — Keep the OpenClaw example and any future dashboard examples explicit about using the browser-ready launch URL rather than the raw tunnel endpoint.
+- [x] **API contract audit** — Walk through every endpoint in `internal/api/router.go` and confirm the request/response types in `internal/model/model.go` are complete, have doc comments, and have consistent JSON tags. Record any gaps.
+- [x] **Browser tunnel contract** — Document `POST /v1/tunnels/:id/signed-url`, signed browser URL TTL/path scoping, bootstrap cookie behavior, and the difference between tunnel token auth and browser launch auth.
+- [x] **Static preview support docs** — Document file-serving behaviors and constraints that `or3-net` may rely on when building static previews from workspace output.
+- [x] **SSE exec documentation** — Document the exact SSE event format for `?stream=1` exec: event names, data encoding, terminal event guarantees, timeout/crash behavior. Add an error event type if one doesn't exist.
+- [x] **TTY WebSocket documentation** — Document the WebSocket handshake, `TTYRequest` init frame, binary I/O frame format, resize support (if any), and session teardown behavior.
+- [x] **Error response normalization** — Audit all `http.Error()` and `handleError()` call sites. Ensure 4xx/5xx responses return a consistent JSON shape. Add a shared error response helper if needed.
+- [x] **Warm-pool readiness documentation** — Document the stop→start→exec readiness sequence, idempotency of lifecycle operations, and how the adapter should verify a sandbox is healthy before reuse.
+- [x] **Model type completeness** — Ensure all structs in `internal/model/model.go` that appear in API responses have exported fields with JSON tags and doc comments. Add any missing fields that the API actually returns but the model doesn't declare.
+- [x] **Regression tests** — Add or extend tests for: SSE event ordering and terminal event, TTY session lifecycle, error response shapes across endpoints, lifecycle idempotency (stop an already-stopped sandbox, start an already-running one).
+- [x] **API reference doc** — Expand `docs/api-reference.md` with typed request/response examples for the endpoints the SDK will consume most heavily: create, exec (sync + stream), files, snapshots, and runtime health.
+- [x] **OpenClaw/service-launch docs** — Keep the OpenClaw example and any future dashboard examples explicit about using the browser-ready launch URL rather than the raw tunnel endpoint.

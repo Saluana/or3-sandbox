@@ -12,55 +12,21 @@ import (
 	"or3-sandbox/internal/repository"
 )
 
-type TenantQuotaView struct {
-	Quota             model.TenantQuota      `json:"quota"`
-	Usage             repository.TenantUsage `json:"usage"`
-	StorageQuotaBytes int64                  `json:"storage_quota_bytes"`
-	StoragePressure   float64                `json:"storage_pressure"`
-	StorageEntries    int64                  `json:"storage_entries"`
-	EntryPressure     float64                `json:"entry_pressure"`
-	RunningPressure   float64                `json:"running_pressure"`
-	CPUPressure       float64                `json:"cpu_pressure"`
-	MemoryPressure    float64                `json:"memory_pressure"`
-	Alerts            []string               `json:"alerts,omitempty"`
-}
-
-type NodePressureView struct {
-	Sandboxes           int      `json:"sandboxes"`
-	RunningSandboxes    int      `json:"running_sandboxes"`
-	RunningCPUMillis    int64    `json:"running_cpu_millis"`
-	RunningMemoryMB     int      `json:"running_memory_mb"`
-	FreeStorageBytes    int64    `json:"free_storage_bytes,omitempty"`
-	MaxSandboxes        int      `json:"max_sandboxes,omitempty"`
-	MaxRunningSandboxes int      `json:"max_running_sandboxes,omitempty"`
-	MaxCPUMillis        int64    `json:"max_cpu_millis,omitempty"`
-	MaxMemoryMB         int      `json:"max_memory_mb,omitempty"`
-	MinFreeStorageBytes int64    `json:"min_free_storage_bytes,omitempty"`
-	Alerts              []string `json:"alerts,omitempty"`
-}
-
-type CapacityReport struct {
-	Backend                  string                        `json:"backend"`
-	DefaultRuntimeSelection  model.RuntimeSelection        `json:"default_runtime_selection,omitempty"`
-	EnabledRuntimeSelections []model.RuntimeSelection      `json:"enabled_runtime_selections,omitempty"`
-	CheckedAt                time.Time                     `json:"checked_at"`
-	QuotaView                TenantQuotaView               `json:"quota_view"`
-	NodePressure             NodePressureView              `json:"node_pressure"`
-	StatusCounts             map[string]int                `json:"status_counts"`
-	RuntimeSelectionCounts   map[string]int                `json:"runtime_selection_counts,omitempty"`
-	ProfileCounts            map[string]int                `json:"profile_counts,omitempty"`
-	CapabilityCounts         map[string]int                `json:"capability_counts,omitempty"`
-	SnapshotCounts           map[model.SnapshotStatus]int  `json:"snapshot_counts,omitempty"`
-	ExecutionCounts          map[model.ExecutionStatus]int `json:"execution_counts,omitempty"`
-	AuditCounts              map[string]map[string]int     `json:"audit_counts,omitempty"`
-	Alerts                   []string                      `json:"alerts,omitempty"`
-}
-
-func buildTenantQuotaView(cfg config.Config, quota model.TenantQuota, usage repository.TenantUsage) TenantQuotaView {
+func buildTenantQuotaView(cfg config.Config, quota model.TenantQuota, usage repository.TenantUsage) model.TenantQuotaView {
 	storageQuotaBytes := int64(quota.MaxStorageMB) * 1024 * 1024
-	view := TenantQuotaView{
-		Quota:             quota,
-		Usage:             usage,
+	view := model.TenantQuotaView{
+		Quota: quota,
+		Usage: model.TenantUsageView{
+			Sandboxes:            usage.Sandboxes,
+			RunningSandboxes:     usage.RunningSandboxes,
+			ConcurrentExecs:      usage.ConcurrentExecs,
+			ActiveTunnels:        usage.ActiveTunnels,
+			RequestedCPU:         usage.RequestedCPU,
+			RequestedMemory:      usage.RequestedMemory,
+			RequestedStorage:     usage.RequestedStorage,
+			ActualStorageBytes:   usage.ActualStorageBytes,
+			ActualStorageEntries: usage.ActualStorageEntries,
+		},
 		StorageQuotaBytes: storageQuotaBytes,
 		StoragePressure:   ratioInt64(usage.ActualStorageBytes, storageQuotaBytes),
 		StorageEntries:    usage.ActualStorageEntries,
@@ -91,8 +57,8 @@ func buildTenantQuotaView(cfg config.Config, quota model.TenantQuota, usage repo
 	return view
 }
 
-func buildNodePressureView(cfg config.Config, snapshot admissionSnapshot) NodePressureView {
-	view := NodePressureView{
+func buildNodePressureView(cfg config.Config, snapshot admissionSnapshot) model.NodePressureView {
+	view := model.NodePressureView{
 		Sandboxes:           snapshot.nodeSandboxes,
 		RunningSandboxes:    snapshot.nodeRunning,
 		RunningCPUMillis:    snapshot.runningCPU.MilliValue(),
@@ -122,21 +88,21 @@ func buildNodePressureView(cfg config.Config, snapshot admissionSnapshot) NodePr
 	return view
 }
 
-func (s *Service) CapacityReport(ctx context.Context, tenantID string) (CapacityReport, error) {
+func (s *Service) CapacityReport(ctx context.Context, tenantID string) (model.CapacityReport, error) {
 	if err := s.enforceAdminInspectionPolicy(ctx, tenantID, "capacity.inspect"); err != nil {
-		return CapacityReport{}, err
+		return model.CapacityReport{}, err
 	}
 	quota, err := s.store.GetQuota(ctx, tenantID)
 	if err != nil {
-		return CapacityReport{}, err
+		return model.CapacityReport{}, err
 	}
 	usage, err := s.store.TenantUsage(ctx, tenantID)
 	if err != nil {
-		return CapacityReport{}, err
+		return model.CapacityReport{}, err
 	}
 	sandboxes, err := s.store.ListSandboxes(ctx, tenantID)
 	if err != nil {
-		return CapacityReport{}, err
+		return model.CapacityReport{}, err
 	}
 	statusCounts := make(map[string]int)
 	runtimeSelectionCounts := make(map[string]int)
@@ -159,23 +125,23 @@ func (s *Service) CapacityReport(ctx context.Context, tenantID string) (Capacity
 	}
 	snapshotCounts, err := s.store.SnapshotCounts(ctx, tenantID)
 	if err != nil {
-		return CapacityReport{}, err
+		return model.CapacityReport{}, err
 	}
 	executionCounts, err := s.store.ExecutionCounts(ctx, tenantID)
 	if err != nil {
-		return CapacityReport{}, err
+		return model.CapacityReport{}, err
 	}
 	auditCounts, err := s.store.AuditEventCounts(ctx, tenantID)
 	if err != nil {
-		return CapacityReport{}, err
+		return model.CapacityReport{}, err
 	}
 	nodeSnapshot, err := s.admissionSnapshot(ctx, tenantID)
 	if err != nil {
-		return CapacityReport{}, err
+		return model.CapacityReport{}, err
 	}
 	quotaView := buildTenantQuotaView(s.cfg, quota, usage)
 	nodeView := buildNodePressureView(s.cfg, nodeSnapshot)
-	report := CapacityReport{
+	report := model.CapacityReport{
 		Backend:                  s.cfg.DefaultRuntimeSelection.Backend(),
 		DefaultRuntimeSelection:  s.cfg.DefaultRuntimeSelection,
 		EnabledRuntimeSelections: append([]model.RuntimeSelection(nil), s.cfg.EnabledRuntimeSelections...),

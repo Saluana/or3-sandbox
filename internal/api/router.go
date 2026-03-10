@@ -127,11 +127,11 @@ func (rt *Router) health(w http.ResponseWriter, _ *http.Request) {
 func (rt *Router) handleRuntimeHealth(w http.ResponseWriter, r *http.Request) {
 	tenantCtx, ok := auth.FromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	if !requirePermission(w, r, auth.PermissionAdminInspect) {
@@ -148,11 +148,11 @@ func (rt *Router) handleRuntimeHealth(w http.ResponseWriter, r *http.Request) {
 func (rt *Router) handleRuntimeInfo(w http.ResponseWriter, r *http.Request) {
 	tenantCtx, ok := auth.FromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	_ = tenantCtx
@@ -167,11 +167,11 @@ func (rt *Router) handleRuntimeInfo(w http.ResponseWriter, r *http.Request) {
 func (rt *Router) handleRuntimeCapacity(w http.ResponseWriter, r *http.Request) {
 	tenantCtx, ok := auth.FromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	if !requirePermission(w, r, auth.PermissionAdminInspect) {
@@ -188,11 +188,11 @@ func (rt *Router) handleRuntimeCapacity(w http.ResponseWriter, r *http.Request) 
 func (rt *Router) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	tenantCtx, ok := auth.FromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	if !requirePermission(w, r, auth.PermissionAdminInspect) {
@@ -210,11 +210,11 @@ func (rt *Router) handleMetrics(w http.ResponseWriter, r *http.Request) {
 func (rt *Router) handleQuota(w http.ResponseWriter, r *http.Request) {
 	tenantCtx, ok := auth.FromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	view, err := rt.service.GetTenantQuotaView(r.Context(), tenantCtx.Tenant.ID)
@@ -228,7 +228,7 @@ func (rt *Router) handleQuota(w http.ResponseWriter, r *http.Request) {
 func (rt *Router) handleSandboxes(w http.ResponseWriter, r *http.Request) {
 	tenantCtx, ok := auth.FromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 		return
 	}
 	switch r.Method {
@@ -238,7 +238,7 @@ func (rt *Router) handleSandboxes(w http.ResponseWriter, r *http.Request) {
 		}
 		var req model.CreateSandboxRequest
 		if err := decodeJSON(r, &req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
 		sandbox, err := rt.service.CreateSandbox(r.Context(), tenantCtx.Tenant, tenantCtx.Quota, req)
@@ -258,20 +258,20 @@ func (rt *Router) handleSandboxes(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, sandboxes)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 	}
 }
 
 func (rt *Router) handleSandboxRoutes(w http.ResponseWriter, r *http.Request) {
 	tenantCtx, ok := auth.FromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/v1/sandboxes/")
 	parts := strings.Split(path, "/")
 	if len(parts) == 0 || parts[0] == "" {
-		http.NotFound(w, r)
+		writeNotFound(w)
 		return
 	}
 	sandboxID := parts[0]
@@ -297,7 +297,7 @@ func (rt *Router) handleSandboxRoutes(w http.ResponseWriter, r *http.Request) {
 			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeMethodNotAllowed(w)
 		}
 		return
 	}
@@ -352,12 +352,12 @@ func (rt *Router) handleSandboxRoutes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeMethodNotAllowed(w)
 			return
 		}
 		var req model.MkdirRequest
 		if err := decodeJSON(r, &req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
 		if err := rt.service.Mkdir(r.Context(), tenantCtx.Tenant.ID, sandboxID, req.Path); err != nil {
@@ -381,7 +381,7 @@ func (rt *Router) handleSandboxRoutes(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(parts) > 2 {
 			if r.Method != http.MethodDelete {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				writeMethodNotAllowed(w)
 				return
 			}
 			if err := rt.service.RevokeTunnel(r.Context(), tenantCtx.Tenant.ID, parts[2]); err != nil {
@@ -400,7 +400,7 @@ func (rt *Router) handleSandboxRoutes(w http.ResponseWriter, r *http.Request) {
 			}
 			var req model.CreateSnapshotRequest
 			if err := decodeJSON(r, &req); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 				return
 			}
 			snapshot, err := rt.service.CreateSnapshot(r.Context(), tenantCtx.Tenant.ID, sandboxID, req)
@@ -420,16 +420,16 @@ func (rt *Router) handleSandboxRoutes(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, http.StatusOK, snapshots)
 		default:
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeMethodNotAllowed(w)
 		}
 	default:
-		http.NotFound(w, r)
+		writeNotFound(w)
 	}
 }
 
 func (rt *Router) handleLifecycle(w http.ResponseWriter, r *http.Request, fn func(context.Context) (model.Sandbox, error)) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	sandbox, err := fn(r.Context())
@@ -442,12 +442,12 @@ func (rt *Router) handleLifecycle(w http.ResponseWriter, r *http.Request, fn fun
 
 func (rt *Router) handleExec(w http.ResponseWriter, r *http.Request, tenantCtx auth.TenantContext, sandboxID string) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	var req model.ExecRequest
 	if err := decodeJSON(r, &req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	if req.Timeout == 0 {
@@ -471,14 +471,15 @@ func (rt *Router) streamExec(w http.ResponseWriter, r *http.Request, tenantCtx a
 	w.Header().Set("Connection", "keep-alive")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "streaming_unsupported", "streaming unsupported")
 		return
 	}
 	stdout := &sseWriter{w: w, event: "stdout"}
 	stderr := &sseWriter{w: w, event: "stderr"}
 	execution, err := rt.service.ExecSandbox(r.Context(), tenantCtx.Tenant, tenantCtx.Quota, sandboxID, req, stdout, stderr)
 	if err != nil {
-		handleError(w, err)
+		writeSSEError(w, err)
+		flusher.Flush()
 		return
 	}
 	_, _ = fmt.Fprintf(w, "event: result\ndata: %s\n\n", mustJSON(execution))
@@ -487,7 +488,7 @@ func (rt *Router) streamExec(w http.ResponseWriter, r *http.Request, tenantCtx a
 
 func (rt *Router) handleTTY(w http.ResponseWriter, r *http.Request, tenantCtx auth.TenantContext, sandboxID string) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	conn, err := rt.upgrader.Upgrade(w, r, nil)
@@ -572,7 +573,7 @@ func (rt *Router) handleFiles(w http.ResponseWriter, r *http.Request, tenantID, 
 	case http.MethodPut:
 		var req model.FileWriteRequest
 		if err := decodeJSON(r, &req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
 		var err error
@@ -580,19 +581,19 @@ func (rt *Router) handleFiles(w http.ResponseWriter, r *http.Request, tenantID, 
 		contentBase64 := strings.TrimSpace(req.ContentBase64)
 		if strings.EqualFold(encoding, "base64") {
 			if contentBase64 == "" {
-				http.Error(w, "content_base64 is required when encoding=base64", http.StatusBadRequest)
+				writeError(w, http.StatusBadRequest, "invalid_request", "content_base64 is required when encoding=base64")
 				return
 			}
 			data, decodeErr := base64.StdEncoding.DecodeString(contentBase64)
 			if decodeErr != nil {
-				http.Error(w, "invalid content_base64 payload", http.StatusBadRequest)
+				writeError(w, http.StatusBadRequest, "invalid_request", "invalid content_base64 payload")
 				return
 			}
 			err = rt.service.WriteFileBytes(r.Context(), tenantID, sandboxID, path, data)
 		} else if contentBase64 != "" {
 			data, decodeErr := base64.StdEncoding.DecodeString(contentBase64)
 			if decodeErr != nil {
-				http.Error(w, "invalid content_base64 payload", http.StatusBadRequest)
+				writeError(w, http.StatusBadRequest, "invalid_request", "invalid content_base64 payload")
 				return
 			}
 			err = rt.service.WriteFileBytes(r.Context(), tenantID, sandboxID, path, data)
@@ -611,7 +612,7 @@ func (rt *Router) handleFiles(w http.ResponseWriter, r *http.Request, tenantID, 
 		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 	}
 }
 
@@ -620,7 +621,7 @@ func (rt *Router) handleTunnels(w http.ResponseWriter, r *http.Request, tenantID
 	case http.MethodPost:
 		var req model.CreateTunnelRequest
 		if err := decodeJSON(r, &req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
 		tunnel, err := rt.service.CreateTunnel(r.Context(), tenantID, sandboxID, req)
@@ -637,25 +638,25 @@ func (rt *Router) handleTunnels(w http.ResponseWriter, r *http.Request, tenantID
 		}
 		writeJSON(w, http.StatusOK, tunnels)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 	}
 }
 
 func (rt *Router) handleSnapshotRoutes(w http.ResponseWriter, r *http.Request) {
 	tenantCtx, ok := auth.FromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/v1/snapshots/")
 	parts := strings.Split(path, "/")
 	if len(parts) == 0 || parts[0] == "" {
-		http.NotFound(w, r)
+		writeNotFound(w)
 		return
 	}
 	if len(parts) == 1 {
 		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeMethodNotAllowed(w)
 			return
 		}
 		if !requirePermission(w, r, auth.PermissionSnapshotsRead) {
@@ -670,7 +671,7 @@ func (rt *Router) handleSnapshotRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) < 2 || parts[1] != "restore" || r.Method != http.MethodPost {
-		http.NotFound(w, r)
+		writeNotFound(w)
 		return
 	}
 	if !requirePermission(w, r, auth.PermissionSnapshotsWrite) {
@@ -678,7 +679,7 @@ func (rt *Router) handleSnapshotRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 	var req model.RestoreSnapshotRequest
 	if err := decodeJSON(r, &req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	sandbox, err := rt.service.RestoreSnapshot(r.Context(), tenantCtx.Tenant.ID, parts[0], req)
@@ -693,18 +694,18 @@ func (rt *Router) handleTunnelRoutes(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/v1/tunnels/")
 	parts := strings.Split(path, "/")
 	if len(parts) == 0 || parts[0] == "" {
-		http.NotFound(w, r)
+		writeNotFound(w)
 		return
 	}
 	tunnelID := parts[0]
 	if len(parts) == 1 {
 		tenantCtx, ok := auth.FromContext(r.Context())
 		if !ok {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 			return
 		}
 		if r.Method != http.MethodDelete {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			writeMethodNotAllowed(w)
 			return
 		}
 		if !requirePermission(w, r, auth.PermissionTunnelsWrite) {
@@ -725,17 +726,17 @@ func (rt *Router) handleTunnelRoutes(w http.ResponseWriter, r *http.Request) {
 		rt.handleTunnelSignedURL(w, r, tunnelID)
 		return
 	}
-	http.NotFound(w, r)
+	writeNotFound(w)
 }
 
 func (rt *Router) handleTunnelSignedURL(w http.ResponseWriter, r *http.Request, tunnelID string) {
 	tenantCtx, ok := auth.FromContext(r.Context())
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		writeError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeMethodNotAllowed(w)
 		return
 	}
 	if !requirePermission(w, r, auth.PermissionTunnelsRead) {
@@ -749,25 +750,25 @@ func (rt *Router) handleTunnelSignedURL(w http.ResponseWriter, r *http.Request, 
 	requesterTenantID := tenantCtx.Tenant.ID
 	if tunnel.RevokedAt != nil {
 		rt.recordTunnelDenial(r.Context(), requesterTenantID, tunnel, "tunnel.signed_url", "reason=revoked")
-		http.Error(w, "tunnel revoked", http.StatusGone)
+		writeError(w, http.StatusGone, "tunnel_revoked", "tunnel revoked")
 		return
 	}
 	if requesterTenantID != tunnel.TenantID {
 		rt.recordTunnelDenial(r.Context(), requesterTenantID, tunnel, "tunnel.signed_url", "reason=tenant_mismatch")
-		http.Error(w, "not found", http.StatusNotFound)
+		writeNotFound(w)
 		return
 	}
 	var req model.CreateTunnelSignedURLRequest
 	if r.ContentLength > 0 {
 		if err := decodeJSON(r, &req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
 	}
 	path := req.Path
 	capabilityPath, err := normalizeTunnelCapabilityPath(path)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	ttl := tunnelSignedURLDefaultTTL
@@ -775,11 +776,11 @@ func (rt *Router) handleTunnelSignedURL(w http.ResponseWriter, r *http.Request, 
 		ttl = time.Duration(req.TTLSeconds) * time.Second
 	}
 	if ttl <= 0 {
-		http.Error(w, "signed tunnel ttl must be positive", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_request", "signed tunnel ttl must be positive")
 		return
 	}
 	if ttl > tunnelSignedURLMaxTTL {
-		http.Error(w, fmt.Sprintf("signed tunnel ttl must be <= %s", tunnelSignedURLMaxTTL), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_request", fmt.Sprintf("signed tunnel ttl must be <= %s", tunnelSignedURLMaxTTL))
 		return
 	}
 	expiresAt := time.Now().UTC().Add(ttl)
@@ -790,7 +791,7 @@ func (rt *Router) handleTunnelSignedURL(w http.ResponseWriter, r *http.Request, 
 		tunnelSignedURLSigKey:    []string{sig},
 	}, r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	auditPath := sanitizeTunnelAuditPath(capabilityPath)
@@ -821,7 +822,7 @@ func (rt *Router) handleTunnelProxy(w http.ResponseWriter, r *http.Request, tunn
 	}
 	if tunnel.RevokedAt != nil {
 		rt.recordTunnelDenial(r.Context(), requesterTenantID, tunnel, "tunnel.proxy", "reason=revoked")
-		http.Error(w, "tunnel revoked", http.StatusGone)
+		writeError(w, http.StatusGone, "tunnel_revoked", "tunnel revoked")
 		return
 	}
 	browserAuthorized, bootstrapped := rt.authorizeTunnelBrowserSession(w, r, tunnel)
@@ -831,7 +832,7 @@ func (rt *Router) handleTunnelProxy(w http.ResponseWriter, r *http.Request, tunn
 	if tunnel.Visibility != "public" {
 		if (!hasTenant || tenantCtx.Tenant.ID != tunnel.TenantID) && !browserAuthorized {
 			rt.recordTunnelDenial(r.Context(), requesterTenantID, tunnel, "tunnel.proxy", fmt.Sprintf("reason=tenant_mismatch visibility=%s", tunnel.Visibility))
-			http.Error(w, "not found", http.StatusNotFound)
+			writeNotFound(w)
 			return
 		}
 	}
@@ -857,7 +858,7 @@ func (rt *Router) handleTunnelProxy(w http.ResponseWriter, r *http.Request, tunn
 		}
 		if !authorized {
 			rt.recordTunnelDenial(r.Context(), requesterTenantID, tunnel, "tunnel.proxy", fmt.Sprintf("reason=token_auth_failed visibility=%s", tunnel.Visibility))
-			http.Error(w, "forbidden", http.StatusForbidden)
+			writeError(w, http.StatusForbidden, "forbidden", "forbidden")
 			return
 		}
 	} else if browserAuthorized {
@@ -891,7 +892,7 @@ func (rt *Router) handleTunnelHTTPRequest(w http.ResponseWriter, r *http.Request
 	defer cancel()
 	bridgeConn, err := rt.service.OpenSandboxLocalConn(ctx, sandbox, tunnel.TargetPort)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		writeError(w, http.StatusBadGateway, "bad_gateway", err.Error())
 		return
 	}
 	conn := bridgeConn
@@ -930,7 +931,7 @@ func (rt *Router) handleTunnelHTTPRequest(w http.ResponseWriter, r *http.Request
 			ResponseHeaderTimeout: 30 * time.Second,
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			writeError(w, http.StatusBadGateway, "bad_gateway", err.Error())
 		},
 	}
 	proxy.ServeHTTP(w, proxyReq)
@@ -941,7 +942,7 @@ func (rt *Router) handleTunnelWebSocket(w http.ResponseWriter, r *http.Request, 
 	defer cancel()
 	bridgeConn, err := rt.service.OpenSandboxLocalConn(ctx, sandbox, tunnel.TargetPort)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		writeError(w, http.StatusBadGateway, "bad_gateway", err.Error())
 		return
 	}
 	upstreamURL := url.URL{
@@ -971,7 +972,7 @@ func (rt *Router) handleTunnelWebSocket(w http.ResponseWriter, r *http.Request, 
 		if response != nil {
 			status = response.StatusCode
 		}
-		http.Error(w, err.Error(), status)
+		writeError(w, status, errorCodeForStatus(status), err.Error())
 		return
 	}
 	responseHeader := http.Header{}
@@ -1352,22 +1353,67 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-func handleError(w http.ResponseWriter, err error) {
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, model.ErrorResponse{Error: message, Code: code, Status: status})
+}
+
+func writeNotFound(w http.ResponseWriter) {
+	writeError(w, http.StatusNotFound, "not_found", "not found")
+}
+
+func writeMethodNotAllowed(w http.ResponseWriter) {
+	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+}
+
+func errorCodeForStatus(status int) string {
+	switch status {
+	case http.StatusUnauthorized:
+		return "unauthorized"
+	case http.StatusForbidden:
+		return "forbidden"
+	case http.StatusNotFound:
+		return "not_found"
+	case http.StatusMethodNotAllowed:
+		return "method_not_allowed"
+	case http.StatusConflict:
+		return "conflict"
+	case http.StatusTooManyRequests:
+		return "rate_limited"
+	case http.StatusBadGateway:
+		return "bad_gateway"
+	case http.StatusInternalServerError:
+		return "internal_error"
+	default:
+		return "invalid_request"
+	}
+}
+
+func classifyError(err error) (status int, code string, message string) {
 	var admissionErr service.AdmissionError
 	switch {
 	case errors.As(err, &admissionErr):
-		status := http.StatusConflict
+		status = http.StatusConflict
 		if admissionErr.Retryable {
 			status = http.StatusTooManyRequests
 		}
-		http.Error(w, admissionErr.Error(), status)
+		return status, errorCodeForStatus(status), admissionErr.Error()
 	case errors.Is(err, auth.ErrForbidden):
-		http.Error(w, "forbidden", http.StatusForbidden)
+		return http.StatusForbidden, "forbidden", "forbidden"
 	case errors.Is(err, repository.ErrNotFound):
-		http.Error(w, "not found", http.StatusNotFound)
+		return http.StatusNotFound, "not_found", "not found"
 	default:
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		return http.StatusBadRequest, "invalid_request", err.Error()
 	}
+}
+
+func writeSSEError(w io.Writer, err error) {
+	status, code, message := classifyError(err)
+	_, _ = fmt.Fprintf(w, "event: error\ndata: %s\n\n", mustJSON(model.ErrorResponse{Error: message, Code: code, Status: status}))
+}
+
+func handleError(w http.ResponseWriter, err error) {
+	status, code, message := classifyError(err)
+	writeError(w, status, code, message)
 }
 
 func requirePermission(w http.ResponseWriter, r *http.Request, permission string) bool {

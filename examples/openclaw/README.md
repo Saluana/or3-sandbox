@@ -124,6 +124,7 @@ With OpenRouter configured, you should see a default model like `openrouter/mini
 ## Browser notes
 
 - Use the printed `dashboard_url`, not just the raw tunnel endpoint.
+- Treat `dashboard_url` as the supported browser-launch surface for OR3 integrations. Raw tunnel proxy URLs are useful for debugging, but not for normal dashboard launch.
 - The browser tunnel session and the OpenClaw gateway token are separate things:
 	- the tunnel session is bootstrapped by the signed URL
 	- the OpenClaw gateway auth is bootstrapped by `#token=<gateway-token>`

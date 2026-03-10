@@ -1346,6 +1346,231 @@ func TestWriteFileRejectsMissingContentBase64WhenEncodingBase64(t *testing.T) {
 	h.expectStatus(t, "token-a", http.MethodPut, "/v1/sandboxes/"+sandbox.ID+"/files/notes.txt", model.FileWriteRequest{Encoding: "base64", Content: "hello"}, http.StatusBadRequest)
 }
 
+func TestAPIErrorsReturnJSONEnvelope(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+
+	response, body := h.do(t, "token-a", http.MethodPut, "/v1/sandboxes/"+sandbox.ID+"/files/notes.txt", model.FileWriteRequest{Encoding: "base64", Content: "hello"}, nil)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, body)
+	}
+	if got := response.Header.Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Fatalf("expected json content type, got %q", got)
+	}
+	var invalid model.ErrorResponse
+	if err := json.Unmarshal([]byte(body), &invalid); err != nil {
+		t.Fatalf("decode invalid request error: %v", err)
+	}
+	if invalid.Code != "invalid_request" || invalid.Status != http.StatusBadRequest {
+		t.Fatalf("unexpected invalid request envelope %+v", invalid)
+	}
+	if !strings.Contains(invalid.Error, "content_base64") {
+		t.Fatalf("expected descriptive invalid request error, got %+v", invalid)
+	}
+
+	response, body = h.do(t, "token-b", http.MethodGet, "/v1/sandboxes/"+sandbox.ID, nil, nil)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, body)
+	}
+	var notFound model.ErrorResponse
+	if err := json.Unmarshal([]byte(body), &notFound); err != nil {
+		t.Fatalf("decode not found error: %v", err)
+	}
+	if notFound.Code != "not_found" || notFound.Status != http.StatusNotFound || notFound.Error != "not found" {
+		t.Fatalf("unexpected not found envelope %+v", notFound)
+	}
+}
+
+func TestStreamExecFailureEmitsSSEErrorEvent(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         false,
+	})
+
+	requestBody, err := json.Marshal(model.ExecRequest{
+		Command: []string{"sh", "-lc", "echo hi"},
+		Cwd:     "/workspace",
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, h.server.URL+"/v1/sandboxes/"+sandbox.ID+"/exec?stream=1", bytes.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer token-a")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	if got := response.Header.Get("Content-Type"); !strings.Contains(got, "text/event-stream") {
+		t.Fatalf("expected sse content type, got %q", got)
+	}
+	stream := string(body)
+	if !strings.Contains(stream, "event: error") {
+		t.Fatalf("expected stream error event, got %q", stream)
+	}
+	if strings.Contains(stream, "event: result") {
+		t.Fatalf("did not expect result event for failed streamed exec, got %q", stream)
+	}
+	if !strings.Contains(stream, `"code":"invalid_request"`) || !strings.Contains(stream, `"status":400`) {
+		t.Fatalf("expected serialized error envelope in stream, got %q", stream)
+	}
+}
+
+func TestTTYWebSocketLifecycleAndResize(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+	echo := newTTYEchoUpstream(t)
+	defer echo.close()
+	h.stubRuntime.tunnelBridgeAddr = echo.addr
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+
+	wsURL := "ws" + strings.TrimPrefix(h.server.URL, "http") + "/v1/sandboxes/" + sandbox.ID + "/tty"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, http.Header{
+		"Authorization": []string{"Bearer token-a"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initReq := model.TTYRequest{Command: []string{"sh"}, Cwd: "/workspace", Cols: 120, Rows: 40}
+	if err := conn.WriteJSON(initReq); err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	messageType, payload, err := conn.ReadMessage()
+	if err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	if messageType != websocket.BinaryMessage || !strings.Contains(string(payload), "__OR3_TUNNEL_BRIDGE_READY__") {
+		conn.Close()
+		t.Fatalf("unexpected tty bootstrap payload type=%d body=%q", messageType, string(payload))
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"resize","rows":55,"cols":132}`)); err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	if err := conn.WriteMessage(websocket.BinaryMessage, []byte("ping")); err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	messageType, payload, err = conn.ReadMessage()
+	if err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	if messageType != websocket.BinaryMessage || string(payload) != "echo:ping" {
+		conn.Close()
+		t.Fatalf("unexpected tty echoed payload type=%d body=%q", messageType, string(payload))
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if h.stubRuntime.lastTTY.Cwd != "/workspace" || h.stubRuntime.lastTTY.Cols != 120 || h.stubRuntime.lastTTY.Rows != 40 {
+		t.Fatalf("unexpected tty init request %+v", h.stubRuntime.lastTTY)
+	}
+	if h.stubRuntime.lastTTYResize.Cols != 132 || h.stubRuntime.lastTTYResize.Rows != 55 {
+		t.Fatalf("unexpected tty resize %+v", h.stubRuntime.lastTTYResize)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var connected int
+		var lastResize string
+		var closedAt sql.NullString
+		err := h.store.DB().QueryRowContext(context.Background(), `
+			SELECT connected, last_resize, closed_at
+			FROM tty_sessions
+			WHERE tenant_id = ? AND sandbox_id = ?
+			ORDER BY created_at DESC
+			LIMIT 1
+		`, "tenant-a", sandbox.ID).Scan(&connected, &lastResize, &closedAt)
+		if err == nil && connected == 0 && lastResize == "132x55" && closedAt.Valid {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tty session did not persist expected close state: err=%v connected=%d last_resize=%q closed_at=%v", err, connected, lastResize, closedAt)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func TestLifecycleStartAndStopAreRepeatableOnStubRuntime(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+
+	sandbox = h.startSandbox(t, "token-a", sandbox.ID)
+	if sandbox.Status != model.SandboxStatusRunning {
+		t.Fatalf("expected repeated start to leave sandbox running, got %+v", sandbox)
+	}
+
+	var stopped model.Sandbox
+	h.mustDoJSON(t, "token-a", http.MethodPost, "/v1/sandboxes/"+sandbox.ID+"/stop", model.LifecycleRequest{}, &stopped, http.StatusOK)
+	if stopped.Status != model.SandboxStatusStopped {
+		t.Fatalf("expected stop to return stopped sandbox, got %+v", stopped)
+	}
+
+	h.mustDoJSON(t, "token-a", http.MethodPost, "/v1/sandboxes/"+sandbox.ID+"/stop", model.LifecycleRequest{}, &stopped, http.StatusOK)
+	if stopped.Status != model.SandboxStatusStopped {
+		t.Fatalf("expected repeated stop to remain stopped, got %+v", stopped)
+	}
+}
+
 type harness struct {
 	t           *testing.T
 	cfg         config.Config
@@ -1559,6 +1784,7 @@ func (h *harness) close() {
 type apiStubRuntime struct {
 	lastExec         model.ExecRequest
 	lastTTY          model.TTYRequest
+	lastTTYResize    model.ResizeRequest
 	execResult       model.ExecResult
 	execStdout       string
 	execStderr       string
@@ -1655,7 +1881,9 @@ func (r *apiStubRuntime) AttachTTY(_ context.Context, _ model.Sandbox, req model
 		return nil, err
 	}
 	reader := io.MultiReader(strings.NewReader("__OR3_TUNNEL_BRIDGE_READY__\n"), conn)
-	return &stubTTYHandle{reader: reader, writer: conn, closer: conn}, nil
+	return &stubTTYHandle{reader: reader, writer: conn, closer: conn, onResize: func(req model.ResizeRequest) {
+		r.lastTTYResize = req
+	}}, nil
 }
 
 func (r *apiStubRuntime) CreateSnapshot(context.Context, model.Sandbox, string) (model.SnapshotInfo, error) {
@@ -1671,9 +1899,10 @@ type apiExecHandle struct {
 }
 
 type stubTTYHandle struct {
-	reader io.Reader
-	writer io.Writer
-	closer io.Closer
+	reader   io.Reader
+	writer   io.Writer
+	closer   io.Closer
+	onResize func(model.ResizeRequest)
 }
 
 func (h *stubTTYHandle) Reader() io.Reader {
@@ -1684,7 +1913,10 @@ func (h *stubTTYHandle) Writer() io.Writer {
 	return h.writer
 }
 
-func (h *stubTTYHandle) Resize(model.ResizeRequest) error {
+func (h *stubTTYHandle) Resize(req model.ResizeRequest) error {
+	if h.onResize != nil {
+		h.onResize(req)
+	}
 	return nil
 }
 
@@ -1828,6 +2060,11 @@ type tunnelWebSocketUpstream struct {
 	addr     string
 }
 
+type ttyEchoUpstream struct {
+	listener net.Listener
+	addr     string
+}
+
 func newTunnelWebSocketUpstream(t *testing.T) *tunnelWebSocketUpstream {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1864,6 +2101,42 @@ func (u *tunnelWebSocketUpstream) close() {
 	if u.server != nil {
 		_ = u.server.Close()
 	}
+	if u.listener != nil {
+		_ = u.listener.Close()
+	}
+}
+
+func newTTYEchoUpstream(t *testing.T) *ttyEchoUpstream {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				buf := make([]byte, 4096)
+				for {
+					n, err := conn.Read(buf)
+					if n > 0 {
+						_, _ = conn.Write([]byte("echo:" + string(buf[:n])))
+					}
+					if err != nil {
+						return
+					}
+				}
+			}(conn)
+		}
+	}()
+	return &ttyEchoUpstream{listener: listener, addr: listener.Addr().String()}
+}
+
+func (u *ttyEchoUpstream) close() {
 	if u.listener != nil {
 		_ = u.listener.Close()
 	}
