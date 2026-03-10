@@ -40,17 +40,20 @@ type NodePressureView struct {
 }
 
 type CapacityReport struct {
-	Backend          string                        `json:"backend"`
-	CheckedAt        time.Time                     `json:"checked_at"`
-	QuotaView        TenantQuotaView               `json:"quota_view"`
-	NodePressure     NodePressureView              `json:"node_pressure"`
-	StatusCounts     map[string]int                `json:"status_counts"`
-	ProfileCounts    map[string]int                `json:"profile_counts,omitempty"`
-	CapabilityCounts map[string]int                `json:"capability_counts,omitempty"`
-	SnapshotCounts   map[model.SnapshotStatus]int  `json:"snapshot_counts,omitempty"`
-	ExecutionCounts  map[model.ExecutionStatus]int `json:"execution_counts,omitempty"`
-	AuditCounts      map[string]map[string]int     `json:"audit_counts,omitempty"`
-	Alerts           []string                      `json:"alerts,omitempty"`
+	Backend                  string                        `json:"backend"`
+	DefaultRuntimeSelection  model.RuntimeSelection        `json:"default_runtime_selection,omitempty"`
+	EnabledRuntimeSelections []model.RuntimeSelection      `json:"enabled_runtime_selections,omitempty"`
+	CheckedAt                time.Time                     `json:"checked_at"`
+	QuotaView                TenantQuotaView               `json:"quota_view"`
+	NodePressure             NodePressureView              `json:"node_pressure"`
+	StatusCounts             map[string]int                `json:"status_counts"`
+	RuntimeSelectionCounts   map[string]int                `json:"runtime_selection_counts,omitempty"`
+	ProfileCounts            map[string]int                `json:"profile_counts,omitempty"`
+	CapabilityCounts         map[string]int                `json:"capability_counts,omitempty"`
+	SnapshotCounts           map[model.SnapshotStatus]int  `json:"snapshot_counts,omitempty"`
+	ExecutionCounts          map[model.ExecutionStatus]int `json:"execution_counts,omitempty"`
+	AuditCounts              map[string]map[string]int     `json:"audit_counts,omitempty"`
+	Alerts                   []string                      `json:"alerts,omitempty"`
 }
 
 func buildTenantQuotaView(cfg config.Config, quota model.TenantQuota, usage repository.TenantUsage) TenantQuotaView {
@@ -136,10 +139,15 @@ func (s *Service) CapacityReport(ctx context.Context, tenantID string) (Capacity
 		return CapacityReport{}, err
 	}
 	statusCounts := make(map[string]int)
+	runtimeSelectionCounts := make(map[string]int)
 	profileCounts := make(map[string]int)
 	capabilityCounts := make(map[string]int)
 	for _, sandbox := range sandboxes {
 		statusCounts[string(sandbox.Status)]++
+		selection := resolvedSandboxRuntimeSelection(sandbox)
+		if selection != "" {
+			runtimeSelectionCounts[string(selection)]++
+		}
 		if profile := strings.TrimSpace(string(sandbox.Profile)); profile != "" {
 			profileCounts[profile]++
 		}
@@ -168,17 +176,20 @@ func (s *Service) CapacityReport(ctx context.Context, tenantID string) (Capacity
 	quotaView := buildTenantQuotaView(s.cfg, quota, usage)
 	nodeView := buildNodePressureView(s.cfg, nodeSnapshot)
 	report := CapacityReport{
-		Backend:          s.cfg.RuntimeBackend,
-		CheckedAt:        time.Now().UTC(),
-		QuotaView:        quotaView,
-		NodePressure:     nodeView,
-		StatusCounts:     statusCounts,
-		ProfileCounts:    profileCounts,
-		CapabilityCounts: capabilityCounts,
-		SnapshotCounts:   snapshotCounts,
-		ExecutionCounts:  executionCounts,
-		AuditCounts:      auditCounts,
-		Alerts:           append([]string(nil), quotaView.Alerts...),
+		Backend:                  s.cfg.DefaultRuntimeSelection.Backend(),
+		DefaultRuntimeSelection:  s.cfg.DefaultRuntimeSelection,
+		EnabledRuntimeSelections: append([]model.RuntimeSelection(nil), s.cfg.EnabledRuntimeSelections...),
+		CheckedAt:                time.Now().UTC(),
+		QuotaView:                quotaView,
+		NodePressure:             nodeView,
+		StatusCounts:             statusCounts,
+		RuntimeSelectionCounts:   runtimeSelectionCounts,
+		ProfileCounts:            profileCounts,
+		CapabilityCounts:         capabilityCounts,
+		SnapshotCounts:           snapshotCounts,
+		ExecutionCounts:          executionCounts,
+		AuditCounts:              auditCounts,
+		Alerts:                   append([]string(nil), quotaView.Alerts...),
 	}
 	report.Alerts = append(report.Alerts, nodeView.Alerts...)
 	if statusCounts[string(model.SandboxStatusDegraded)] > 0 {
@@ -226,6 +237,9 @@ func (s *Service) MetricsReport(ctx context.Context, tenantID string) (string, e
 	for _, status := range sortedStringKeys(health.StatusCounts) {
 		lines = append(lines, fmt.Sprintf("or3_sandbox_runtime_status_count{status=%q} %d", status, health.StatusCounts[status]))
 	}
+	for _, selection := range sortedStringKeys(report.RuntimeSelectionCounts) {
+		lines = append(lines, fmt.Sprintf("or3_sandbox_runtime_selection_count{runtime_selection=%q} %d", selection, report.RuntimeSelectionCounts[selection]))
+	}
 	for _, profile := range sortedStringKeys(report.ProfileCounts) {
 		lines = append(lines, fmt.Sprintf("or3_sandbox_profile_count{profile=%q} %d", profile, report.ProfileCounts[profile]))
 	}
@@ -264,10 +278,13 @@ func (s *Service) MetricsReport(ctx context.Context, tenantID string) (string, e
 
 func (s *Service) persistedRuntimeHealth(ctx context.Context, tenantID string) (model.RuntimeHealth, error) {
 	health := model.RuntimeHealth{
-		Backend:      s.cfg.RuntimeBackend,
-		Healthy:      true,
-		CheckedAt:    time.Now().UTC(),
-		StatusCounts: make(map[string]int),
+		DefaultRuntimeSelection:  s.cfg.DefaultRuntimeSelection,
+		EnabledRuntimeSelections: append([]model.RuntimeSelection(nil), s.cfg.EnabledRuntimeSelections...),
+		Backend:                  s.cfg.DefaultRuntimeSelection.Backend(),
+		Healthy:                  true,
+		CheckedAt:                time.Now().UTC(),
+		RuntimeSelectionCounts:   make(map[string]int),
+		StatusCounts:             make(map[string]int),
 	}
 	var sandboxes []model.Sandbox
 	var err error
@@ -280,18 +297,23 @@ func (s *Service) persistedRuntimeHealth(ctx context.Context, tenantID string) (
 		return health, err
 	}
 	for _, sandbox := range sandboxes {
+		selection := resolvedSandboxRuntimeSelection(sandbox)
 		observedStatus := sandbox.Status
 		if sandbox.RuntimeStatus != "" {
 			observedStatus = model.SandboxStatus(sandbox.RuntimeStatus)
 		}
 		entry := model.RuntimeSandboxHealth{
-			SandboxID:       sandbox.ID,
-			TenantID:        sandbox.TenantID,
-			PersistedStatus: sandbox.Status,
-			ObservedStatus:  observedStatus,
-			RuntimeID:       sandbox.RuntimeID,
-			RuntimeStatus:   sandbox.RuntimeStatus,
-			Error:           sandbox.LastRuntimeError,
+			SandboxID:        sandbox.ID,
+			TenantID:         sandbox.TenantID,
+			RuntimeSelection: selection,
+			PersistedStatus:  sandbox.Status,
+			ObservedStatus:   observedStatus,
+			RuntimeID:        sandbox.RuntimeID,
+			RuntimeStatus:    sandbox.RuntimeStatus,
+			Error:            sandbox.LastRuntimeError,
+		}
+		if selection != "" {
+			health.RuntimeSelectionCounts[string(selection)]++
 		}
 		health.StatusCounts[string(entry.ObservedStatus)]++
 		health.Sandboxes = append(health.Sandboxes, entry)

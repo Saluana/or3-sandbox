@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 func Open(ctx context.Context, path string) (*sql.DB, error) {
 	dsn, err := sqliteDSN(path)
@@ -75,6 +75,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			sandbox_id TEXT PRIMARY KEY,
 			tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
 			status TEXT NOT NULL,
+			runtime_selection TEXT NOT NULL DEFAULT '',
 			runtime_backend TEXT NOT NULL,
 			base_image_ref TEXT NOT NULL,
 			profile TEXT NOT NULL DEFAULT '',
@@ -140,6 +141,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			name TEXT NOT NULL,
 			status TEXT NOT NULL,
 			image_ref TEXT NOT NULL,
+			runtime_selection TEXT NOT NULL DEFAULT '',
 			runtime_backend TEXT NOT NULL DEFAULT '',
 			profile TEXT NOT NULL DEFAULT '',
 			image_contract_version TEXT NOT NULL DEFAULT '',
@@ -260,6 +262,12 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if err := ensureColumn(ctx, tx, "sandboxes", "runtime_class", `ALTER TABLE sandboxes ADD COLUMN runtime_class TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if err := ensureColumn(ctx, tx, "sandboxes", "runtime_selection", `ALTER TABLE sandboxes ADD COLUMN runtime_selection TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "snapshots", "runtime_selection", `ALTER TABLE snapshots ADD COLUMN runtime_selection TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	if err := ensureColumn(ctx, tx, "sandbox_storage", "rootfs_entries", `ALTER TABLE sandbox_storage ADD COLUMN rootfs_entries INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
@@ -276,6 +284,12 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE quotas SET max_cpu_millis = max_cpu_cores * 1000 WHERE max_cpu_millis = 0`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sandboxes SET runtime_selection = CASE runtime_backend WHEN 'docker' THEN 'docker-dev' WHEN 'qemu' THEN 'qemu-professional' WHEN 'kata' THEN 'containerd-kata-professional' ELSE runtime_selection END WHERE runtime_selection = ''`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE snapshots SET runtime_selection = CASE runtime_backend WHEN 'docker' THEN 'docker-dev' WHEN 'qemu' THEN 'qemu-professional' WHEN 'kata' THEN 'containerd-kata-professional' ELSE runtime_selection END WHERE runtime_selection = ''`); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM audit_event_counts`); err != nil {

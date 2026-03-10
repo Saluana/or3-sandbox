@@ -35,6 +35,36 @@ In OR3 Network, `or3-sandbox` becomes the **first concrete node backend**. `or3-
 
 **Action needed:** Review each endpoint and confirm the request/response types in `internal/model/model.go` are fully documented and that error responses follow a consistent shape. Fill any gaps.
 
+### 1a. Browser launch flow for service dashboards
+
+`or3-net`'s preferred UX for sandbox-backed dashboards is not `create raw tunnel`; it is `launch known service`.
+
+For OpenClaw-like services, the expected v1 flow is:
+
+1. `or3-net` creates or reuses a private tunnel for the service port.
+2. `or3-net` requests a short-lived signed browser URL from `or3-sandbox`.
+3. The browser opens that signed URL.
+4. `or3-sandbox` sets the narrow bootstrap cookie and redirects into the proxied app.
+
+This matters because `or3-sandbox` already contains app-aware browser-tunnel behavior, including the bootstrap page that clears stale OpenClaw `gatewayUrl` localStorage before redirecting.
+
+**Action needed:** Keep the signed browser URL + bootstrap cookie flow stable and explicitly documented as the supported browser-access mechanism for sandbox-backed dashboards.
+
+### 1b. Static previews and iframe embedding support
+
+Not every preview should require a live tunnel-backed app launch.
+
+For file-backed static sites generated inside the workspace sandbox, `or3-net` may prefer to expose a preview URL that can be embedded in an `or3-chat` pane.
+
+That means `or3-sandbox` should remain friendly to two different consumers:
+
+- live service launch via tunnels
+- direct file or static-output serving paths that `or3-net` can wrap into preview URLs
+
+`or3-sandbox` does not necessarily need to implement iframe logic itself, but its file and tunnel contracts must be stable enough that `or3-net` can decide whether a preview should be embedded or launched externally.
+
+**Action needed:** Keep file access and tunnel contracts documented well enough that `or3-net` can distinguish static preview flows from live service launch flows.
+
 ### 2. SSE exec streaming contract
 
 The current SSE exec implementation (in `router.go`, `streamExec` function) emits three event types:
@@ -97,6 +127,18 @@ The TypeScript SDK needs a predictable error shape across all endpoints. Current
 
 **Action needed:** Audit error responses and ensure they follow a consistent JSON shape, at least for 4xx and 5xx responses. A minimal shape like `{ "error": "message", "code": "..." }` is sufficient.
 
+### 6. Tunnel contract details for `or3-net`
+
+The tunnel contract used by `or3-net` needs a few behaviors to stay stable and documented:
+
+- `CreateTunnelRequest` fields (`target_port`, `protocol`, `auth_mode`, `visibility`) and defaults
+- whether `Tunnel.AccessToken` is returned only at creation time
+- the `POST /v1/tunnels/:id/signed-url` behavior, including TTL limits and path scoping
+- the difference between tunnel token auth and signed browser URL auth
+- revoke behavior when a tunnel is no longer valid
+
+**Action needed:** Make the signed-url endpoint and the browser capability model first-class in the docs, since `or3-net` will depend on them for service launch.
+
 ---
 
 ## What does NOT change
@@ -117,6 +159,8 @@ The TypeScript SDK needs a predictable error shape across all endpoints. Current
 | SDK lives in `or3-net`, not here | The TypeScript SDK is consumed by `or3-net` and shouldn't create a build dependency in the opposite direction. |
 | `or3-net` authenticates as a tenant | Simplest integration path — `or3-net` gets a static token or JWT, subject to the same quota/auth rules as `sandboxctl`. |
 | Focus on contract documentation | Most of the API surface already works. The main risk is undocumented behavior that the SDK will mishandle. |
+| Preserve signed browser tunnel semantics | `or3-net` can safely wrap the existing browser capability model instead of inventing a second browser auth layer for sandbox-backed services. |
+| Support both static and live preview consumers | `or3-net` should be able to choose a simpler file-backed preview path when a live tunnel is unnecessary. |
 
 ---
 
@@ -125,6 +169,8 @@ The TypeScript SDK needs a predictable error shape across all endpoints. Current
 | Area | Likely files | Notes |
 |---|---|---|
 | API docs | `docs/api-reference.md` | Expand with typed request/response examples for every endpoint |
+| Browser tunnel docs | `docs/api-reference.md`, `examples/openclaw/README.md` | Signed URL flow, bootstrap cookie, app-launch guidance |
+| File preview docs | `docs/api-reference.md` | File read/download behavior needed for static preview pipelines |
 | SSE contract | `internal/api/router.go` (streamExec) | Document event format, edge cases, add error events if missing |
 | TTY contract | `internal/api/router.go` (handleTTY) | Document WebSocket protocol, resize, session lifecycle |
 | Error responses | `internal/api/router.go`, `internal/api/errors.go` | Audit and normalize to consistent JSON error shape |
@@ -137,6 +183,8 @@ The TypeScript SDK needs a predictable error shape across all endpoints. Current
 ## Tasks
 
 - [ ] **API contract audit** — Walk through every endpoint in `internal/api/router.go` and confirm the request/response types in `internal/model/model.go` are complete, have doc comments, and have consistent JSON tags. Record any gaps.
+- [ ] **Browser tunnel contract** — Document `POST /v1/tunnels/:id/signed-url`, signed browser URL TTL/path scoping, bootstrap cookie behavior, and the difference between tunnel token auth and browser launch auth.
+- [ ] **Static preview support docs** — Document file-serving behaviors and constraints that `or3-net` may rely on when building static previews from workspace output.
 - [ ] **SSE exec documentation** — Document the exact SSE event format for `?stream=1` exec: event names, data encoding, terminal event guarantees, timeout/crash behavior. Add an error event type if one doesn't exist.
 - [ ] **TTY WebSocket documentation** — Document the WebSocket handshake, `TTYRequest` init frame, binary I/O frame format, resize support (if any), and session teardown behavior.
 - [ ] **Error response normalization** — Audit all `http.Error()` and `handleError()` call sites. Ensure 4xx/5xx responses return a consistent JSON shape. Add a shared error response helper if needed.
@@ -144,3 +192,4 @@ The TypeScript SDK needs a predictable error shape across all endpoints. Current
 - [ ] **Model type completeness** — Ensure all structs in `internal/model/model.go` that appear in API responses have exported fields with JSON tags and doc comments. Add any missing fields that the API actually returns but the model doesn't declare.
 - [ ] **Regression tests** — Add or extend tests for: SSE event ordering and terminal event, TTY session lifecycle, error response shapes across endpoints, lifecycle idempotency (stop an already-stopped sandbox, start an already-running one).
 - [ ] **API reference doc** — Expand `docs/api-reference.md` with typed request/response examples for the endpoints the SDK will consume most heavily: create, exec (sync + stream), files, snapshots, and runtime health.
+- [ ] **OpenClaw/service-launch docs** — Keep the OpenClaw example and any future dashboard examples explicit about using the browser-ready launch URL rather than the raw tunnel endpoint.

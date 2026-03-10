@@ -125,9 +125,13 @@ func TestValidateRuntimeConfigQEMUMissingPrerequisites(t *testing.T) {
 }
 
 func TestValidateRuntimeConfigRejectsUnsupportedBackend(t *testing.T) {
-	cfg := Config{RuntimeBackend: "podman"}
+	cfg := Config{
+		RuntimeBackend:           "podman",
+		EnabledRuntimeSelections: []model.RuntimeSelection{"podman"},
+		DefaultRuntimeSelection:  model.RuntimeSelection("podman"),
+	}
 	err := validateRuntimeConfig(cfg, runtimeValidationProbe{})
-	if err == nil || !strings.Contains(err.Error(), "unsupported runtime backend") {
+	if err == nil || !strings.Contains(err.Error(), "unsupported default runtime selection") {
 		t.Fatalf("expected unsupported backend error, got %v", err)
 	}
 }
@@ -372,6 +376,84 @@ func TestLoadKeepsLegacyQEMUProfileEnvOutOfDockerPolicy(t *testing.T) {
 	}
 	if !cfg.AllowsDangerousGuestProfiles("qemu") {
 		t.Fatal("expected qemu dangerous-profile env to apply to qemu")
+	}
+}
+
+func TestLoadParsesExplicitRuntimeSelections(t *testing.T) {
+	root := t.TempDir()
+	qemuBinary := filepath.Join(root, "qemu-system-x86_64")
+	qemuImage := filepath.Join(root, "base.qcow2")
+	if err := os.WriteFile(qemuBinary, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(qemuImage, []byte("qcow2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SANDBOX_ENABLED_RUNTIMES", "docker-dev,qemu-professional")
+	t.Setenv("SANDBOX_DEFAULT_RUNTIME", "qemu-professional")
+	t.Setenv("SANDBOX_TOKENS", "token-a=tenant-a")
+	t.Setenv("SANDBOX_QEMU_BINARY", qemuBinary)
+	t.Setenv("SANDBOX_QEMU_BASE_IMAGE_PATH", qemuImage)
+	t.Setenv("SANDBOX_QEMU_ALLOWED_PROFILES", "core")
+	t.Setenv("SANDBOX_QEMU_CONTROL_MODE", "agent")
+	t.Setenv("SANDBOX_QEMU_ACCEL", "tcg")
+	t.Setenv("SANDBOX_TRUSTED_DOCKER_RUNTIME", "true")
+
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.DefaultRuntimeSelection != model.RuntimeSelectionQEMUProfessional {
+		t.Fatalf("default runtime selection = %q", cfg.DefaultRuntimeSelection)
+	}
+	if len(cfg.EnabledRuntimeSelections) != 2 {
+		t.Fatalf("enabled runtime selections = %#v", cfg.EnabledRuntimeSelections)
+	}
+}
+
+func TestValidateRuntimeConfigRequiresDefaultEnabled(t *testing.T) {
+	cfg := Config{
+		EnabledRuntimeSelections: []model.RuntimeSelection{model.RuntimeSelectionDockerDev},
+		DefaultRuntimeSelection:  model.RuntimeSelectionQEMUProfessional,
+		TrustedDockerRuntime:     true,
+		DockerUser:               "10001:10001",
+		DockerTmpfsSizeMB:        64,
+	}
+	err := validateRuntimeConfig(cfg, runtimeValidationProbe{})
+	if err == nil || !strings.Contains(err.Error(), "must also be enabled") {
+		t.Fatalf("expected default-enabled validation error, got %v", err)
+	}
+}
+
+func TestValidateProductionModeUsesDefaultRuntimeSelection(t *testing.T) {
+	cfg := Config{
+		DeploymentMode:           "production",
+		ListenAddress:            ":8080",
+		DatabasePath:             filepath.Join(t.TempDir(), "sandbox.db"),
+		StorageRoot:              t.TempDir(),
+		SnapshotRoot:             t.TempDir(),
+		BaseImageRef:             "alpine:3.20",
+		RuntimeBackend:           "docker",
+		EnabledRuntimeSelections: []model.RuntimeSelection{model.RuntimeSelectionDockerDev},
+		DefaultRuntimeSelection:  model.RuntimeSelectionDockerDev,
+		TrustedDockerRuntime:     true,
+		AuthMode:                 "jwt-hs256",
+		AuthJWTIssuer:            "issuer.example",
+		AuthJWTAudience:          "sandbox-api",
+		AuthJWTSecretPaths:       []string{filepath.Join(t.TempDir(), "jwt.secret")},
+		TrustedProxyHeaders:      true,
+		OperatorHost:             "https://sandbox.example",
+		DefaultCPULimit:          model.CPUCores(1),
+		DefaultQuota:             model.TenantQuota{MaxCPUCores: model.CPUCores(4)},
+		DefaultNetworkMode:       model.NetworkModeInternetEnabled,
+		Tenants:                  []TenantConfig{{ID: "tenant-a", Name: "Tenant A", Token: "token-a"}},
+	}
+	if err := os.WriteFile(cfg.AuthJWTSecretPaths[0], []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "VM-backed runtime class") {
+		t.Fatalf("expected production validation to reject non-VM default runtime selection, got %v", err)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"or3-sandbox/internal/repository"
 	runtimedocker "or3-sandbox/internal/runtime/docker"
 	runtimeqemu "or3-sandbox/internal/runtime/qemu"
+	"or3-sandbox/internal/runtime/registry"
 	"or3-sandbox/internal/service"
 )
 
@@ -64,7 +65,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
-		log.Info("daemon listening", "event", "daemon.listen", "addr", cfg.ListenAddress, "runtime", cfg.RuntimeBackend, "runtime_class", string(cfg.RuntimeClass()), "mode", cfg.DeploymentMode, "auth_mode", cfg.AuthMode, "tls_enabled", cfg.TLSCertPath != "", "trusted_proxy", cfg.TrustedProxyHeaders)
+		log.Info("daemon listening", "event", "daemon.listen", "addr", cfg.ListenAddress, "default_runtime", cfg.DefaultRuntimeSelection, "enabled_runtimes", cfg.EnabledRuntimeSelections, "runtime_class", string(cfg.RuntimeClass()), "mode", cfg.DeploymentMode, "auth_mode", cfg.AuthMode, "tls_enabled", cfg.TLSCertPath != "", "trusted_proxy", cfg.TrustedProxyHeaders)
 		var err error
 		if cfg.TLSCertPath != "" {
 			err = server.ListenAndServeTLS(cfg.TLSCertPath, cfg.TLSKeyPath)
@@ -86,33 +87,41 @@ func main() {
 }
 
 func buildRuntime(cfg config.Config) (model.RuntimeManager, error) {
-	switch cfg.RuntimeBackend {
-	case "docker":
-		return runtimedocker.New(runtimedocker.Options{
-			User:                      cfg.DockerUser,
-			TmpfsSizeMB:               cfg.DockerTmpfsSizeMB,
-			SeccompProfile:            cfg.DockerSeccompProfile,
-			AppArmorProfile:           cfg.DockerAppArmorProfile,
-			SELinuxLabel:              cfg.DockerSELinuxLabel,
-			AllowDangerousOverrides:   cfg.DockerAllowDangerousOverrides,
-			SnapshotMaxBytes:          cfg.SnapshotMaxBytes,
-			SnapshotMaxFiles:          cfg.SnapshotMaxFiles,
-			SnapshotMaxExpansionRatio: cfg.SnapshotMaxExpansionRatio,
-		}), nil
-	case "qemu":
-		return runtimeqemu.New(runtimeqemu.Options{
-			Binary:         cfg.QEMUBinary,
-			Accel:          cfg.QEMUAccel,
-			BaseImagePath:  cfg.QEMUBaseImagePath,
-			ControlMode:    cfg.QEMUControlMode,
-			SSHUser:        cfg.QEMUSSHUser,
-			SSHKeyPath:     cfg.QEMUSSHPrivateKeyPath,
-			SSHHostKeyPath: cfg.QEMUSSHHostKeyPath,
-			BootTimeout:    cfg.QEMUBootTimeout,
-		})
-	default:
-		return nil, errors.New("unsupported runtime backend")
+	runtimes := make(map[model.RuntimeSelection]model.RuntimeManager, len(cfg.EnabledRuntimeSelections))
+	for _, selection := range cfg.EnabledRuntimeSelections {
+		switch selection {
+		case model.RuntimeSelectionDockerDev:
+			runtimes[selection] = runtimedocker.New(runtimedocker.Options{
+				User:                      cfg.DockerUser,
+				TmpfsSizeMB:               cfg.DockerTmpfsSizeMB,
+				SeccompProfile:            cfg.DockerSeccompProfile,
+				AppArmorProfile:           cfg.DockerAppArmorProfile,
+				SELinuxLabel:              cfg.DockerSELinuxLabel,
+				AllowDangerousOverrides:   cfg.DockerAllowDangerousOverrides,
+				SnapshotMaxBytes:          cfg.SnapshotMaxBytes,
+				SnapshotMaxFiles:          cfg.SnapshotMaxFiles,
+				SnapshotMaxExpansionRatio: cfg.SnapshotMaxExpansionRatio,
+			})
+		case model.RuntimeSelectionQEMUProfessional:
+			rt, err := runtimeqemu.New(runtimeqemu.Options{
+				Binary:         cfg.QEMUBinary,
+				Accel:          cfg.QEMUAccel,
+				BaseImagePath:  cfg.QEMUBaseImagePath,
+				ControlMode:    cfg.QEMUControlMode,
+				SSHUser:        cfg.QEMUSSHUser,
+				SSHKeyPath:     cfg.QEMUSSHPrivateKeyPath,
+				SSHHostKeyPath: cfg.QEMUSSHHostKeyPath,
+				BootTimeout:    cfg.QEMUBootTimeout,
+			})
+			if err != nil {
+				return nil, err
+			}
+			runtimes[selection] = rt
+		default:
+			return nil, errors.New("unsupported runtime selection")
+		}
 	}
+	return registry.New(runtimes), nil
 }
 
 func reconcileLoop(ctx context.Context, log *slog.Logger, svc *service.Service, interval time.Duration) {

@@ -92,25 +92,26 @@ func TestRuntimeClassRoundTrip(t *testing.T) {
 	now := time.Now().UTC()
 
 	sb := model.Sandbox{
-		ID:             "sbx-rt-class",
-		TenantID:       "tenant-a",
-		Status:         model.SandboxStatusStopped,
-		RuntimeBackend: "qemu",
-		RuntimeClass:   model.RuntimeClassVM,
-		BaseImageRef:   "guest-base.qcow2",
-		CPULimit:       model.CPUCores(1),
-		MemoryLimitMB:  512,
-		PIDsLimit:      64,
-		DiskLimitMB:    1024,
-		NetworkMode:    model.NetworkModeInternetDisabled,
-		StorageRoot:    filepath.Join(root, "rootfs"),
-		WorkspaceRoot:  filepath.Join(root, "workspace"),
-		CacheRoot:      filepath.Join(root, "cache"),
-		RuntimeID:      "sbx-rt-class",
-		RuntimeStatus:  string(model.SandboxStatusStopped),
-		CreatedAt:      now,
-		UpdatedAt:      now,
-		LastActiveAt:   now,
+		ID:               "sbx-rt-class",
+		TenantID:         "tenant-a",
+		Status:           model.SandboxStatusStopped,
+		RuntimeSelection: model.RuntimeSelectionQEMUProfessional,
+		RuntimeBackend:   "qemu",
+		RuntimeClass:     model.RuntimeClassVM,
+		BaseImageRef:     "guest-base.qcow2",
+		CPULimit:         model.CPUCores(1),
+		MemoryLimitMB:    512,
+		PIDsLimit:        64,
+		DiskLimitMB:      1024,
+		NetworkMode:      model.NetworkModeInternetDisabled,
+		StorageRoot:      filepath.Join(root, "rootfs"),
+		WorkspaceRoot:    filepath.Join(root, "workspace"),
+		CacheRoot:        filepath.Join(root, "cache"),
+		RuntimeID:        "sbx-rt-class",
+		RuntimeStatus:    string(model.SandboxStatusStopped),
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		LastActiveAt:     now,
 	}
 	if err := store.CreateSandbox(context.Background(), sb); err != nil {
 		t.Fatalf("create sandbox: %v", err)
@@ -121,6 +122,9 @@ func TestRuntimeClassRoundTrip(t *testing.T) {
 	}
 	if got.RuntimeClass != model.RuntimeClassVM {
 		t.Errorf("runtime class round-trip: got %q, want %q", got.RuntimeClass, model.RuntimeClassVM)
+	}
+	if got.RuntimeSelection != model.RuntimeSelectionQEMUProfessional {
+		t.Errorf("runtime selection round-trip: got %q, want %q", got.RuntimeSelection, model.RuntimeSelectionQEMUProfessional)
 	}
 	if got.RuntimeBackend != "qemu" {
 		t.Errorf("runtime backend round-trip: got %q, want %q", got.RuntimeBackend, "qemu")
@@ -185,5 +189,120 @@ func TestRuntimeClassDerivedFromLegacyRow(t *testing.T) {
 	// When runtime_class is empty the store must derive it from the backend.
 	if got.RuntimeClass != model.RuntimeClassTrustedDocker {
 		t.Errorf("legacy docker row: expected RuntimeClass %q, got %q", model.RuntimeClassTrustedDocker, got.RuntimeClass)
+	}
+	if got.RuntimeSelection != model.RuntimeSelectionDockerDev {
+		t.Errorf("legacy docker row: expected RuntimeSelection %q, got %q", model.RuntimeSelectionDockerDev, got.RuntimeSelection)
+	}
+}
+
+func TestSnapshotRuntimeSelectionRoundTrip(t *testing.T) {
+	store, close := newStoreTestHarness(t)
+	defer close()
+	root := t.TempDir()
+	now := time.Now().UTC()
+
+	sandbox := model.Sandbox{
+		ID:               "sbx-1",
+		TenantID:         "tenant-a",
+		Status:           model.SandboxStatusStopped,
+		RuntimeSelection: model.RuntimeSelectionQEMUProfessional,
+		RuntimeBackend:   "qemu",
+		RuntimeClass:     model.RuntimeClassVM,
+		BaseImageRef:     "guest-base.qcow2",
+		CPULimit:         model.CPUCores(1),
+		MemoryLimitMB:    512,
+		PIDsLimit:        64,
+		DiskLimitMB:      1024,
+		NetworkMode:      model.NetworkModeInternetDisabled,
+		StorageRoot:      filepath.Join(root, "rootfs"),
+		WorkspaceRoot:    filepath.Join(root, "workspace"),
+		CacheRoot:        filepath.Join(root, "cache"),
+		RuntimeID:        "sbx-1",
+		RuntimeStatus:    string(model.SandboxStatusStopped),
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		LastActiveAt:     now,
+	}
+	if err := store.CreateSandbox(context.Background(), sandbox); err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	snapshot := model.Snapshot{
+		ID:               "snap-rt-selection",
+		SandboxID:        "sbx-1",
+		TenantID:         "tenant-a",
+		Name:             "snapshot",
+		Status:           model.SnapshotStatusReady,
+		ImageRef:         "snapshot-image",
+		RuntimeSelection: model.RuntimeSelectionQEMUProfessional,
+		RuntimeBackend:   "qemu",
+		Profile:          model.GuestProfileCore,
+		CreatedAt:        now,
+	}
+	if err := store.CreateSnapshot(context.Background(), snapshot); err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	got, err := store.GetSnapshot(context.Background(), "tenant-a", snapshot.ID)
+	if err != nil {
+		t.Fatalf("get snapshot: %v", err)
+	}
+	if got.RuntimeSelection != model.RuntimeSelectionQEMUProfessional {
+		t.Fatalf("runtime selection round-trip: got %q, want %q", got.RuntimeSelection, model.RuntimeSelectionQEMUProfessional)
+	}
+	if got.RuntimeBackend != "qemu" {
+		t.Fatalf("runtime backend round-trip: got %q, want %q", got.RuntimeBackend, "qemu")
+	}
+}
+
+func TestSnapshotRuntimeSelectionDerivedFromLegacyRow(t *testing.T) {
+	root := t.TempDir()
+	sqlDB, err := db.Open(context.Background(), filepath.Join(root, "sandbox.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	store := New(sqlDB)
+	quota := model.TenantQuota{
+		MaxSandboxes:            1,
+		MaxRunningSandboxes:     1,
+		MaxConcurrentExecs:      1,
+		MaxTunnels:              1,
+		MaxCPUCores:             model.CPUCores(1),
+		MaxMemoryMB:             512,
+		MaxStorageMB:            512,
+		AllowTunnels:            true,
+		DefaultTunnelAuthMode:   "token",
+		DefaultTunnelVisibility: "private",
+	}
+	if err := store.SeedTenants(context.Background(), []config.TenantConfig{{ID: "tenant-a", Name: "Tenant A", Token: "token-a"}}, quota); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := sqlDB.ExecContext(context.Background(), `
+		INSERT INTO sandboxes(
+			sandbox_id, tenant_id, status, runtime_selection, runtime_backend, runtime_class, base_image_ref,
+			cpu_limit, cpu_limit_millis, memory_limit_mb, pids_limit, disk_limit_mb,
+			network_mode, allow_tunnels, storage_root, workspace_root, cache_root,
+			created_at, updated_at, last_active_at, deleted_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+	`, "sbx-legacy", "tenant-a", string(model.SandboxStatusStopped), string(model.RuntimeSelectionDockerDev), "docker", string(model.RuntimeClassTrustedDocker), "alpine:3.20", 1, 1000, 256, 64, 512, string(model.NetworkModeInternetDisabled), 0, filepath.Join(root, "rootfs"), filepath.Join(root, "workspace"), filepath.Join(root, "cache"), now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sqlDB.ExecContext(context.Background(), `
+		INSERT INTO snapshots(
+			snapshot_id, sandbox_id, tenant_id, name, status, image_ref,
+			runtime_selection, runtime_backend, profile, image_contract_version,
+			control_protocol_version, workspace_contract_version, workspace_tar,
+			export_location, created_at, completed_at
+		) VALUES (?, ?, ?, ?, ?, ?, '', ?, '', '', '', '', '', '', ?, NULL)
+	`, "snap-legacy", "sbx-legacy", "tenant-a", "legacy", string(model.SnapshotStatusReady), "snapshot-image", "docker", now); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetSnapshot(context.Background(), "tenant-a", "snap-legacy")
+	if err != nil {
+		t.Fatalf("get legacy snapshot: %v", err)
+	}
+	if got.RuntimeSelection != model.RuntimeSelectionDockerDev {
+		t.Fatalf("legacy snapshot runtime selection: got %q, want %q", got.RuntimeSelection, model.RuntimeSelectionDockerDev)
 	}
 }

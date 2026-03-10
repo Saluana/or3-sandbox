@@ -9,6 +9,9 @@ import (
 type SandboxSpec struct {
 	SandboxID                string
 	TenantID                 string
+	RuntimeSelection         RuntimeSelection
+	RuntimeBackend           string
+	RuntimeClass             RuntimeClass
 	BaseImageRef             string
 	Profile                  GuestProfile
 	Features                 []string

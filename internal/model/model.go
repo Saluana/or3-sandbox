@@ -91,6 +91,7 @@ type Sandbox struct {
 	ID                       string           `json:"id"`
 	TenantID                 string           `json:"tenant_id"`
 	Status                   SandboxStatus    `json:"status"`
+	RuntimeSelection         RuntimeSelection `json:"runtime_selection,omitempty"`
 	RuntimeBackend           string           `json:"runtime_backend"`
 	RuntimeClass             RuntimeClass     `json:"runtime_class,omitempty"`
 	BaseImageRef             string           `json:"base_image_ref"`
@@ -120,17 +121,18 @@ type Sandbox struct {
 }
 
 type CreateSandboxRequest struct {
-	BaseImageRef  string       `json:"base_image_ref"`
-	Profile       GuestProfile `json:"profile,omitempty"`
-	Features      []string     `json:"features,omitempty"`
-	Capabilities  []string     `json:"capabilities,omitempty"`
-	CPULimit      CPUQuantity  `json:"cpu_limit"`
-	MemoryLimitMB int          `json:"memory_limit_mb"`
-	PIDsLimit     int          `json:"pids_limit"`
-	DiskLimitMB   int          `json:"disk_limit_mb"`
-	NetworkMode   NetworkMode  `json:"network_mode"`
-	AllowTunnels  *bool        `json:"allow_tunnels,omitempty"`
-	Start         bool         `json:"start"`
+	RuntimeSelection RuntimeSelection `json:"runtime_selection,omitempty"`
+	BaseImageRef     string           `json:"base_image_ref"`
+	Profile          GuestProfile     `json:"profile,omitempty"`
+	Features         []string         `json:"features,omitempty"`
+	Capabilities     []string         `json:"capabilities,omitempty"`
+	CPULimit         CPUQuantity      `json:"cpu_limit"`
+	MemoryLimitMB    int              `json:"memory_limit_mb"`
+	PIDsLimit        int              `json:"pids_limit"`
+	DiskLimitMB      int              `json:"disk_limit_mb"`
+	NetworkMode      NetworkMode      `json:"network_mode"`
+	AllowTunnels     *bool            `json:"allow_tunnels,omitempty"`
+	Start            bool             `json:"start"`
 }
 
 type LifecycleRequest struct {
@@ -237,21 +239,22 @@ type CreateSnapshotRequest struct {
 }
 
 type Snapshot struct {
-	ID                       string         `json:"id"`
-	SandboxID                string         `json:"sandbox_id"`
-	TenantID                 string         `json:"tenant_id"`
-	Name                     string         `json:"name"`
-	Status                   SnapshotStatus `json:"status"`
-	ImageRef                 string         `json:"image_ref"`
-	RuntimeBackend           string         `json:"runtime_backend,omitempty"`
-	Profile                  GuestProfile   `json:"profile,omitempty"`
-	ImageContractVersion     string         `json:"image_contract_version,omitempty"`
-	ControlProtocolVersion   string         `json:"control_protocol_version,omitempty"`
-	WorkspaceContractVersion string         `json:"workspace_contract_version,omitempty"`
-	WorkspaceTar             string         `json:"-"`
-	ExportLocation           string         `json:"export_location,omitempty"`
-	CreatedAt                time.Time      `json:"created_at"`
-	CompletedAt              *time.Time     `json:"completed_at,omitempty"`
+	ID                       string           `json:"id"`
+	SandboxID                string           `json:"sandbox_id"`
+	TenantID                 string           `json:"tenant_id"`
+	Name                     string           `json:"name"`
+	Status                   SnapshotStatus   `json:"status"`
+	ImageRef                 string           `json:"image_ref"`
+	RuntimeSelection         RuntimeSelection `json:"runtime_selection,omitempty"`
+	RuntimeBackend           string           `json:"runtime_backend,omitempty"`
+	Profile                  GuestProfile     `json:"profile,omitempty"`
+	ImageContractVersion     string           `json:"image_contract_version,omitempty"`
+	ControlProtocolVersion   string           `json:"control_protocol_version,omitempty"`
+	WorkspaceContractVersion string           `json:"workspace_contract_version,omitempty"`
+	WorkspaceTar             string           `json:"-"`
+	ExportLocation           string           `json:"export_location,omitempty"`
+	CreatedAt                time.Time        `json:"created_at"`
+	CompletedAt              *time.Time       `json:"completed_at,omitempty"`
 }
 
 type RestoreSnapshotRequest struct {
@@ -259,28 +262,34 @@ type RestoreSnapshotRequest struct {
 }
 
 type RuntimeHealth struct {
-	Backend      string                 `json:"backend"`
-	Healthy      bool                   `json:"healthy"`
-	CheckedAt    time.Time              `json:"checked_at"`
-	StatusCounts map[string]int         `json:"status_counts,omitempty"`
-	Sandboxes    []RuntimeSandboxHealth `json:"sandboxes"`
+	DefaultRuntimeSelection  RuntimeSelection       `json:"default_runtime_selection,omitempty"`
+	EnabledRuntimeSelections []RuntimeSelection     `json:"enabled_runtime_selections,omitempty"`
+	Backend                  string                 `json:"backend"`
+	Healthy                  bool                   `json:"healthy"`
+	CheckedAt                time.Time              `json:"checked_at"`
+	RuntimeSelectionCounts   map[string]int         `json:"runtime_selection_counts,omitempty"`
+	StatusCounts             map[string]int         `json:"status_counts,omitempty"`
+	Sandboxes                []RuntimeSandboxHealth `json:"sandboxes"`
 }
 
 type RuntimeInfo struct {
-	Backend string `json:"backend"`
-	Class   string `json:"class,omitempty"`
+	Backend                  string             `json:"backend,omitempty"`
+	Class                    string             `json:"class,omitempty"`
+	DefaultRuntimeSelection  RuntimeSelection   `json:"default_runtime_selection,omitempty"`
+	EnabledRuntimeSelections []RuntimeSelection `json:"enabled_runtime_selections,omitempty"`
 }
 
 type RuntimeSandboxHealth struct {
-	SandboxID       string        `json:"sandbox_id"`
-	TenantID        string        `json:"tenant_id"`
-	PersistedStatus SandboxStatus `json:"persisted_status"`
-	ObservedStatus  SandboxStatus `json:"observed_status"`
-	RuntimeID       string        `json:"runtime_id"`
-	RuntimeStatus   string        `json:"runtime_status"`
-	Pid             int           `json:"pid"`
-	IPAddress       string        `json:"ip_address,omitempty"`
-	Error           string        `json:"error,omitempty"`
+	SandboxID        string           `json:"sandbox_id"`
+	TenantID         string           `json:"tenant_id"`
+	RuntimeSelection RuntimeSelection `json:"runtime_selection,omitempty"`
+	PersistedStatus  SandboxStatus    `json:"persisted_status"`
+	ObservedStatus   SandboxStatus    `json:"observed_status"`
+	RuntimeID        string           `json:"runtime_id"`
+	RuntimeStatus    string           `json:"runtime_status"`
+	Pid              int              `json:"pid"`
+	IPAddress        string           `json:"ip_address,omitempty"`
+	Error            string           `json:"error,omitempty"`
 }
 
 type Tenant struct {

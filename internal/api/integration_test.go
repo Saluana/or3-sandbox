@@ -409,9 +409,48 @@ func TestRuntimeInfoIsTenantReadable(t *testing.T) {
 	if info.Backend != "qemu" {
 		t.Fatalf("unexpected runtime info %+v", info)
 	}
+	if info.DefaultRuntimeSelection != model.RuntimeSelectionQEMUProfessional {
+		t.Fatalf("unexpected runtime selection info %+v", info)
+	}
 	if info.Class != string(model.RuntimeClassVM) {
 		t.Fatalf("expected runtime class %q, got %q", model.RuntimeClassVM, info.Class)
 	}
+}
+
+func TestCreateSandboxUsesDefaultRuntimeSelectionWhenOmitted(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if sandbox.RuntimeSelection != model.RuntimeSelectionQEMUProfessional {
+		t.Fatalf("expected default runtime selection qemu-professional, got %q", sandbox.RuntimeSelection)
+	}
+}
+
+func TestCreateSandboxRejectsDisabledRuntimeSelection(t *testing.T) {
+	h := newHarness(t)
+	defer h.close()
+
+	h.expectStatus(t, "token-a", http.MethodPost, "/v1/sandboxes", model.CreateSandboxRequest{
+		RuntimeSelection: model.RuntimeSelectionQEMUProfessional,
+		BaseImageRef:     "alpine:3.20",
+		CPULimit:         model.CPUCores(1),
+		MemoryLimitMB:    256,
+		PIDsLimit:        128,
+		DiskLimitMB:      512,
+		NetworkMode:      model.NetworkModeInternetDisabled,
+		AllowTunnels:     boolPtr(false),
+		Start:            false,
+	}, http.StatusForbidden)
 }
 
 func TestRuntimeHealthEndpoint(t *testing.T) {
@@ -1328,27 +1367,29 @@ func newHarness(t *testing.T) *harness {
 	}
 	root := t.TempDir()
 	cfg := config.Config{
-		DeploymentMode:       "development",
-		ListenAddress:        "127.0.0.1:0",
-		DatabasePath:         filepath.Join(root, "sandbox.db"),
-		StorageRoot:          filepath.Join(root, "storage"),
-		SnapshotRoot:         filepath.Join(root, "snapshots"),
-		BaseImageRef:         "alpine:3.20",
-		RuntimeBackend:       "docker",
-		AuthMode:             "static",
-		TrustedDockerRuntime: true,
-		DefaultCPULimit:      model.CPUCores(1),
-		DefaultMemoryLimitMB: 256,
-		DefaultPIDsLimit:     128,
-		DefaultDiskLimitMB:   512,
-		DefaultNetworkMode:   model.NetworkModeInternetDisabled,
-		DefaultAllowTunnels:  true,
-		RequestRatePerMinute: 600,
-		RequestBurst:         120,
-		GracefulShutdown:     5 * time.Second,
-		ReconcileInterval:    30 * time.Second,
-		CleanupInterval:      30 * time.Second,
-		OperatorHost:         "http://example.invalid",
+		DeploymentMode:           "development",
+		ListenAddress:            "127.0.0.1:0",
+		DatabasePath:             filepath.Join(root, "sandbox.db"),
+		StorageRoot:              filepath.Join(root, "storage"),
+		SnapshotRoot:             filepath.Join(root, "snapshots"),
+		BaseImageRef:             "alpine:3.20",
+		RuntimeBackend:           "docker",
+		EnabledRuntimeSelections: []model.RuntimeSelection{model.RuntimeSelectionDockerDev},
+		DefaultRuntimeSelection:  model.RuntimeSelectionDockerDev,
+		AuthMode:                 "static",
+		TrustedDockerRuntime:     true,
+		DefaultCPULimit:          model.CPUCores(1),
+		DefaultMemoryLimitMB:     256,
+		DefaultPIDsLimit:         128,
+		DefaultDiskLimitMB:       512,
+		DefaultNetworkMode:       model.NetworkModeInternetDisabled,
+		DefaultAllowTunnels:      true,
+		RequestRatePerMinute:     600,
+		RequestBurst:             120,
+		GracefulShutdown:         5 * time.Second,
+		ReconcileInterval:        30 * time.Second,
+		CleanupInterval:          30 * time.Second,
+		OperatorHost:             "http://example.invalid",
 		Tenants: []config.TenantConfig{
 			{ID: "tenant-a", Name: "Tenant A", Token: "token-a"},
 			{ID: "tenant-b", Name: "Tenant B", Token: "token-b"},
@@ -1409,6 +1450,8 @@ func newStubHarness(t *testing.T) *harness {
 		SnapshotRoot:              filepath.Join(root, "snapshots"),
 		BaseImageRef:              "guest-base.qcow2",
 		RuntimeBackend:            "qemu",
+		EnabledRuntimeSelections:  []model.RuntimeSelection{model.RuntimeSelectionQEMUProfessional},
+		DefaultRuntimeSelection:   model.RuntimeSelectionQEMUProfessional,
 		QEMUBaseImagePath:         qemuImage,
 		QEMUAllowedBaseImagePaths: []string{qemuImage},
 		QEMUAllowedProfiles:       []model.GuestProfile{model.GuestProfileCore},

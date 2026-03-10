@@ -11,15 +11,21 @@ import (
 )
 
 func (s *Service) enforceCreatePolicy(ctx context.Context, tenantID string, req model.CreateSandboxRequest) error {
-	if !s.runtimeImageAllowed(s.cfg.RuntimeBackend, req.BaseImageRef) {
+	selection := s.resolveRuntimeSelection(req)
+	if !s.cfg.IsRuntimeSelectionEnabled(selection) {
+		message := fmt.Sprintf("runtime selection %q is not enabled", selection)
+		s.recordAudit(ctx, tenantID, "", "policy.create", string(selection), "denied", message)
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	if !s.runtimeImageAllowed(selection.Backend(), req.BaseImageRef) {
 		message := fmt.Sprintf("image %q is not allowed by policy", req.BaseImageRef)
 		s.recordAudit(ctx, tenantID, "", "policy.create", req.BaseImageRef, "denied", message)
 		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
 	}
-	if err := s.enforceGuestProfilePolicy(ctx, tenantID, "", s.cfg.RuntimeBackend, req.Profile, "policy.create"); err != nil {
+	if err := s.enforceGuestProfilePolicy(ctx, tenantID, "", selection.Backend(), req.Profile, "policy.create"); err != nil {
 		return err
 	}
-	if s.cfg.RuntimeBackend == "docker" {
+	if selection.Backend() == "docker" {
 		if err := s.enforceDockerCreatePolicy(ctx, tenantID, "", req.Profile, req.Features, req.Capabilities, "policy.create"); err != nil {
 			return err
 		}
@@ -28,6 +34,12 @@ func (s *Service) enforceCreatePolicy(ctx context.Context, tenantID string, req 
 }
 
 func (s *Service) enforceLifecyclePolicy(ctx context.Context, sandbox model.Sandbox, action string) error {
+	selection := resolvedSandboxRuntimeSelection(sandbox)
+	if !s.cfg.IsRuntimeSelectionEnabled(selection) {
+		message := fmt.Sprintf("runtime selection %q is not enabled", selection)
+		s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.ID, "denied", auditDetail(message, auditKV("runtime_selection", selection)))
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
 	now := time.Now().UTC()
 	if s.cfg.PolicyMaxSandboxLifetime > 0 {
 		age := now.Sub(sandbox.CreatedAt)
@@ -45,17 +57,17 @@ func (s *Service) enforceLifecyclePolicy(ctx context.Context, sandbox model.Sand
 			return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
 		}
 	}
-	if !s.runtimeImageAllowed(sandbox.RuntimeBackend, sandbox.BaseImageRef) {
+	if !s.runtimeImageAllowed(selection.Backend(), sandbox.BaseImageRef) {
 		message := fmt.Sprintf("sandbox image %q is no longer allowed by policy", sandbox.BaseImageRef)
 		s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.BaseImageRef, "denied", message)
 		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
 	}
-	if sandbox.RuntimeBackend == "docker" {
+	if selection.Backend() == "docker" {
 		if err := s.enforceDockerCreatePolicy(ctx, sandbox.TenantID, sandbox.ID, sandbox.Profile, sandbox.Features, sandbox.Capabilities, "policy."+action); err != nil {
 			return err
 		}
 	}
-	if err := s.enforceGuestProfilePolicy(ctx, sandbox.TenantID, sandbox.ID, sandbox.RuntimeBackend, sandbox.Profile, "policy."+action); err != nil {
+	if err := s.enforceGuestProfilePolicy(ctx, sandbox.TenantID, sandbox.ID, selection.Backend(), sandbox.Profile, "policy."+action); err != nil {
 		return err
 	}
 	return nil
@@ -95,7 +107,7 @@ func (s *Service) enforceTunnelPolicy(ctx context.Context, sandbox model.Sandbox
 }
 
 func (s *Service) enforceAdminInspectionPolicy(ctx context.Context, tenantID, action string) error {
-	if s.cfg.DeploymentMode == "production" && !model.BackendToRuntimeClass(s.cfg.RuntimeBackend).IsVMBacked() {
+	if s.cfg.DeploymentMode == "production" && !s.cfg.DefaultRuntimeSelection.IsVMBacked() {
 		message := "admin inspection requires a VM-backed runtime class in production mode"
 		s.recordAudit(ctx, tenantID, "", "policy."+action, action, "denied", message)
 		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)

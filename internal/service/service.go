@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"or3-sandbox/internal/archiveutil"
+	"or3-sandbox/internal/auth"
 	"or3-sandbox/internal/config"
 	"or3-sandbox/internal/dockerimage"
 	"or3-sandbox/internal/guestimage"
@@ -65,6 +66,12 @@ func New(cfg config.Config, store *repository.Store, runtime model.RuntimeManage
 
 func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota model.TenantQuota, req model.CreateSandboxRequest) (model.Sandbox, error) {
 	req = s.applyCreateDefaults(req)
+	selection := s.resolveRuntimeSelection(req)
+	if !s.cfg.IsRuntimeSelectionEnabled(selection) {
+		message := fmt.Sprintf("runtime selection %q is not enabled", selection)
+		s.recordAudit(ctx, tenant.ID, "", "policy.create", string(selection), "denied", message)
+		return model.Sandbox{}, fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
 	if err := validateCreate(req); err != nil {
 		return model.Sandbox{}, err
 	}
@@ -105,8 +112,9 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		ID:                       id,
 		TenantID:                 tenant.ID,
 		Status:                   initialStatus,
-		RuntimeBackend:           s.cfg.RuntimeBackend,
-		RuntimeClass:             model.BackendToRuntimeClass(s.cfg.RuntimeBackend),
+		RuntimeSelection:         selection,
+		RuntimeBackend:           selection.Backend(),
+		RuntimeClass:             selection.RuntimeClass(),
 		BaseImageRef:             req.BaseImageRef,
 		Profile:                  req.Profile,
 		Features:                 model.NormalizeFeatures(req.Features),
@@ -137,6 +145,9 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 	spec := model.SandboxSpec{
 		SandboxID:                sandbox.ID,
 		TenantID:                 sandbox.TenantID,
+		RuntimeSelection:         sandbox.RuntimeSelection,
+		RuntimeBackend:           sandbox.RuntimeBackend,
+		RuntimeClass:             sandbox.RuntimeClass,
 		BaseImageRef:             sandbox.BaseImageRef,
 		Profile:                  sandbox.Profile,
 		Features:                 append([]string(nil), sandbox.Features...),
@@ -185,6 +196,7 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 	}
 	s.recordAudit(ctx, tenant.ID, sandbox.ID, "sandbox.create", sandbox.ID, "ok", auditDetail(
 		auditKV("runtime", sandbox.RuntimeBackend),
+		auditKV("runtime_selection", sandbox.RuntimeSelection),
 		auditKV("base_image_ref", sandbox.BaseImageRef),
 		auditKV("start_requested", req.Start),
 		auditKV("allow_tunnels", sandbox.AllowTunnels),
@@ -228,11 +240,19 @@ func (s *Service) GetSandbox(ctx context.Context, tenantID, sandboxID string) (m
 }
 
 func (s *Service) RuntimeBackend() string {
-	return s.cfg.RuntimeBackend
+	return s.cfg.DefaultRuntimeSelection.Backend()
 }
 
 func (s *Service) RuntimeClass() model.RuntimeClass {
 	return s.cfg.RuntimeClass()
+}
+
+func (s *Service) DefaultRuntimeSelection() model.RuntimeSelection {
+	return s.cfg.DefaultRuntimeSelection
+}
+
+func (s *Service) EnabledRuntimeSelections() []model.RuntimeSelection {
+	return append([]model.RuntimeSelection(nil), s.cfg.EnabledRuntimeSelections...)
 }
 
 func (s *Service) ListSandboxes(ctx context.Context, tenantID string) ([]model.Sandbox, error) {
@@ -256,10 +276,13 @@ func (s *Service) RuntimeHealth(ctx context.Context, tenantID string) (model.Run
 		return model.RuntimeHealth{}, err
 	}
 	health := model.RuntimeHealth{
-		Backend:      s.cfg.RuntimeBackend,
-		Healthy:      true,
-		CheckedAt:    time.Now().UTC(),
-		StatusCounts: make(map[string]int),
+		DefaultRuntimeSelection:  s.cfg.DefaultRuntimeSelection,
+		EnabledRuntimeSelections: append([]model.RuntimeSelection(nil), s.cfg.EnabledRuntimeSelections...),
+		Backend:                  s.cfg.DefaultRuntimeSelection.Backend(),
+		Healthy:                  true,
+		CheckedAt:                time.Now().UTC(),
+		RuntimeSelectionCounts:   make(map[string]int),
+		StatusCounts:             make(map[string]int),
 	}
 	var sandboxes []model.Sandbox
 	var err error
@@ -272,14 +295,16 @@ func (s *Service) RuntimeHealth(ctx context.Context, tenantID string) (model.Run
 		return health, err
 	}
 	for _, sandbox := range sandboxes {
+		selection := resolvedSandboxRuntimeSelection(sandbox)
 		entry := model.RuntimeSandboxHealth{
-			SandboxID:       sandbox.ID,
-			TenantID:        sandbox.TenantID,
-			PersistedStatus: sandbox.Status,
-			ObservedStatus:  sandbox.Status,
-			RuntimeID:       sandbox.RuntimeID,
-			RuntimeStatus:   sandbox.RuntimeStatus,
-			Error:           sandbox.LastRuntimeError,
+			SandboxID:        sandbox.ID,
+			TenantID:         sandbox.TenantID,
+			RuntimeSelection: selection,
+			PersistedStatus:  sandbox.Status,
+			ObservedStatus:   sandbox.Status,
+			RuntimeID:        sandbox.RuntimeID,
+			RuntimeStatus:    sandbox.RuntimeStatus,
+			Error:            sandbox.LastRuntimeError,
 		}
 		state, err := s.runtime.Inspect(ctx, sandbox)
 		if err != nil {
@@ -298,10 +323,21 @@ func (s *Service) RuntimeHealth(ctx context.Context, tenantID string) (model.Run
 				health.Healthy = false
 			}
 		}
+		if selection != "" {
+			health.RuntimeSelectionCounts[string(selection)]++
+		}
 		health.StatusCounts[string(entry.ObservedStatus)]++
 		health.Sandboxes = append(health.Sandboxes, entry)
 	}
 	return health, nil
+}
+
+func (s *Service) resolveRuntimeSelection(req model.CreateSandboxRequest) model.RuntimeSelection {
+	selection := model.ResolveRuntimeSelection(req.RuntimeSelection, s.cfg.RuntimeBackend)
+	if selection.IsValid() {
+		return selection
+	}
+	return s.cfg.DefaultRuntimeSelection
 }
 
 func (s *Service) StartSandbox(ctx context.Context, tenantID, sandboxID string, quota model.TenantQuota) (model.Sandbox, error) {
@@ -422,6 +458,7 @@ func (s *Service) DeleteSandbox(ctx context.Context, tenantID, sandboxID string,
 		_ = s.store.UpdateSandboxState(ctx, sandbox)
 		s.recordAudit(ctx, tenantID, sandbox.ID, "sandbox.delete", sandbox.ID, "error", auditDetail(
 			auditKV("preserve_snapshots", preserveSnapshots),
+			auditKV("runtime_selection", resolvedSandboxRuntimeSelection(sandbox)),
 		), "error", err)
 		return err
 	}
@@ -442,6 +479,7 @@ func (s *Service) DeleteSandbox(ctx context.Context, tenantID, sandboxID string,
 	}
 	s.recordAudit(ctx, tenantID, sandbox.ID, "sandbox.delete", sandbox.ID, "ok", auditDetail(
 		auditKV("preserve_snapshots", preserveSnapshots),
+		auditKV("runtime_selection", resolvedSandboxRuntimeSelection(sandbox)),
 	))
 	return nil
 }
@@ -812,7 +850,11 @@ func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, 
 		return model.Tunnel{}, err
 	}
 	_ = s.touchSandboxActivity(ctx, sandbox)
-	s.recordAudit(ctx, tenantID, sandboxID, "tunnel.create", tunnel.ID, "ok", auditDetail(tunnelAuditDetail(tunnel), networkPolicyAuditDetail(policy)))
+	s.recordAudit(ctx, tenantID, sandboxID, "tunnel.create", tunnel.ID, "ok", auditDetail(
+		tunnelAuditDetail(tunnel),
+		networkPolicyAuditDetail(policy),
+		auditKV("runtime_selection", resolvedSandboxRuntimeSelection(sandbox)),
+	))
 	return tunnel, nil
 }
 
@@ -864,7 +906,8 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 	if err := s.enforceAdmission(ctx, tenantID, sandbox.ID, "snapshot_create", admissionDelta{tenantHeavy: 1}); err != nil {
 		return model.Snapshot{}, err
 	}
-	if sandbox.RuntimeBackend == "qemu" && sandbox.Status != model.SandboxStatusStopped {
+	selection := resolvedSandboxRuntimeSelection(sandbox)
+	if selection.Backend() == "qemu" && sandbox.Status != model.SandboxStatusStopped {
 		return model.Snapshot{}, fmt.Errorf("qemu snapshots require the sandbox to be stopped")
 	}
 	snapshot := model.Snapshot{
@@ -873,7 +916,8 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 		TenantID:                 tenantID,
 		Name:                     req.Name,
 		Status:                   model.SnapshotStatusCreating,
-		RuntimeBackend:           sandbox.RuntimeBackend,
+		RuntimeSelection:         selection,
+		RuntimeBackend:           selection.Backend(),
 		Profile:                  sandbox.Profile,
 		ImageContractVersion:     sandbox.ImageContractVersion,
 		ControlProtocolVersion:   sandbox.ControlProtocolVersion,
@@ -1031,12 +1075,14 @@ func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID stri
 		return model.Sandbox{}, err
 	}
 	sandbox.Status = model.SandboxStatusStopped
+	sandbox.RuntimeSelection = resolvedSandboxRuntimeSelection(sandbox)
+	sandbox.RuntimeClass = sandbox.RuntimeSelection.RuntimeClass()
 	sandbox.RuntimeStatus = string(state.Status)
 	sandbox.Profile = snapshot.Profile
 	sandbox.ImageContractVersion = snapshot.ImageContractVersion
 	sandbox.ControlProtocolVersion = snapshot.ControlProtocolVersion
 	sandbox.WorkspaceContractVersion = snapshot.WorkspaceContractVersion
-	if sandbox.RuntimeBackend != "qemu" {
+	if resolvedSandboxRuntimeSelection(sandbox).Backend() != "qemu" {
 		sandbox.BaseImageRef = snapshot.ImageRef
 	}
 	sandbox.UpdatedAt = time.Now().UTC()
@@ -1052,6 +1098,7 @@ func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID stri
 	s.recordAudit(ctx, tenantID, sandbox.ID, "snapshot.restore", snapshot.ID, "ok", auditDetail(
 		auditKV("target_sandbox_id", sandbox.ID),
 		auditKV("forced_stop", forcedStop),
+		auditKV("runtime_selection", resolvedSandboxRuntimeSelection(sandbox)),
 		snapshotAuditDetail(snapshot),
 	))
 	if err := s.revokeActiveTunnels(ctx, tenantID, sandbox, "snapshot_restore"); err != nil {
@@ -1232,14 +1279,16 @@ func (s *Service) reconcileStorageRefreshInterval() time.Duration {
 }
 
 func (s *Service) applyCreateDefaults(req model.CreateSandboxRequest) model.CreateSandboxRequest {
+	selection := s.resolveRuntimeSelection(req)
+	backend := selection.Backend()
 	if req.BaseImageRef == "" {
-		if s.cfg.RuntimeBackend == "qemu" {
+		if backend == "qemu" {
 			req.BaseImageRef = s.cfg.QEMUBaseImagePath
 		} else {
 			req.BaseImageRef = s.cfg.BaseImageRef
 		}
 	}
-	if req.Profile == "" && s.cfg.RuntimeBackend == "qemu" {
+	if req.Profile == "" && backend == "qemu" {
 		req.Profile = model.GuestProfileCore
 	}
 	req.Features = model.NormalizeFeatures(req.Features)
@@ -1284,10 +1333,12 @@ func validateCreate(req model.CreateSandboxRequest) error {
 
 func (s *Service) validateRuntimeCreate(ctx context.Context, req model.CreateSandboxRequest) (model.CreateSandboxRequest, guestimage.Contract, error) {
 	req.Capabilities = model.NormalizeCapabilities(req.Capabilities)
-	if s.cfg.RuntimeBackend == "qemu" && req.CPULimit.MilliValue()%1000 != 0 {
+	selection := s.resolveRuntimeSelection(req)
+	backend := selection.Backend()
+	if backend == "qemu" && req.CPULimit.MilliValue()%1000 != 0 {
 		return model.CreateSandboxRequest{}, guestimage.Contract{}, fmt.Errorf("qemu runtime requires whole CPU cores until fractional throttling is implemented")
 	}
-	if s.cfg.RuntimeBackend == "docker" {
+	if backend == "docker" {
 		metadata, err := dockerimage.ResolveWithDockerLabels(ctx, req.BaseImageRef)
 		profile := req.Profile
 		switch {
@@ -1308,7 +1359,7 @@ func (s *Service) validateRuntimeCreate(ctx context.Context, req model.CreateSan
 		req.Features = model.NormalizeFeatures(req.Features)
 		return req, guestimage.Contract{}, nil
 	}
-	if s.cfg.RuntimeBackend != "qemu" {
+	if backend != "qemu" {
 		return req, guestimage.Contract{}, nil
 	}
 	if len(req.Capabilities) > 0 {
@@ -1348,7 +1399,7 @@ func (s *Service) validateRuntimeCreate(ctx context.Context, req model.CreateSan
 }
 
 func (s *Service) resolvedCapabilities(req model.CreateSandboxRequest, contract guestimage.Contract) []string {
-	if s.cfg.RuntimeBackend == "qemu" {
+	if s.resolveRuntimeSelection(req).Backend() == "qemu" {
 		return append([]string(nil), contract.Capabilities...)
 	}
 	return append([]string(nil), model.NormalizeCapabilities(req.Capabilities)...)
@@ -1587,8 +1638,13 @@ func (s *Service) snapshotExtractLimits() archiveutil.Limits {
 }
 
 func (s *Service) validateSnapshotCompatibility(snapshot model.Snapshot, sandbox model.Sandbox) error {
-	if snapshot.RuntimeBackend != "" && snapshot.RuntimeBackend != sandbox.RuntimeBackend {
-		return fmt.Errorf("snapshot runtime %q does not match target sandbox runtime %q", snapshot.RuntimeBackend, sandbox.RuntimeBackend)
+	snapshotSelection := resolvedSnapshotRuntimeSelection(snapshot)
+	sandboxSelection := resolvedSandboxRuntimeSelection(sandbox)
+	if snapshotSelection != "" && sandboxSelection != "" && snapshotSelection != sandboxSelection {
+		return fmt.Errorf("snapshot runtime selection %q does not match target sandbox runtime selection %q", snapshotSelection, sandboxSelection)
+	}
+	if snapshotSelection == "" && snapshot.RuntimeBackend != "" && snapshot.RuntimeBackend != sandboxSelection.Backend() {
+		return fmt.Errorf("snapshot runtime %q does not match target sandbox runtime %q", snapshot.RuntimeBackend, sandboxSelection.Backend())
 	}
 	if snapshot.Profile != "" && sandbox.Profile != "" && snapshot.Profile != sandbox.Profile {
 		return fmt.Errorf("snapshot profile %q does not match target sandbox profile %q", snapshot.Profile, sandbox.Profile)
@@ -1597,6 +1653,14 @@ func (s *Service) validateSnapshotCompatibility(snapshot model.Snapshot, sandbox
 		return fmt.Errorf("snapshot workspace contract version %q does not match target sandbox workspace contract version %q", snapshot.WorkspaceContractVersion, sandbox.WorkspaceContractVersion)
 	}
 	return nil
+}
+
+func resolvedSandboxRuntimeSelection(sandbox model.Sandbox) model.RuntimeSelection {
+	return model.ResolveRuntimeSelection(sandbox.RuntimeSelection, sandbox.RuntimeBackend)
+}
+
+func resolvedSnapshotRuntimeSelection(snapshot model.Snapshot) model.RuntimeSelection {
+	return model.ResolveRuntimeSelection(snapshot.RuntimeSelection, snapshot.RuntimeBackend)
 }
 
 func (s *Service) auditStoragePressure(ctx context.Context, sandbox model.Sandbox, usage model.StorageUsage) error {

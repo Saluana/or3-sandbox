@@ -48,6 +48,24 @@ func TestRunStopForceSendsLifecycleRequest(t *testing.T) {
 	}
 }
 
+func TestRunCreateSendsRuntimeSelection(t *testing.T) {
+	var req model.CreateSandboxRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(model.Sandbox{ID: "sbx-1", RuntimeSelection: req.RuntimeSelection})
+	}))
+	defer server.Close()
+
+	if err := runCreate(clientConfig{baseURL: server.URL, token: "dev-token"}, []string{"--image", "alpine:3.20", "--runtime", "docker-dev", "--start=false"}); err != nil {
+		t.Fatalf("runCreate failed: %v", err)
+	}
+	if req.RuntimeSelection != model.RuntimeSelectionDockerDev {
+		t.Fatalf("expected runtime selection docker-dev, got %q", req.RuntimeSelection)
+	}
+}
+
 func TestRunSnapshotCommandsUseExpectedEndpoints(t *testing.T) {
 	tests := []struct {
 		name       string

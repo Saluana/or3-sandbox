@@ -1,5 +1,15 @@
 package model
 
+import "strings"
+
+type RuntimeSelection string
+
+const (
+	RuntimeSelectionDockerDev                  RuntimeSelection = "docker-dev"
+	RuntimeSelectionContainerdKataProfessional RuntimeSelection = "containerd-kata-professional"
+	RuntimeSelectionQEMUProfessional           RuntimeSelection = "qemu-professional"
+)
+
 // RuntimeClass describes the isolation posture of a runtime backend.
 //
 // Policy decisions about production eligibility are based on RuntimeClass rather
@@ -31,11 +41,71 @@ func BackendToRuntimeClass(backend string) RuntimeClass {
 	switch backend {
 	case "docker":
 		return RuntimeClassTrustedDocker
+	case "kata":
+		return RuntimeClassVM
 	case "qemu":
 		return RuntimeClassVM
 	default:
 		return ""
 	}
+}
+
+func RuntimeSelectionFromBackend(backend string) RuntimeSelection {
+	switch strings.ToLower(strings.TrimSpace(backend)) {
+	case "docker":
+		return RuntimeSelectionDockerDev
+	case "kata":
+		return RuntimeSelectionContainerdKataProfessional
+	case "qemu":
+		return RuntimeSelectionQEMUProfessional
+	default:
+		return ""
+	}
+}
+
+func ParseRuntimeSelection(value string) RuntimeSelection {
+	selection := RuntimeSelection(strings.ToLower(strings.TrimSpace(value)))
+	if !selection.IsValid() {
+		return ""
+	}
+	return selection
+}
+
+func ResolveRuntimeSelection(selection RuntimeSelection, backend string) RuntimeSelection {
+	if selection.IsValid() {
+		return selection
+	}
+	return RuntimeSelectionFromBackend(backend)
+}
+
+func (s RuntimeSelection) IsValid() bool {
+	switch s {
+	case RuntimeSelectionDockerDev, RuntimeSelectionContainerdKataProfessional, RuntimeSelectionQEMUProfessional:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s RuntimeSelection) Backend() string {
+	switch s {
+	case RuntimeSelectionDockerDev:
+		return "docker"
+	case RuntimeSelectionContainerdKataProfessional:
+		return "kata"
+	case RuntimeSelectionQEMUProfessional:
+		return "qemu"
+	default:
+		return ""
+	}
+}
+
+func (s RuntimeSelection) RuntimeClass() RuntimeClass {
+	return BackendToRuntimeClass(s.Backend())
+}
+
+func (s RuntimeSelection) IsVMBacked() bool {
+	return s.RuntimeClass().IsVMBacked()
 }
 
 // IsVMBacked returns true when the class provides VM-level isolation and is

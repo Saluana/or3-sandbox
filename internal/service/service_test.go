@@ -22,6 +22,7 @@ import (
 	"or3-sandbox/internal/guestimage"
 	"or3-sandbox/internal/model"
 	"or3-sandbox/internal/repository"
+	runtimeregistry "or3-sandbox/internal/runtime/registry"
 )
 
 func TestGuestFileOpsUseRuntimeBoundaryAndTenantIsolation(t *testing.T) {
@@ -739,7 +740,8 @@ func TestRestoreSnapshotRejectsRuntimeCompatibilityMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	snapshot.RuntimeBackend = "docker"
+	snapshot.RuntimeSelection = model.RuntimeSelectionDockerDev
+	snapshot.RuntimeBackend = sandbox.RuntimeBackend
 	if err := store.UpdateSnapshot(ctx, snapshot); err != nil {
 		t.Fatalf("update snapshot: %v", err)
 	}
@@ -771,7 +773,8 @@ func TestRestoreSnapshotRejectsIncompatibleSnapshotBeforeStoppingRunningTarget(t
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
-	snapshot.RuntimeBackend = "docker"
+	snapshot.RuntimeSelection = model.RuntimeSelectionDockerDev
+	snapshot.RuntimeBackend = sandbox.RuntimeBackend
 	if err := store.UpdateSnapshot(ctx, snapshot); err != nil {
 		t.Fatalf("update snapshot: %v", err)
 	}
@@ -783,6 +786,41 @@ func TestRestoreSnapshotRejectsIncompatibleSnapshotBeforeStoppingRunningTarget(t
 
 	if _, err := svc.RestoreSnapshot(ctx, tenantA.ID, snapshot.ID, model.RestoreSnapshotRequest{TargetSandboxID: sandbox.ID}); err == nil || !strings.Contains(err.Error(), "runtime") {
 		t.Fatalf("expected runtime compatibility error, got %v", err)
+	}
+}
+
+func TestCreateSnapshotPersistsRuntimeSelection(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	snapshot, err := svc.CreateSnapshot(ctx, tenantA.ID, sandbox.ID, model.CreateSnapshotRequest{Name: "snap"})
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if snapshot.RuntimeSelection != model.RuntimeSelectionQEMUProfessional {
+		t.Fatalf("expected snapshot runtime selection to be stamped, got %q", snapshot.RuntimeSelection)
+	}
+	persisted, err := store.GetSnapshot(ctx, tenantA.ID, snapshot.ID)
+	if err != nil {
+		t.Fatalf("get snapshot: %v", err)
+	}
+	if persisted.RuntimeSelection != model.RuntimeSelectionQEMUProfessional {
+		t.Fatalf("expected persisted snapshot runtime selection, got %q", persisted.RuntimeSelection)
 	}
 }
 
@@ -864,6 +902,9 @@ func TestRuntimeHealthReportsBootingState(t *testing.T) {
 	if len(health.Sandboxes) != 1 || health.Sandboxes[0].ObservedStatus != model.SandboxStatusBooting {
 		t.Fatalf("unexpected runtime health: %+v", health)
 	}
+	if health.RuntimeSelectionCounts[string(model.RuntimeSelectionQEMUProfessional)] != 1 {
+		t.Fatalf("expected qemu runtime selection count in runtime health, got %+v", health.RuntimeSelectionCounts)
+	}
 }
 
 func TestRuntimeHealthMarksDegradedGuestsUnhealthy(t *testing.T) {
@@ -900,6 +941,9 @@ func TestRuntimeHealthMarksDegradedGuestsUnhealthy(t *testing.T) {
 	}
 	if len(health.Sandboxes) != 1 || health.Sandboxes[0].SandboxID != sandbox.ID || health.Sandboxes[0].ObservedStatus != model.SandboxStatusDegraded {
 		t.Fatalf("unexpected runtime health payload: %+v", health)
+	}
+	if health.Sandboxes[0].RuntimeSelection != model.RuntimeSelectionQEMUProfessional {
+		t.Fatalf("expected runtime selection in runtime health entry, got %+v", health.Sandboxes[0])
 	}
 }
 
@@ -978,6 +1022,31 @@ func TestCreateSandboxPolicyAllowsAndDeniesImages(t *testing.T) {
 	}
 	if len(events) == 0 || events[len(events)-1].Action != "policy.create" || events[len(events)-1].Outcome != "denied" {
 		t.Fatalf("expected policy denial audit event, got %+v", events)
+	}
+}
+
+func TestLifecyclePolicyRejectsDisabledPersistedRuntimeSelection(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	svc.cfg.EnabledRuntimeSelections = []model.RuntimeSelection{model.RuntimeSelectionDockerDev}
+	if _, err := svc.StartSandbox(ctx, tenantA.ID, sandbox.ID, quota); err == nil || !strings.Contains(err.Error(), "not enabled") {
+		t.Fatalf("expected disabled runtime selection denial, got %v", err)
 	}
 }
 
@@ -1787,6 +1856,9 @@ func TestCapacityReportAndMetricsShowQuotaPressure(t *testing.T) {
 	if report.ProfileCounts["core"] != 1 {
 		t.Fatalf("expected core profile count in capacity report, got %+v", report.ProfileCounts)
 	}
+	if report.RuntimeSelectionCounts[string(model.RuntimeSelectionQEMUProfessional)] != 1 {
+		t.Fatalf("expected qemu runtime selection count in capacity report, got %+v", report.RuntimeSelectionCounts)
+	}
 	if report.CapabilityCounts["exec"] == 0 {
 		t.Fatalf("expected exec capability count in capacity report, got %+v", report.CapabilityCounts)
 	}
@@ -1794,8 +1866,66 @@ func TestCapacityReportAndMetricsShowQuotaPressure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("metrics report: %v", err)
 	}
-	if !strings.Contains(metrics, "or3_sandbox_storage_pressure_ratio") || !strings.Contains(metrics, "or3_sandbox_runtime_status_count") || !strings.Contains(metrics, `or3_sandbox_profile_count{profile="core"} 1`) || !strings.Contains(metrics, `or3_sandbox_capability_count{capability="exec"} 1`) {
+	if !strings.Contains(metrics, "or3_sandbox_storage_pressure_ratio") || !strings.Contains(metrics, "or3_sandbox_runtime_status_count") || !strings.Contains(metrics, `or3_sandbox_runtime_selection_count{runtime_selection="qemu-professional"} 1`) || !strings.Contains(metrics, `or3_sandbox_profile_count{profile="core"} 1`) || !strings.Contains(metrics, `or3_sandbox_capability_count{capability="exec"} 1`) {
 		t.Fatalf("unexpected metrics output: %s", metrics)
+	}
+}
+
+func TestAuditEventsIncludeRuntimeSelectionForCreateRestoreDeleteAndExposure(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	quota.AllowTunnels = true
+	if _, err := store.DB().ExecContext(ctx, `UPDATE quotas SET allow_tunnels=1 WHERE tenant_id=?`, tenantA.ID); err != nil {
+		t.Fatalf("enable tunnels: %v", err)
+	}
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	snapshot, err := svc.CreateSnapshot(ctx, tenantA.ID, sandbox.ID, model.CreateSnapshotRequest{Name: "snap"})
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if _, err := svc.CreateTunnel(ctx, tenantA.ID, sandbox.ID, model.CreateTunnelRequest{TargetPort: 8080}); err != nil {
+		t.Fatalf("create tunnel: %v", err)
+	}
+	if _, err := svc.RestoreSnapshot(ctx, tenantA.ID, snapshot.ID, model.RestoreSnapshotRequest{TargetSandboxID: sandbox.ID}); err != nil {
+		t.Fatalf("restore snapshot: %v", err)
+	}
+	if err := svc.DeleteSandbox(ctx, tenantA.ID, sandbox.ID, true); err != nil {
+		t.Fatalf("delete sandbox: %v", err)
+	}
+
+	events, err := store.ListAuditEvents(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("list audit events: %v", err)
+	}
+	required := map[string]bool{
+		"sandbox.create":   false,
+		"snapshot.restore": false,
+		"sandbox.delete":   false,
+		"tunnel.create":    false,
+	}
+	for _, event := range events {
+		if _, ok := required[event.Action]; ok && strings.Contains(event.Message, "runtime_selection=qemu-professional") {
+			required[event.Action] = true
+		}
+	}
+	for action, seen := range required {
+		if !seen {
+			t.Fatalf("expected runtime_selection in audit event %q, got %+v", action, events)
+		}
 	}
 }
 
@@ -1828,6 +1958,75 @@ func TestMetricsReportUsesPersistedRuntimeHealth(t *testing.T) {
 	}
 	if !strings.Contains(metrics, `or3_sandbox_runtime_status_count{status="creating"} 1`) && !strings.Contains(metrics, `or3_sandbox_runtime_status_count{status="stopped"} 1`) {
 		t.Fatalf("expected persisted runtime status in metrics, got %s", metrics)
+	}
+}
+
+func TestReconcileAcrossMixedRuntimeSelections(t *testing.T) {
+	ctx := context.Background()
+	qemuRuntime := newStubRuntime()
+	dockerRuntime := newStubRuntime()
+	runtime := runtimeregistry.New(map[model.RuntimeSelection]model.RuntimeManager{
+		model.RuntimeSelectionQEMUProfessional: qemuRuntime,
+		model.RuntimeSelectionDockerDev:        dockerRuntime,
+	})
+	svc, _, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.EnabledRuntimeSelections = []model.RuntimeSelection{model.RuntimeSelectionQEMUProfessional, model.RuntimeSelectionDockerDev}
+	svc.cfg.DefaultRuntimeSelection = model.RuntimeSelectionQEMUProfessional
+
+	qemuRuntime.inspectState = model.RuntimeState{RuntimeID: "rt-qemu", Status: model.SandboxStatusRunning, Running: true}
+	dockerRuntime.inspectState = model.RuntimeState{RuntimeID: "rt-docker", Status: model.SandboxStatusStopped}
+
+	qemuSandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		RuntimeSelection: model.RuntimeSelectionQEMUProfessional,
+		BaseImageRef:     "guest-base.qcow2",
+		CPULimit:         model.CPUCores(1),
+		MemoryLimitMB:    512,
+		PIDsLimit:        128,
+		DiskLimitMB:      512,
+		NetworkMode:      model.NetworkModeInternetDisabled,
+		AllowTunnels:     boolPtr(false),
+		Start:            false,
+	})
+	if err != nil {
+		t.Fatalf("create qemu sandbox: %v", err)
+	}
+	dockerSandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		RuntimeSelection: model.RuntimeSelectionDockerDev,
+		BaseImageRef:     "docker.io/library/alpine:3.20",
+		CPULimit:         model.CPUCores(1),
+		MemoryLimitMB:    256,
+		PIDsLimit:        64,
+		DiskLimitMB:      256,
+		NetworkMode:      model.NetworkModeInternetDisabled,
+		AllowTunnels:     boolPtr(false),
+		Start:            false,
+	})
+	if err != nil {
+		t.Fatalf("create docker sandbox: %v", err)
+	}
+
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if qemuRuntime.inspectCalls == 0 {
+		t.Fatal("expected qemu runtime inspect during reconcile")
+	}
+	if dockerRuntime.inspectCalls == 0 {
+		t.Fatal("expected docker runtime inspect during reconcile")
+	}
+	gotQEMU, err := svc.GetSandbox(ctx, tenantA.ID, qemuSandbox.ID)
+	if err != nil {
+		t.Fatalf("get qemu sandbox: %v", err)
+	}
+	if gotQEMU.Status != model.SandboxStatusRunning {
+		t.Fatalf("expected qemu sandbox to reconcile to running, got %q", gotQEMU.Status)
+	}
+	gotDocker, err := svc.GetSandbox(ctx, tenantA.ID, dockerSandbox.ID)
+	if err != nil {
+		t.Fatalf("get docker sandbox: %v", err)
+	}
+	if gotDocker.RuntimeSelection != model.RuntimeSelectionDockerDev {
+		t.Fatalf("expected docker sandbox selection to persist, got %q", gotDocker.RuntimeSelection)
 	}
 }
 
@@ -2343,6 +2542,9 @@ func TestCreateSandboxStampsRuntimeClass(t *testing.T) {
 			if sandbox.RuntimeClass != tt.wantClass {
 				t.Errorf("RuntimeClass: got %q, want %q", sandbox.RuntimeClass, tt.wantClass)
 			}
+			if sandbox.RuntimeSelection == "" {
+				t.Error("expected runtime selection to be stamped")
+			}
 		})
 	}
 }
@@ -2388,24 +2590,29 @@ func TestReconcileToleratesLegacySandboxWithNoRuntimeClass(t *testing.T) {
 	if got.RuntimeClass != model.RuntimeClassVM {
 		t.Errorf("expected derived RuntimeClassVM for qemu backend, got %q", got.RuntimeClass)
 	}
+	if got.RuntimeSelection != model.RuntimeSelectionQEMUProfessional {
+		t.Errorf("expected derived runtime selection for qemu legacy row, got %q", got.RuntimeSelection)
+	}
 }
 
 func newServiceHarness(t *testing.T, runtime model.RuntimeManager, backend string) (*Service, *repository.Store, model.TenantQuota, model.Tenant, model.Tenant) {
 	t.Helper()
 	root := t.TempDir()
 	cfg := config.Config{
-		DatabasePath:         filepath.Join(root, "sandbox.db"),
-		StorageRoot:          filepath.Join(root, "storage"),
-		SnapshotRoot:         filepath.Join(root, "snapshots"),
-		BaseImageRef:         "base-image",
-		RuntimeBackend:       backend,
-		DefaultCPULimit:      model.CPUCores(1),
-		DefaultMemoryLimitMB: 256,
-		DefaultPIDsLimit:     64,
-		DefaultDiskLimitMB:   256,
-		DefaultNetworkMode:   model.NetworkModeInternetDisabled,
-		DefaultAllowTunnels:  false,
-		OperatorHost:         "http://operator.invalid",
+		DatabasePath:             filepath.Join(root, "sandbox.db"),
+		StorageRoot:              filepath.Join(root, "storage"),
+		SnapshotRoot:             filepath.Join(root, "snapshots"),
+		BaseImageRef:             "base-image",
+		RuntimeBackend:           backend,
+		EnabledRuntimeSelections: []model.RuntimeSelection{model.RuntimeSelectionFromBackend(backend)},
+		DefaultRuntimeSelection:  model.RuntimeSelectionFromBackend(backend),
+		DefaultCPULimit:          model.CPUCores(1),
+		DefaultMemoryLimitMB:     256,
+		DefaultPIDsLimit:         64,
+		DefaultDiskLimitMB:       256,
+		DefaultNetworkMode:       model.NetworkModeInternetDisabled,
+		DefaultAllowTunnels:      false,
+		OperatorHost:             "http://operator.invalid",
 	}
 	if backend == "qemu" {
 		qemuImage := filepath.Join(root, "guest-base.qcow2")

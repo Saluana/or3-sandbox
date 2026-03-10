@@ -615,6 +615,9 @@ func resolvePresetRuntimeAdapter(client clientConfig, manifest presets.Manifest,
 	var info model.RuntimeInfo
 	if err := doJSON(client, http.MethodGet, "/v1/runtime/info", nil, &info); err == nil {
 		backend := strings.ToLower(strings.TrimSpace(info.Backend))
+		if info.DefaultRuntimeSelection.IsValid() {
+			backend = info.DefaultRuntimeSelection.Backend()
+		}
 		if backend != "" {
 			adapter.name = backend
 		}

@@ -135,6 +135,7 @@ func snapshotAuditDetail(snapshot model.Snapshot) string {
 		auditKV("name", snapshot.Name),
 		auditKV("status", snapshot.Status),
 		auditKV("runtime", snapshot.RuntimeBackend),
+		auditKV("runtime_selection", model.ResolveRuntimeSelection(snapshot.RuntimeSelection, snapshot.RuntimeBackend)),
 		auditKV("profile", snapshot.Profile),
 		auditKV("exported", snapshot.ExportLocation != ""),
 	)

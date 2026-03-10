@@ -97,6 +97,7 @@ func runCreate(client clientConfig, args []string) error {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	image := fs.String("image", "", "base image")
 	profile := fs.String("profile", "", "guest profile for qemu images: core, runtime, browser, container, debug")
+	runtimeSelection := fs.String("runtime", "", "runtime selection: docker-dev, containerd-kata-professional, qemu-professional")
 	features := fs.String("features", "", "comma-separated guest features to request when supported by the qemu image contract")
 	cpu := fs.String("cpu", "2", "cpu limit (cores, decimal cores, or millicores like 1500m)")
 	memory := fs.Int("memory-mb", 2048, "memory limit")
@@ -115,16 +116,17 @@ func runCreate(client clientConfig, args []string) error {
 		return err
 	}
 	return doJSON(client, http.MethodPost, "/v1/sandboxes", model.CreateSandboxRequest{
-		BaseImageRef:  *image,
-		Profile:       model.GuestProfile(strings.ToLower(strings.TrimSpace(*profile))),
-		Features:      model.NormalizeFeatures(strings.Split(*features, ",")),
-		CPULimit:      cpuLimit,
-		MemoryLimitMB: *memory,
-		PIDsLimit:     *pids,
-		DiskLimitMB:   *disk,
-		NetworkMode:   model.NetworkMode(*network),
-		AllowTunnels:  &allowTunnelsValue,
-		Start:         *start,
+		RuntimeSelection: model.ParseRuntimeSelection(*runtimeSelection),
+		BaseImageRef:     *image,
+		Profile:          model.GuestProfile(strings.ToLower(strings.TrimSpace(*profile))),
+		Features:         model.NormalizeFeatures(strings.Split(*features, ",")),
+		CPULimit:         cpuLimit,
+		MemoryLimitMB:    *memory,
+		PIDsLimit:        *pids,
+		DiskLimitMB:      *disk,
+		NetworkMode:      model.NetworkMode(*network),
+		AllowTunnels:     &allowTunnelsValue,
+		Start:            *start,
 	}, &sandbox)
 }
 

@@ -31,6 +31,8 @@ type Config struct {
 	SnapshotRoot                  string
 	BaseImageRef                  string
 	RuntimeBackend                string
+	EnabledRuntimeSelections      []model.RuntimeSelection
+	DefaultRuntimeSelection       model.RuntimeSelection
 	AuthMode                      string
 	AuthJWTIssuer                 string
 	AuthJWTAudience               string
@@ -93,6 +95,9 @@ type Config struct {
 	QEMUSSHPrivateKeyPath         string
 	QEMUSSHHostKeyPath            string
 	QEMUBootTimeout               time.Duration
+	KataBinary                    string
+	KataRuntimeClass              string
+	KataContainerdSocket          string
 }
 
 func Load(args []string) (Config, error) {
@@ -105,6 +110,10 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.SnapshotRoot, "snapshot-root", env("SANDBOX_SNAPSHOT_ROOT", "./data/snapshots"), "snapshot root")
 	fs.StringVar(&cfg.BaseImageRef, "base-image", env("SANDBOX_BASE_IMAGE", "alpine:3.20"), "default base image")
 	fs.StringVar(&cfg.RuntimeBackend, "runtime", env("SANDBOX_RUNTIME", "docker"), "runtime backend")
+	enabledRuntimeSelections := env("SANDBOX_ENABLED_RUNTIMES", "")
+	defaultRuntimeSelection := env("SANDBOX_DEFAULT_RUNTIME", "")
+	fs.StringVar(&enabledRuntimeSelections, "enabled-runtimes", enabledRuntimeSelections, "comma-separated enabled runtime selections")
+	fs.StringVar(&defaultRuntimeSelection, "default-runtime", defaultRuntimeSelection, "default runtime selection")
 	fs.StringVar(&cfg.AuthMode, "auth-mode", env("SANDBOX_AUTH_MODE", "static"), "auth mode")
 	fs.StringVar(&cfg.AuthJWTIssuer, "auth-jwt-issuer", env("SANDBOX_AUTH_JWT_ISSUER", ""), "jwt issuer")
 	fs.StringVar(&cfg.AuthJWTAudience, "auth-jwt-audience", env("SANDBOX_AUTH_JWT_AUDIENCE", ""), "jwt audience")
@@ -176,6 +185,9 @@ func Load(args []string) (Config, error) {
 	fs.DurationVar(&cfg.ReconcileInterval, "reconcile-interval", envDuration("SANDBOX_RECONCILE_INTERVAL", 30*time.Second), "reconcile interval")
 	fs.DurationVar(&cfg.CleanupInterval, "cleanup-interval", envDuration("SANDBOX_CLEANUP_INTERVAL", 5*time.Minute), "cleanup interval")
 	fs.DurationVar(&cfg.QEMUBootTimeout, "qemu-boot-timeout", envDuration("SANDBOX_QEMU_BOOT_TIMEOUT", 2*time.Minute), "qemu guest boot timeout")
+	fs.StringVar(&cfg.KataBinary, "kata-binary", env("SANDBOX_KATA_BINARY", "ctr"), "kata/containerd client binary")
+	fs.StringVar(&cfg.KataRuntimeClass, "kata-runtime-class", env("SANDBOX_KATA_RUNTIME_CLASS", "io.containerd.kata.v2"), "kata runtime class name")
+	fs.StringVar(&cfg.KataContainerdSocket, "kata-containerd-socket", env("SANDBOX_KATA_CONTAINERD_SOCKET", "/run/containerd/containerd.sock"), "containerd socket path for kata runtime")
 	fs.StringVar(&cfg.OperatorHost, "operator-host", env("SANDBOX_OPERATOR_HOST", "http://127.0.0.1:8080"), "public control plane host")
 	fs.StringVar(&cfg.TunnelSigningKey, "tunnel-signing-key", env("SANDBOX_TUNNEL_SIGNING_KEY", ""), "shared secret for tunnel signed URLs and browser bootstrap cookies")
 	fs.StringVar(&cfg.TunnelSigningKeyPath, "tunnel-signing-key-path", env("SANDBOX_TUNNEL_SIGNING_KEY_PATH", ""), "path to shared secret for tunnel signed URLs and browser bootstrap cookies")
@@ -204,6 +216,8 @@ func Load(args []string) (Config, error) {
 	cfg.DefaultAllowTunnels = strings.EqualFold(allowTunnels, "true")
 	cfg.TrustedDockerRuntime = strings.EqualFold(trustedDockerRuntime, "true")
 	cfg.TrustedProxyHeaders = trustedProxyHeaders
+	cfg.EnabledRuntimeSelections = parseRuntimeSelections(enabledRuntimeSelections)
+	cfg.DefaultRuntimeSelection = model.ParseRuntimeSelection(defaultRuntimeSelection)
 	cfg.AuthJWTSecretPaths = parseCommaSeparated(authJWTSecretPaths)
 	cfg.PolicyAllowedImages = parseCommaSeparated(policyAllowedImages)
 	cfg.PolicyAllowPublicTunnels = policyAllowPublicTunnels
@@ -231,10 +245,12 @@ func Load(args []string) (Config, error) {
 		DefaultTunnelVisibility: env("SANDBOX_DEFAULT_TUNNEL_VISIBILITY", "private"),
 	}
 	cfg.Tenants = parseTenants(env("SANDBOX_TOKENS", "dev-token=tenant-dev"))
+	cfg.applyRuntimeSelectionCompatibility()
 	return cfg, cfg.Validate()
 }
 
 func (c Config) Validate() error {
+	c.applyRuntimeSelectionCompatibility()
 	var problems []string
 	if c.StorageWarningFileCount == 0 {
 		c.StorageWarningFileCount = 10000
@@ -320,7 +336,7 @@ func (c Config) Validate() error {
 	if c.DefaultQuota.MaxCPUCores <= 0 {
 		problems = append(problems, "default quota max cpu must be positive")
 	}
-	if c.RuntimeBackend == "qemu" && c.DefaultCPULimit.MilliValue()%1000 != 0 {
+	if c.DefaultRuntimeSelection.Backend() == "qemu" && c.DefaultCPULimit.MilliValue()%1000 != 0 {
 		problems = append(problems, "qemu runtime requires a whole-core default cpu limit")
 	}
 	if c.DefaultNetworkMode != model.NetworkModeInternetEnabled && c.DefaultNetworkMode != model.NetworkModeInternetDisabled {
@@ -330,8 +346,8 @@ func (c Config) Validate() error {
 		problems = append(problems, "at least one tenant token is required")
 	}
 	if c.DeploymentMode == "production" {
-		if !model.BackendToRuntimeClass(c.RuntimeBackend).IsVMBacked() {
-			problems = append(problems, fmt.Sprintf("production mode requires a VM-backed runtime class; %q resolves to class %q which is not VM-backed", c.RuntimeBackend, model.BackendToRuntimeClass(c.RuntimeBackend)))
+		if !c.DefaultRuntimeSelection.IsVMBacked() {
+			problems = append(problems, fmt.Sprintf("production mode requires a VM-backed runtime class; %q resolves to class %q which is not VM-backed", c.DefaultRuntimeSelection, c.DefaultRuntimeSelection.RuntimeClass()))
 		}
 		if c.AuthMode == "static" {
 			problems = append(problems, "production mode requires SANDBOX_AUTH_MODE=jwt-hs256")
@@ -434,31 +450,69 @@ func defaultRuntimeValidationProbe() runtimeValidationProbe {
 }
 
 func validateRuntimeConfig(c Config, probe runtimeValidationProbe) error {
-	switch c.RuntimeBackend {
-	case "docker":
-		if !c.TrustedDockerRuntime {
-			return errors.New("docker runtime requires SANDBOX_TRUSTED_DOCKER_RUNTIME=true because it is shared-kernel and not a production multi-tenant boundary")
-		}
-		if strings.TrimSpace(c.DockerUser) == "" {
-			c.DockerUser = defaultDockerUser()
-		}
-		if c.DockerTmpfsSizeMB == 0 {
-			c.DockerTmpfsSizeMB = defaultDockerTmpfsSizeMB()
-		}
-		if c.DockerTmpfsSizeMB < 0 {
-			return errors.New("docker runtime requires SANDBOX_DOCKER_TMPFS_MB to be positive")
-		}
-		if strings.TrimSpace(c.DockerSeccompProfile) != "" {
-			if err := probe.fileReadable(c.DockerSeccompProfile); err != nil {
-				return fmt.Errorf("docker seccomp profile is not readable: %w", err)
-			}
-		}
-		return nil
-	case "qemu":
-		return validateQEMUConfig(c, probe)
-	default:
-		return fmt.Errorf("unsupported runtime backend %q", c.RuntimeBackend)
+	c.applyRuntimeSelectionCompatibility()
+	if len(c.EnabledRuntimeSelections) == 0 {
+		return errors.New("at least one runtime selection must be enabled")
 	}
+	if !c.DefaultRuntimeSelection.IsValid() {
+		return fmt.Errorf("unsupported default runtime selection %q", c.DefaultRuntimeSelection)
+	}
+	if !c.IsRuntimeSelectionEnabled(c.DefaultRuntimeSelection) {
+		return fmt.Errorf("default runtime selection %q must also be enabled", c.DefaultRuntimeSelection)
+	}
+	for _, selection := range c.EnabledRuntimeSelections {
+		switch selection {
+		case model.RuntimeSelectionDockerDev:
+			if err := validateDockerConfig(c, probe); err != nil {
+				return err
+			}
+		case model.RuntimeSelectionQEMUProfessional:
+			if err := validateQEMUConfig(c, probe); err != nil {
+				return err
+			}
+		case model.RuntimeSelectionContainerdKataProfessional:
+			if err := validateKataConfig(c, probe); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unsupported runtime selection %q", selection)
+		}
+	}
+	return nil
+}
+
+func validateDockerConfig(c Config, probe runtimeValidationProbe) error {
+	if !c.TrustedDockerRuntime {
+		return errors.New("docker runtime requires SANDBOX_TRUSTED_DOCKER_RUNTIME=true because it is shared-kernel and not a production multi-tenant boundary")
+	}
+	if strings.TrimSpace(c.DockerUser) == "" {
+		c.DockerUser = defaultDockerUser()
+	}
+	if c.DockerTmpfsSizeMB == 0 {
+		c.DockerTmpfsSizeMB = defaultDockerTmpfsSizeMB()
+	}
+	if c.DockerTmpfsSizeMB < 0 {
+		return errors.New("docker runtime requires SANDBOX_DOCKER_TMPFS_MB to be positive")
+	}
+	if strings.TrimSpace(c.DockerSeccompProfile) != "" {
+		if err := probe.fileReadable(c.DockerSeccompProfile); err != nil {
+			return fmt.Errorf("docker seccomp profile is not readable: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateKataConfig(c Config, probe runtimeValidationProbe) error {
+	if err := probe.commandExists(c.KataBinary); err != nil {
+		return fmt.Errorf("kata runtime requires a working client binary: %w", err)
+	}
+	if strings.TrimSpace(c.KataRuntimeClass) == "" {
+		return errors.New("kata runtime requires SANDBOX_KATA_RUNTIME_CLASS")
+	}
+	if strings.TrimSpace(c.KataContainerdSocket) == "" {
+		return errors.New("kata runtime requires SANDBOX_KATA_CONTAINERD_SOCKET")
+	}
+	return nil
 }
 
 func validateQEMUConfig(c Config, probe runtimeValidationProbe) error {
@@ -526,7 +580,50 @@ func validateQEMUConfig(c Config, probe runtimeValidationProbe) error {
 
 // RuntimeClass returns the runtime class derived from the configured backend.
 func (c Config) RuntimeClass() model.RuntimeClass {
-	return model.BackendToRuntimeClass(c.RuntimeBackend)
+	c.applyRuntimeSelectionCompatibility()
+	return c.DefaultRuntimeSelection.RuntimeClass()
+}
+
+func (c Config) IsRuntimeSelectionEnabled(selection model.RuntimeSelection) bool {
+	for _, enabled := range c.EnabledRuntimeSelections {
+		if enabled == selection {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Config) applyRuntimeSelectionCompatibility() {
+	if len(c.EnabledRuntimeSelections) == 0 {
+		legacy := model.RuntimeSelectionFromBackend(c.RuntimeBackend)
+		if legacy.IsValid() {
+			c.EnabledRuntimeSelections = []model.RuntimeSelection{legacy}
+		}
+	}
+	if !c.DefaultRuntimeSelection.IsValid() {
+		c.DefaultRuntimeSelection = model.ResolveRuntimeSelection(c.DefaultRuntimeSelection, c.RuntimeBackend)
+	}
+	if c.DefaultRuntimeSelection.IsValid() {
+		c.RuntimeBackend = c.DefaultRuntimeSelection.Backend()
+	}
+}
+
+func parseRuntimeSelections(raw string) []model.RuntimeSelection {
+	entries := parseCommaSeparated(raw)
+	seen := make(map[model.RuntimeSelection]struct{}, len(entries))
+	result := make([]model.RuntimeSelection, 0, len(entries))
+	for _, entry := range entries {
+		selection := model.ParseRuntimeSelection(entry)
+		if !selection.IsValid() {
+			continue
+		}
+		if _, ok := seen[selection]; ok {
+			continue
+		}
+		seen[selection] = struct{}{}
+		result = append(result, selection)
+	}
+	return result
 }
 
 func (c Config) EffectiveQEMUAllowedBaseImagePaths() []string {
