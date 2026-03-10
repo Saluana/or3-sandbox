@@ -213,12 +213,13 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 	default:
 		return model.RuntimeState{}, fmt.Errorf("unsupported network mode %q", spec.NetworkMode)
 	}
-	args = append(args, spec.BaseImageRef, "sleep", "infinity")
 	withStorageOpt := r.hostOS == "linux" && spec.DiskLimitMB > 0
 	storageOptArgs := append([]string(nil), args...)
 	if withStorageOpt {
 		storageOptArgs = append(storageOptArgs, "--storage-opt", fmt.Sprintf("size=%dm", spec.DiskLimitMB))
 	}
+	args = append(args, spec.BaseImageRef, "sleep", "infinity")
+	storageOptArgs = append(storageOptArgs, spec.BaseImageRef, "sleep", "infinity")
 	out, err := r.run(ctx, storageOptArgs...)
 	if err != nil && withStorageOpt && dockerStorageOptUnsupported(err) {
 		slog.Warn("docker storage-opt unsupported; retrying without disk quota", "runtime", "docker", "sandbox_id", spec.SandboxID, "disk_limit_mb", spec.DiskLimitMB, "error", err)

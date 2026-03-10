@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +22,8 @@ import (
 
 const execPreviewLimit = 64 * 1024
 
+var envVarKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 func (r *Runtime) Exec(ctx context.Context, sandbox model.Sandbox, req model.ExecRequest, streams model.ExecStreams) (model.ExecHandle, error) {
 	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
 		return r.agentExec(ctx, layoutForSandbox(sandbox), req, streams)
@@ -31,7 +34,10 @@ func (r *Runtime) Exec(ctx context.Context, sandbox model.Sandbox, req model.Exe
 	}
 	target := r.sshTarget(sandbox, layoutForSandbox(sandbox))
 	if req.Detached {
-		remoteScript := buildDetachedRemoteScript(command, req.Cwd, req.Env)
+		remoteScript, err := buildDetachedRemoteScript(command, req.Cwd, req.Env)
+		if err != nil {
+			return nil, err
+		}
 		args := append(r.baseSSHArgs(target, false), "sh", "-lc", remoteScript)
 		if _, err := r.runCommand(ctx, r.sshBinary, args...); err != nil {
 			return nil, err
@@ -49,7 +55,10 @@ func (r *Runtime) Exec(ctx context.Context, sandbox model.Sandbox, req model.Exe
 
 	execID := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
 	pidFile := "/tmp/or3-exec-" + execID + ".pid"
-	remoteScript := buildTrackedRemoteScript(command, req.Cwd, req.Env, pidFile)
+	remoteScript, err := buildTrackedRemoteScript(command, req.Cwd, req.Env, pidFile)
+	if err != nil {
+		return nil, err
+	}
 	args := append(r.baseSSHArgs(target, false), "sh", "-lc", remoteScript)
 	cmd := exec.Command(r.sshBinary, args...)
 	stdoutCapture := newPreviewWriter(streams.Stdout, execPreviewLimit)
@@ -84,7 +93,10 @@ func (r *Runtime) AttachTTY(ctx context.Context, sandbox model.Sandbox, req mode
 		command = []string{"bash"}
 	}
 	target := r.sshTarget(sandbox, layoutForSandbox(sandbox))
-	remoteScript := buildInteractiveRemoteScript(command, req.Cwd, req.Env)
+	remoteScript, err := buildInteractiveRemoteScript(command, req.Cwd, req.Env)
+	if err != nil {
+		return nil, err
+	}
 	args := append(r.baseSSHArgs(target, true), "sh", "-lc", remoteScript)
 	cmd := exec.CommandContext(ctx, r.sshBinary, args...)
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{
@@ -276,8 +288,12 @@ func (w *previewWriter) Truncated() bool {
 	return w.truncated
 }
 
-func buildTrackedRemoteScript(command []string, cwd string, env map[string]string, pidFile string) string {
+func buildTrackedRemoteScript(command []string, cwd string, env map[string]string, pidFile string) (string, error) {
 	commandLine := shellJoin(command)
+	envSnippet, err := buildEnvSnippet(env)
+	if err != nil {
+		return "", err
+	}
 	return fmt.Sprintf(`
 set -eu
 rm -f %[1]s
@@ -287,27 +303,35 @@ setsid sh -lc %[4]s &
 child=$!
 echo "$child" > %[1]s
 wait "$child"
-`, shellQuote(pidFile), buildCwdSnippet(cwd), buildEnvSnippet(env), shellQuote(commandLine))
+`, shellQuote(pidFile), buildCwdSnippet(cwd), envSnippet, shellQuote(commandLine)), nil
 }
 
-func buildDetachedRemoteScript(command []string, cwd string, env map[string]string) string {
+func buildDetachedRemoteScript(command []string, cwd string, env map[string]string) (string, error) {
 	commandLine := shellJoin(command)
+	envSnippet, err := buildEnvSnippet(env)
+	if err != nil {
+		return "", err
+	}
 	return fmt.Sprintf(`
 set -eu
 %[1]s
 %[2]s
 nohup sh -lc %[3]s >/dev/null 2>&1 </dev/null &
-`, buildCwdSnippet(cwd), buildEnvSnippet(env), shellQuote(commandLine))
+`, buildCwdSnippet(cwd), envSnippet, shellQuote(commandLine)), nil
 }
 
-func buildInteractiveRemoteScript(command []string, cwd string, env map[string]string) string {
+func buildInteractiveRemoteScript(command []string, cwd string, env map[string]string) (string, error) {
 	commandLine := shellJoin(command)
+	envSnippet, err := buildEnvSnippet(env)
+	if err != nil {
+		return "", err
+	}
 	return strings.TrimSpace(fmt.Sprintf(`
 set -eu
 %[1]s
 %[2]s
 exec sh -lc %[3]s
-`, buildCwdSnippet(cwd), buildEnvSnippet(env), shellQuote(commandLine)))
+`, buildCwdSnippet(cwd), envSnippet, shellQuote(commandLine))), nil
 }
 
 func buildCwdSnippet(cwd string) string {
@@ -317,12 +341,15 @@ func buildCwdSnippet(cwd string) string {
 	return "cd " + shellQuote(cwd)
 }
 
-func buildEnvSnippet(env map[string]string) string {
+func buildEnvSnippet(env map[string]string) (string, error) {
 	if len(env) == 0 {
-		return ""
+		return "", nil
 	}
 	keys := make([]string, 0, len(env))
 	for key := range env {
+		if !envVarKeyPattern.MatchString(key) {
+			return "", fmt.Errorf("invalid env key %q", key)
+		}
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
@@ -330,7 +357,7 @@ func buildEnvSnippet(env map[string]string) string {
 	for _, key := range keys {
 		lines = append(lines, fmt.Sprintf("export %s=%s", key, shellQuote(env[key])))
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), nil
 }
 
 func shellJoin(parts []string) string {

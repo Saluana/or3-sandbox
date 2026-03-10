@@ -669,6 +669,122 @@ func TestTunnelSignedURLRejectsTampering(t *testing.T) {
 	}
 }
 
+func TestTunnelSignedURLRejectsPathTampering(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	signed := h.createTunnelSignedURL(t, "token-a", tunnel.ID, model.CreateTunnelSignedURLRequest{Path: "/allowed"})
+
+	parsed, err := url.Parse(signed.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed.Path = strings.Replace(parsed.Path, "/allowed", "/other", 1)
+
+	response, err := http.Get(parsed.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("unexpected tampered-path status %d: %s", response.StatusCode, string(body))
+	}
+}
+
+func TestTunnelSignedURLCookieRejectsQueryTampering(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	signed := h.createTunnelSignedURL(t, "token-a", tunnel.ID, model.CreateTunnelSignedURLRequest{Path: "/app?mode=ro"})
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar}
+
+	response, err := client.Get(signed.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "window.location.replace") {
+		t.Fatalf("unexpected signed tunnel bootstrap status %d: %s", response.StatusCode, string(body))
+	}
+
+	response, err = client.Get(h.server.URL + "/v1/tunnels/" + tunnel.ID + "/proxy/app?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected signed tunnel proxied status %d: %s", response.StatusCode, string(body))
+	}
+
+	response, err = client.Get(h.server.URL + "/v1/tunnels/" + tunnel.ID + "/proxy/app?mode=rw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("unexpected tampered-query status %d: %s", response.StatusCode, string(body))
+	}
+}
+
+func TestTunnelSignedURLBootstrapsEscapedPath(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	signed := h.createTunnelSignedURL(t, "token-a", tunnel.ID, model.CreateTunnelSignedURLRequest{Path: "/allowed%2Fsegment"})
+
+	response, err := http.Get(signed.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "window.location.replace") {
+		t.Fatalf("unexpected escaped-path bootstrap status %d: %s", response.StatusCode, string(body))
+	}
+}
+
 func TestTunnelSignedURLRejectsTTLAboveMaximum(t *testing.T) {
 	h := newStubHarness(t)
 	defer h.close()

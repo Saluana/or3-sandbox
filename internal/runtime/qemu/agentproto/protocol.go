@@ -12,6 +12,8 @@ import (
 
 const ProtocolVersion = "1"
 
+const MaxMessageSize = 16 * 1024 * 1024
+
 const (
 	OpHello      = "hello"
 	OpReady      = "ready"
@@ -126,6 +128,9 @@ func WriteMessage(w io.Writer, message Message) error {
 	if err != nil {
 		return err
 	}
+	if len(payload) > MaxMessageSize {
+		return fmt.Errorf("agent message exceeds max size of %d bytes", MaxMessageSize)
+	}
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(payload)))
 	if _, err := w.Write(header[:]); err != nil {
@@ -143,6 +148,9 @@ func ReadMessage(r io.Reader) (Message, error) {
 	length := binary.BigEndian.Uint32(header[:])
 	if length == 0 {
 		return Message{}, fmt.Errorf("empty agent message")
+	}
+	if length > uint32(MaxMessageSize) {
+		return Message{}, fmt.Errorf("agent message exceeds max size of %d bytes", MaxMessageSize)
 	}
 	payload := make([]byte, length)
 	if _, err := io.ReadFull(r, payload); err != nil {

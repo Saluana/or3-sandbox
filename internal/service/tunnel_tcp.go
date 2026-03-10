@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"or3-sandbox/internal/model"
@@ -81,14 +82,22 @@ type sandboxLocalConn struct {
 	reader *bufio.Reader
 	local  net.Addr
 	remote net.Addr
+
+	mu            sync.RWMutex
+	readDeadline  time.Time
+	writeDeadline time.Time
 }
 
 func (c *sandboxLocalConn) Read(p []byte) (int, error) {
-	return c.reader.Read(p)
+	return c.runWithDeadline(c.deadline(true), func() (int, error) {
+		return c.reader.Read(p)
+	})
 }
 
 func (c *sandboxLocalConn) Write(p []byte) (int, error) {
-	return c.handle.Writer().Write(p)
+	return c.runWithDeadline(c.deadline(false), func() (int, error) {
+		return c.handle.Writer().Write(p)
+	})
 }
 
 func (c *sandboxLocalConn) Close() error {
@@ -103,17 +112,71 @@ func (c *sandboxLocalConn) RemoteAddr() net.Addr {
 	return c.remote
 }
 
-func (c *sandboxLocalConn) SetDeadline(time.Time) error {
+func (c *sandboxLocalConn) SetDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.readDeadline = deadline
+	c.writeDeadline = deadline
 	return nil
 }
 
-func (c *sandboxLocalConn) SetReadDeadline(time.Time) error {
+func (c *sandboxLocalConn) SetReadDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.readDeadline = deadline
 	return nil
 }
 
-func (c *sandboxLocalConn) SetWriteDeadline(time.Time) error {
+func (c *sandboxLocalConn) SetWriteDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writeDeadline = deadline
 	return nil
 }
+
+func (c *sandboxLocalConn) deadline(read bool) time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if read {
+		return c.readDeadline
+	}
+	return c.writeDeadline
+}
+
+func (c *sandboxLocalConn) runWithDeadline(deadline time.Time, fn func() (int, error)) (int, error) {
+	if deadline.IsZero() {
+		return fn()
+	}
+	wait := time.Until(deadline)
+	if wait <= 0 {
+		_ = c.Close()
+		return 0, deadlineExceededError{}
+	}
+	type result struct {
+		n   int
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		n, err := fn()
+		done <- result{n: n, err: err}
+	}()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case res := <-done:
+		return res.n, res.err
+	case <-timer.C:
+		_ = c.Close()
+		return 0, deadlineExceededError{}
+	}
+}
+
+type deadlineExceededError struct{}
+
+func (deadlineExceededError) Error() string   { return "i/o timeout" }
+func (deadlineExceededError) Timeout() bool   { return true }
+func (deadlineExceededError) Temporary() bool { return true }
 
 type tunnelBridgeAddr string
 
@@ -197,12 +260,20 @@ socket.on("error", (err) => {
 ' "$port"
 fi
 if command -v nc >/dev/null 2>&1; then
+	if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
 	printf '__OR3_TUNNEL_BRIDGE_READY__\n'
 	exec nc 127.0.0.1 "$port"
+	fi
+	echo 'sandbox-local tunnel bridge failed to connect' >&2
+	exit 1
 fi
 if command -v busybox >/dev/null 2>&1; then
+	if busybox nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
 	printf '__OR3_TUNNEL_BRIDGE_READY__\n'
 	exec busybox nc 127.0.0.1 "$port"
+	fi
+	echo 'sandbox-local tunnel bridge failed to connect' >&2
+	exit 1
 fi
 echo 'no supported tcp bridge helper in sandbox' >&2
 exit 127

@@ -812,12 +812,15 @@ func TestMeasureStorageAggregatesSandboxArtifacts(t *testing.T) {
 }
 
 func TestRemoteExecScriptsIncludeWorkingDirEnvAndPidTracking(t *testing.T) {
-	script := buildTrackedRemoteScript(
+	script, err := buildTrackedRemoteScript(
 		[]string{"python3", "-c", "print('ok')"},
 		"/workspace/app",
 		map[string]string{"HELLO": "world"},
 		"/tmp/or3-exec.pid",
 	)
+	if err != nil {
+		t.Fatalf("build tracked remote script: %v", err)
+	}
 	for _, snippet := range []string{
 		"rm -f '/tmp/or3-exec.pid'",
 		"cd '/workspace/app'",
@@ -830,11 +833,21 @@ func TestRemoteExecScriptsIncludeWorkingDirEnvAndPidTracking(t *testing.T) {
 		}
 	}
 
-	interactive := buildInteractiveRemoteScript([]string{"bash"}, "/workspace", nil)
+	interactive, err := buildInteractiveRemoteScript([]string{"bash"}, "/workspace", nil)
+	if err != nil {
+		t.Fatalf("build interactive remote script: %v", err)
+	}
 	if !strings.Contains(interactive, "exec sh -lc") {
 		t.Fatalf("expected interactive script to exec shell: %s", interactive)
 	}
 	if !strings.Contains(interactive, "cd '/workspace'") {
 		t.Fatalf("expected interactive script to change directory: %s", interactive)
+	}
+}
+
+func TestRemoteExecScriptsRejectInvalidEnvKey(t *testing.T) {
+	_, err := buildDetachedRemoteScript([]string{"sh", "-lc", "echo ok"}, "/workspace", map[string]string{"BAD-KEY": "value"})
+	if err == nil || !strings.Contains(err.Error(), "invalid env key") {
+		t.Fatalf("expected invalid env key error, got %v", err)
 	}
 }

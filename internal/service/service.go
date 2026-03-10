@@ -175,10 +175,10 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 	sandbox.UpdatedAt = time.Now().UTC()
 	sandbox.LastActiveAt = sandbox.UpdatedAt
 	if err := s.store.UpdateSandboxState(ctx, sandbox); err != nil {
-		return model.Sandbox{}, err
+		return model.Sandbox{}, s.rollbackFailedCreate(ctx, tenant.ID, sandbox, "persist_sandbox_state", req.Start, err)
 	}
 	if err := s.store.UpdateRuntimeState(ctx, sandbox.ID, state); err != nil {
-		return model.Sandbox{}, err
+		return model.Sandbox{}, s.rollbackFailedCreate(ctx, tenant.ID, sandbox, "persist_runtime_state", req.Start, err)
 	}
 	if err := s.refreshStorage(ctx, sandbox); err != nil {
 		return model.Sandbox{}, err

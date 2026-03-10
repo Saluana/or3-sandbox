@@ -763,11 +763,9 @@ func (rt *Router) handleTunnelSignedURL(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 	path := req.Path
-	if path == "" {
-		path = "/"
-	}
-	if !strings.HasPrefix(path, "/") {
-		http.Error(w, "signed tunnel path must start with '/'", http.StatusBadRequest)
+	capabilityPath, err := normalizeTunnelCapabilityPath(path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	ttl := tunnelSignedURLDefaultTTL
@@ -784,8 +782,8 @@ func (rt *Router) handleTunnelSignedURL(w http.ResponseWriter, r *http.Request, 
 	}
 	expiresAt := time.Now().UTC().Add(ttl)
 	expiry := strconv.FormatInt(expiresAt.Unix(), 10)
-	sig := rt.signTunnelCapability(tunnel.ID, expiry)
-	signedURL, err := rt.buildTunnelProxyURL(tunnel.ID, path, url.Values{
+	sig := rt.signTunnelCapability(tunnel.ID, capabilityPath, expiry)
+	signedURL, err := rt.buildTunnelProxyURL(tunnel.ID, capabilityPath, url.Values{
 		tunnelSignedURLExpiryKey: []string{expiry},
 		tunnelSignedURLSigKey:    []string{sig},
 	}, r)
@@ -793,7 +791,7 @@ func (rt *Router) handleTunnelSignedURL(w http.ResponseWriter, r *http.Request, 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	auditPath := sanitizeTunnelAuditPath(path)
+	auditPath := sanitizeTunnelAuditPath(capabilityPath)
 	rt.service.RecordAuditEvent(r.Context(), tunnel.TenantID, tunnel.SandboxID, "tunnel.signed_url", tunnel.ID, "ok", fmt.Sprintf("path=%q expires_at=%s ttl_seconds=%d", auditPath, expiresAt.UTC().Format(time.RFC3339), int(ttl.Seconds())))
 	rt.log.Info("tunnel signed url issued",
 		"event", "tunnel.signed_url",
@@ -998,8 +996,12 @@ func (rt *Router) handleTunnelWebSocket(w http.ResponseWriter, r *http.Request, 
 // tunnel capability path, or global revocation semantics beyond normal tunnel
 // revoke/expiry behavior.
 func (rt *Router) authorizeTunnelBrowserSession(w http.ResponseWriter, r *http.Request, tunnel model.Tunnel) (authorized bool, bootstrapped bool) {
+	requestCapability, err := tunnelCapabilityFromProxyRequest(r, tunnel.ID)
+	if err != nil {
+		return false, false
+	}
 	if cookie, err := r.Cookie(tunnelAuthCookieName); err == nil {
-		if expiry, sig, ok := parseTunnelAuthCookie(cookie.Value); ok && rt.validateTunnelCapability(tunnel.ID, expiry, sig) {
+		if capabilityPath, expiry, sig, ok := parseTunnelAuthCookie(cookie.Value); ok && rt.validateTunnelCapability(tunnel.ID, capabilityPath, expiry, sig) && tunnelCapabilityAllowsRequest(capabilityPath, requestCapability) {
 			return true, false
 		}
 	}
@@ -1008,14 +1010,15 @@ func (rt *Router) authorizeTunnelBrowserSession(w http.ResponseWriter, r *http.R
 	}
 	expiry := r.URL.Query().Get(tunnelSignedURLExpiryKey)
 	sig := r.URL.Query().Get(tunnelSignedURLSigKey)
-	if !rt.validateTunnelCapability(tunnel.ID, expiry, sig) {
+	if !rt.validateTunnelCapability(tunnel.ID, requestCapability, expiry, sig) {
 		return false, false
 	}
 	expiresAt, _ := strconv.ParseInt(expiry, 10, 64)
+	cookiePath := "/v1/tunnels/" + tunnel.ID + "/proxy" + tunnelCapabilityCookiePath(requestCapability)
 	http.SetCookie(w, &http.Cookie{
 		Name:     tunnelAuthCookieName,
-		Value:    tunnelAuthCookieValue(expiry, sig),
-		Path:     "/v1/tunnels/" + tunnel.ID + "/proxy",
+		Value:    tunnelAuthCookieValue(requestCapability, expiry, sig),
+		Path:     cookiePath,
 		Expires:  time.Unix(expiresAt, 0).UTC(),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
@@ -1065,20 +1068,32 @@ func (rt *Router) buildTunnelProxyURL(tunnelID, path string, query url.Values, r
 	if err != nil {
 		return "", fmt.Errorf("invalid operator host: %w", err)
 	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/v1/tunnels/" + tunnelID + "/proxy" + path
-	parsed.RawQuery = query.Encode()
+	capabilityURL, err := url.Parse(path)
+	if err != nil {
+		return "", fmt.Errorf("invalid tunnel proxy path: %w", err)
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/v1/tunnels/" + tunnelID + "/proxy" + capabilityURL.EscapedPath()
+	mergedQuery := capabilityURL.Query()
+	for key, values := range query {
+		for _, value := range values {
+			mergedQuery.Add(key, value)
+		}
+	}
+	parsed.RawQuery = mergedQuery.Encode()
 	return parsed.String(), nil
 }
 
-func (rt *Router) signTunnelCapability(tunnelID, expiry string) string {
+func (rt *Router) signTunnelCapability(tunnelID, capabilityPath, expiry string) string {
 	mac := hmac.New(sha256.New, rt.tunnelSigningKey)
 	_, _ = io.WriteString(mac, tunnelID)
+	_, _ = io.WriteString(mac, ":")
+	_, _ = io.WriteString(mac, capabilityPath)
 	_, _ = io.WriteString(mac, ":")
 	_, _ = io.WriteString(mac, expiry)
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (rt *Router) validateTunnelCapability(tunnelID, expiry, signature string) bool {
+func (rt *Router) validateTunnelCapability(tunnelID, capabilityPath, expiry, signature string) bool {
 	if strings.TrimSpace(expiry) == "" || strings.TrimSpace(signature) == "" {
 		return false
 	}
@@ -1089,7 +1104,7 @@ func (rt *Router) validateTunnelCapability(tunnelID, expiry, signature string) b
 	if time.Now().UTC().After(time.Unix(expiresAt, 0).UTC()) {
 		return false
 	}
-	expected := rt.signTunnelCapability(tunnelID, expiry)
+	expected := rt.signTunnelCapability(tunnelID, capabilityPath, expiry)
 	return hmac.Equal([]byte(expected), []byte(signature))
 }
 
@@ -1203,16 +1218,109 @@ func sanitizeTunnelProxyRequest(header http.Header) {
 	}
 }
 
-func tunnelAuthCookieValue(expiry, sig string) string {
-	return expiry + "." + sig
+func tunnelAuthCookieValue(capabilityPath, expiry, sig string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(capabilityPath)) + "." + expiry + "." + sig
 }
 
-func parseTunnelAuthCookie(value string) (expiry string, sig string, ok bool) {
-	parts := strings.SplitN(value, ".", 2)
-	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+func parseTunnelAuthCookie(value string) (capabilityPath string, expiry string, sig string, ok bool) {
+	parts := strings.SplitN(value, ".", 3)
+	if len(parts) != 3 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[2]) == "" {
+		return "", "", "", false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return "", "", "", false
+	}
+	return string(decoded), parts[1], parts[2], true
+}
+
+func normalizeTunnelCapabilityPath(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		value = "/"
+	}
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" || !strings.HasPrefix(parsed.Path, "/") {
+		return "", errors.New("signed tunnel path must start with '/'")
+	}
+	normalizedPath := parsed.EscapedPath()
+	if normalizedPath == "" {
+		normalizedPath = "/"
+	}
+	encodedQuery := parsed.Query().Encode()
+	if encodedQuery == "" {
+		return normalizedPath, nil
+	}
+	return normalizedPath + "?" + encodedQuery, nil
+}
+
+func tunnelCapabilityFromProxyRequest(r *http.Request, tunnelID string) (string, error) {
+	prefix := "/v1/tunnels/" + tunnelID + "/proxy"
+	requestPath := r.URL.RawPath
+	if requestPath == "" {
+		requestPath = r.URL.Path
+	}
+	if requestPath == "" {
+		requestPath = r.URL.EscapedPath()
+	}
+	if !strings.HasPrefix(requestPath, prefix) {
+		return "", fmt.Errorf("tunnel proxy path %q does not match tunnel %s", requestPath, tunnelID)
+	}
+	relativePath := strings.TrimPrefix(requestPath, prefix)
+	if relativePath == "" {
+		relativePath = "/"
+	}
+	values := url.Values{}
+	for key, rawValues := range r.URL.Query() {
+		if key == tunnelSignedURLExpiryKey || key == tunnelSignedURLSigKey {
+			continue
+		}
+		for _, value := range rawValues {
+			values.Add(key, value)
+		}
+	}
+	if encoded := values.Encode(); encoded != "" {
+		return normalizeTunnelCapabilityPath(relativePath + "?" + encoded)
+	}
+	return normalizeTunnelCapabilityPath(relativePath)
+}
+
+func tunnelCapabilityCookiePath(capabilityPath string) string {
+	path, _, ok := parseTunnelCapabilityParts(capabilityPath)
+	if !ok {
+		return "/"
+	}
+	if path == "/" {
+		return ""
+	}
+	return path
+}
+
+func tunnelCapabilityAllowsRequest(capabilityPath, requestCapability string) bool {
+	allowedPath, allowedQuery, ok := parseTunnelCapabilityParts(capabilityPath)
+	if !ok {
+		return false
+	}
+	requestPath, requestQuery, ok := parseTunnelCapabilityParts(requestCapability)
+	if !ok {
+		return false
+	}
+	if requestPath == allowedPath {
+		return allowedQuery == "" || requestQuery == allowedQuery
+	}
+	return strings.HasPrefix(requestPath, strings.TrimRight(allowedPath, "/")+"/")
+}
+
+func parseTunnelCapabilityParts(capabilityPath string) (path string, query string, ok bool) {
+	parsed, err := url.ParseRequestURI(capabilityPath)
+	if err != nil {
 		return "", "", false
 	}
-	return parts[0], parts[1], true
+	path = parsed.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	return path, parsed.Query().Encode(), true
 }
 
 func proxyWebSocketMessages(src, dst *websocket.Conn, errCh chan<- error) {

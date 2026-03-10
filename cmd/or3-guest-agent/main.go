@@ -25,6 +25,7 @@ const (
 	defaultPortPath = "/dev/virtio-ports/org.or3.guest_agent"
 	readyMarkerPath = "/var/lib/or3/bootstrap.ready"
 	previewLimit    = 64 * 1024
+	maxFileTransfer = 8 * 1024 * 1024
 )
 
 func main() {
@@ -124,7 +125,7 @@ func (a *guestAgent) handle(ctx context.Context, message agentproto.Message) (ag
 		if err != nil {
 			return agentproto.Message{}, err
 		}
-		data, err := os.ReadFile(target)
+		data, err := readFileLimited(target, maxFileTransfer)
 		if err != nil {
 			return agentproto.Message{}, err
 		}
@@ -212,6 +213,11 @@ func (a *guestAgent) servePTY(ctx context.Context, conn io.ReadWriter, req agent
 		return agentproto.WriteMessage(conn, agentproto.Message{Op: agentproto.OpPTYData, OK: true, Result: payload})
 	}
 	errCh := make(chan error, 2)
+	type connMessage struct {
+		message agentproto.Message
+		err     error
+	}
+	messageCh := make(chan connMessage, 1)
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -231,6 +237,15 @@ func (a *guestAgent) servePTY(ctx context.Context, conn io.ReadWriter, req agent
 		}
 	}()
 	go func() {
+		for {
+			message, err := agentproto.ReadMessage(conn)
+			messageCh <- connMessage{message: message, err: err}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
 		err := cmd.Wait()
 		exitCode := 0
 		if err != nil {
@@ -245,49 +260,48 @@ func (a *guestAgent) servePTY(ctx context.Context, conn io.ReadWriter, req agent
 		errCh <- io.EOF
 	}()
 	for {
-		message, err := agentproto.ReadMessage(conn)
-		if err != nil {
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
-			return err
-		}
-		switch message.Op {
-		case agentproto.OpPTYData:
-			var data agentproto.PTYData
-			if err := json.Unmarshal(message.Result, &data); err != nil {
-				return err
-			}
-			if data.Data != "" {
-				decoded, err := agentproto.DecodeBytes(data.Data)
-				if err != nil {
-					return err
-				}
-				if _, err := ptmx.Write(decoded); err != nil {
-					return err
-				}
-			}
-		case agentproto.OpPTYResize:
-			var resize agentproto.PTYResizeRequest
-			if err := json.Unmarshal(message.Result, &resize); err != nil {
-				return err
-			}
-			if err := pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(defaultInt(resize.Rows, 24)), Cols: uint16(defaultInt(resize.Cols, 80))}); err != nil {
-				return err
-			}
-		case agentproto.OpPTYClose:
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
-			return nil
-		}
 		select {
+		case inbound := <-messageCh:
+			if inbound.err != nil {
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				return inbound.err
+			}
+			switch inbound.message.Op {
+			case agentproto.OpPTYData:
+				var data agentproto.PTYData
+				if err := json.Unmarshal(inbound.message.Result, &data); err != nil {
+					return err
+				}
+				if data.Data != "" {
+					decoded, err := agentproto.DecodeBytes(data.Data)
+					if err != nil {
+						return err
+					}
+					if _, err := ptmx.Write(decoded); err != nil {
+						return err
+					}
+				}
+			case agentproto.OpPTYResize:
+				var resize agentproto.PTYResizeRequest
+				if err := json.Unmarshal(inbound.message.Result, &resize); err != nil {
+					return err
+				}
+				if err := pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(defaultInt(resize.Rows, 24)), Cols: uint16(defaultInt(resize.Cols, 80))}); err != nil {
+					return err
+				}
+			case agentproto.OpPTYClose:
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				return nil
+			}
 		case err := <-errCh:
 			if err == io.EOF {
 				return nil
 			}
 			return err
-		default:
 		}
 	}
 }
@@ -299,9 +313,16 @@ func runExec(ctx context.Context, req agentproto.ExecRequest) (agentproto.ExecRe
 	}
 	runCtx := ctx
 	var cancel context.CancelFunc
+	if req.Detached {
+		runCtx = context.Background()
+	}
 	if req.Timeout > 0 {
-		runCtx, cancel = context.WithTimeout(ctx, req.Timeout)
-		defer cancel()
+		if req.Detached {
+			runCtx, cancel = context.WithTimeout(context.Background(), req.Timeout)
+		} else {
+			runCtx, cancel = context.WithTimeout(ctx, req.Timeout)
+			defer cancel()
+		}
 	}
 	cmd := exec.CommandContext(runCtx, command[0], command[1:]...)
 	cmd.Dir = defaultString(req.Cwd, "/workspace")
@@ -315,6 +336,12 @@ func runExec(ctx context.Context, req agentproto.ExecRequest) (agentproto.ExecRe
 		return agentproto.ExecResult{}, err
 	}
 	if req.Detached {
+		go func() {
+			_ = cmd.Wait()
+			if cancel != nil {
+				cancel()
+			}
+		}()
 		return agentproto.ExecResult{ExitCode: 0, Status: string(model.ExecutionStatusDetached), StartedAt: startedAt, CompletedAt: startedAt}, nil
 	}
 	err := cmd.Wait()
@@ -385,6 +412,25 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func readFileLimited(path string, limit int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	if info, err := file.Stat(); err == nil && info.Size() > limit {
+		return nil, fmt.Errorf("file exceeds transfer limit of %d bytes", limit)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("file exceeds transfer limit of %d bytes", limit)
+	}
+	return data, nil
 }
 
 type limitedBuffer struct {

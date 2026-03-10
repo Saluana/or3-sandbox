@@ -245,7 +245,65 @@ cleanup: always
 	}
 }
 
-func TestRunPresetRunPrintsTunnelTokenForPrivateTokenTunnels(t *testing.T) {
+func TestRunPresetRunHidesTunnelTokenByDefault(t *testing.T) {
+	examplesDir := t.TempDir()
+	writePresetFixture(t, examplesDir, "tunnel-token", `
+name: tunnel-token
+runtime:
+  allowed: [docker]
+sandbox:
+  image: alpine:3.20
+  allow_tunnels: true
+startup:
+  name: sleep
+  command: ["sh", "-lc", "sleep 60"]
+  detached: true
+readiness:
+  type: http
+  path: /
+  timeout: 1s
+  interval: 100ms
+tunnel:
+  port: 8080
+  protocol: http
+  auth_mode: token
+  visibility: private
+cleanup: always
+`)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case respondRuntimeBackend(w, r, "docker"):
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+			_ = json.NewEncoder(w).Encode(model.Sandbox{ID: "sbx-tunnel", RuntimeBackend: "docker", Status: model.SandboxStatusRunning})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/sbx-tunnel/exec":
+			_ = json.NewEncoder(w).Encode(model.Execution{ID: "exec-1", Status: model.ExecutionStatusRunning})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/sbx-tunnel/tunnels":
+			_ = json.NewEncoder(w).Encode(model.Tunnel{ID: "tun-1", Endpoint: "http://" + r.Host + "/proxy", AuthMode: "token", AccessToken: "tunnel-secret"})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/tunnels/tun-1/signed-url":
+			_ = json.NewEncoder(w).Encode(model.TunnelSignedURL{URL: "http://" + r.Host + "/proxy?or3_exp=123&or3_sig=sig", ExpiresAt: time.Unix(123, 0).UTC()})
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sbx-tunnel":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/proxy/":
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	output := captureStdout(t, func() {
+		if err := runPresetRun(clientConfig{baseURL: server.URL, token: "dev-token"}, []string{"--examples-dir", examplesDir, "tunnel-token"}); err != nil {
+			t.Fatalf("runPresetRun: %v", err)
+		}
+	})
+	if strings.Contains(output, "tunnel_access_token=tunnel-secret") {
+		t.Fatalf("expected tunnel access token to stay hidden by default, got %s", output)
+	}
+}
+
+func TestRunPresetRunPrintsTunnelTokenWhenExplicitlyEnabled(t *testing.T) {
+	t.Setenv(showTunnelTokenEnv, "1")
 	examplesDir := t.TempDir()
 	writePresetFixture(t, examplesDir, "tunnel-token", `
 name: tunnel-token
@@ -299,6 +357,77 @@ cleanup: always
 	})
 	if !strings.Contains(output, "tunnel_access_token=tunnel-secret") {
 		t.Fatalf("expected tunnel access token in output, got %s", output)
+	}
+}
+
+func TestRunPresetRunRejectsFileSourceEscapingPresetDir(t *testing.T) {
+	examplesDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(examplesDir, "secret.txt"), []byte("host-secret"), 0o644); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	writePresetFixture(t, examplesDir, "escape-source", `
+name: escape-source
+runtime:
+  allowed: [docker]
+sandbox:
+  image: alpine:3.20
+files:
+  - path: note.txt
+    source: ../secret.txt
+cleanup: always
+`)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case respondRuntimeBackend(w, r, "docker"):
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+			_ = json.NewEncoder(w).Encode(model.Sandbox{ID: "sbx-escape", RuntimeBackend: "docker", Status: model.SandboxStatusRunning})
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sbx-escape":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	err := runPresetRun(clientConfig{baseURL: server.URL, token: "dev-token"}, []string{"--examples-dir", examplesDir, "escape-source"})
+	if err == nil || !strings.Contains(err.Error(), "escapes the preset directory") {
+		t.Fatalf("expected preset path rejection, got %v", err)
+	}
+}
+
+func TestRunPresetRunRejectsArtifactPathEscapingPresetDir(t *testing.T) {
+	examplesDir := t.TempDir()
+	writePresetFixture(t, examplesDir, "escape-artifact", `
+name: escape-artifact
+runtime:
+  allowed: [docker]
+sandbox:
+  image: alpine:3.20
+artifacts:
+  - remote_path: note.txt
+    local_path: ../outside.txt
+cleanup: always
+`)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case respondRuntimeBackend(w, r, "docker"):
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+			_ = json.NewEncoder(w).Encode(model.Sandbox{ID: "sbx-artifact", RuntimeBackend: "docker", Status: model.SandboxStatusRunning})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sbx-artifact/files/note.txt":
+			_ = json.NewEncoder(w).Encode(model.FileReadResponse{Path: "note.txt", Content: "artifact", Size: 8, Encoding: "utf-8"})
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sbx-artifact":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	err := runPresetRun(clientConfig{baseURL: server.URL, token: "dev-token"}, []string{"--examples-dir", examplesDir, "escape-artifact"})
+	if err == nil || !strings.Contains(err.Error(), "escapes the preset directory") {
+		t.Fatalf("expected artifact path rejection, got %v", err)
 	}
 }
 

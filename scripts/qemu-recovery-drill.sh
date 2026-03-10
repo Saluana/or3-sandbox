@@ -39,6 +39,20 @@ log() {
   printf '[qemu-recovery] %s\n' "$*"
 }
 
+run_restart_command() {
+  python3 - <<'PY'
+import os
+import shlex
+import subprocess
+import sys
+
+command = os.environ.get("SANDBOXD_RESTART_COMMAND", "").strip()
+if not command:
+    sys.exit(0)
+subprocess.run(shlex.split(command), check=True)
+PY
+}
+
 wait_for_status() {
   local sandbox_id="$1"
   local want="$2"
@@ -67,7 +81,7 @@ sandboxctl exec "$SANDBOX_ID" sh -lc 'printf recovery-ok > /workspace/recovery.t
 
 if [ -n "${SANDBOXD_RESTART_COMMAND:-}" ]; then
   log 'running daemon restart drill'
-  eval "$SANDBOXD_RESTART_COMMAND"
+  run_restart_command
   wait_for_status "$SANDBOX_ID" running 90
   sandboxctl download "$SANDBOX_ID" recovery.txt "$WORK_DIR/recovery.txt"
   test "$(cat "$WORK_DIR/recovery.txt")" = 'recovery-ok'

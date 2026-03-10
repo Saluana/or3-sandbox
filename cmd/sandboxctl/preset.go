@@ -168,6 +168,7 @@ type presetRunner struct {
 const (
 	presetGuestReadyTimeout  = 2 * time.Minute
 	presetGuestReadyInterval = time.Second
+	showTunnelTokenEnv       = "SANDBOXCTL_SHOW_TUNNEL_ACCESS_TOKEN"
 )
 
 type presetRuntimeAdapter struct {
@@ -406,7 +407,10 @@ func (r presetRunner) uploadFiles(sandboxID string, vars map[string]string) erro
 		if strings.TrimSpace(asset.Content) != "" {
 			payload = model.FileWriteRequest{Content: expandTemplate(asset.Content, vars)}
 		} else {
-			sourcePath := filepath.Join(r.manifest.BaseDir, asset.Source)
+			sourcePath, err := resolvePresetPath(r.manifest.BaseDir, asset.Source)
+			if err != nil {
+				return err
+			}
 			data, err := os.ReadFile(sourcePath)
 			if err != nil {
 				return err
@@ -504,7 +508,7 @@ func (r presetRunner) createTunnel(sandboxID string) (model.Tunnel, error) {
 		return model.Tunnel{}, err
 	}
 	fmt.Fprintf(os.Stdout, "tunnel_endpoint=%s\n", tunnel.Endpoint)
-	if strings.EqualFold(tunnel.AuthMode, "token") && strings.TrimSpace(tunnel.AccessToken) != "" {
+	if strings.EqualFold(tunnel.AuthMode, "token") && strings.TrimSpace(tunnel.AccessToken) != "" && showTunnelAccessToken() {
 		fmt.Fprintf(os.Stdout, "tunnel_access_token=%s\n", tunnel.AccessToken)
 	}
 	return tunnel, nil
@@ -554,9 +558,9 @@ func (r presetRunner) downloadArtifacts(sandboxID string) error {
 		if err := doJSON(r.client, http.MethodGet, endpoint, nil, &file); err != nil {
 			return err
 		}
-		localPath := artifact.LocalPath
-		if !filepath.IsAbs(localPath) {
-			localPath = filepath.Join(r.manifest.BaseDir, localPath)
+		localPath, err := resolvePresetPath(r.manifest.BaseDir, artifact.LocalPath)
+		if err != nil {
+			return err
 		}
 		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 			return err
@@ -576,6 +580,34 @@ func (r presetRunner) downloadArtifacts(sandboxID string) error {
 		}
 	}
 	return nil
+}
+
+func resolvePresetPath(baseDir, relativePath string) (string, error) {
+	value := strings.TrimSpace(relativePath)
+	if value == "" {
+		return "", fmt.Errorf("preset path is required")
+	}
+	if filepath.IsAbs(value) {
+		return "", fmt.Errorf("preset path %q must be relative to the preset directory", relativePath)
+	}
+	baseAbs, err := filepath.Abs(baseDir)
+	if err != nil {
+		return "", err
+	}
+	resolved := filepath.Clean(filepath.Join(baseAbs, value))
+	rel, err := filepath.Rel(baseAbs, resolved)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("preset path %q escapes the preset directory", relativePath)
+	}
+	return resolved, nil
+}
+
+func showTunnelAccessToken() bool {
+	value := strings.TrimSpace(os.Getenv(showTunnelTokenEnv))
+	return value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes")
 }
 
 func resolvePresetRuntimeAdapter(client clientConfig, manifest presets.Manifest, req model.CreateSandboxRequest) (presetRuntimeAdapter, error) {

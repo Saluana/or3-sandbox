@@ -38,6 +38,20 @@ log() {
   printf '[qemu-smoke] %s\n' "$*"
 }
 
+run_restart_command() {
+  python3 - <<'PY'
+import os
+import shlex
+import subprocess
+import sys
+
+command = os.environ.get("SANDBOXD_RESTART_COMMAND", "").strip()
+if not command:
+    sys.exit(0)
+subprocess.run(shlex.split(command), check=True)
+PY
+}
+
 create_qemu_sandbox() {
   local image="$1"
   local profile="$2"
@@ -153,7 +167,7 @@ if [ -n "${SANDBOXD_RESTART_COMMAND:-}" ]; then
     echo 'set OR3_ALLOW_DISRUPTIVE=1 to run SANDBOXD_RESTART_COMMAND during smoke' >&2
     exit 1
   fi
-  eval "$SANDBOXD_RESTART_COMMAND"
+  run_restart_command
   wait_for_status "$core_id" running 90
 else
   log 'skipping daemon restart reconciliation step (set SANDBOXD_RESTART_COMMAND and OR3_ALLOW_DISRUPTIVE=1 to enable)'
