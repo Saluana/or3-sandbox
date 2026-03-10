@@ -54,6 +54,7 @@ func New(log *slog.Logger, svc *service.Service, cfg config.Config) http.Handler
 		tunnelSigningKey: newTunnelSigningKey(cfg),
 		upgrader:         websocket.Upgrader{},
 	}
+	router.upgrader.CheckOrigin = router.checkWebSocketOrigin
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", router.health)
 	mux.HandleFunc("/metrics", router.handleMetrics)
@@ -66,6 +67,30 @@ func New(log *slog.Logger, svc *service.Service, cfg config.Config) http.Handler
 	mux.HandleFunc("/v1/snapshots/", router.handleSnapshotRoutes)
 	mux.HandleFunc("/v1/tunnels/", router.handleTunnelRoutes)
 	return loggingMiddleware(log, mux)
+}
+
+func (rt *Router) checkWebSocketOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	originURL, err := url.Parse(origin)
+	if err != nil || originURL.Scheme == "" || originURL.Host == "" {
+		return false
+	}
+	expectedOrigin := rt.operatorHost
+	if expectedOrigin == "" {
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		expectedOrigin = scheme + "://" + r.Host
+	}
+	expectedURL, err := url.Parse(expectedOrigin)
+	if err != nil || expectedURL.Scheme == "" || expectedURL.Host == "" {
+		return false
+	}
+	return strings.EqualFold(originURL.Scheme, expectedURL.Scheme) && strings.EqualFold(originURL.Host, expectedURL.Host)
 }
 
 func loggingMiddleware(log *slog.Logger, next http.Handler) http.Handler {
@@ -966,6 +991,12 @@ func (rt *Router) handleTunnelWebSocket(w http.ResponseWriter, r *http.Request, 
 	<-errCh
 }
 
+// authorizeTunnelBrowserSession implements narrow browser tunnel capability
+// checks. The signed URL and bootstrap cookie authorize access to one tunnel
+// proxy path until expiry, but they are not a general browser login session.
+// This flow does not claim device binding, broad CSRF protection outside the
+// tunnel capability path, or global revocation semantics beyond normal tunnel
+// revoke/expiry behavior.
 func (rt *Router) authorizeTunnelBrowserSession(w http.ResponseWriter, r *http.Request, tunnel model.Tunnel) (authorized bool, bootstrapped bool) {
 	if cookie, err := r.Cookie(tunnelAuthCookieName); err == nil {
 		if expiry, sig, ok := parseTunnelAuthCookie(cookie.Value); ok && rt.validateTunnelCapability(tunnel.ID, expiry, sig) {

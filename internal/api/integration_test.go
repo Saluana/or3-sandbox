@@ -984,7 +984,7 @@ func TestTunnelWebSocketProxyForwardsMessages(t *testing.T) {
 	}
 }
 
-func TestTunnelWebSocketProxySupportsSignedCookieAuth(t *testing.T) {
+func TestTunnelWebSocketSignedCookieAllowsSameOrigin(t *testing.T) {
 	h := newStubHarness(t)
 	defer h.close()
 	upstream := newTunnelWebSocketUpstream(t)
@@ -1160,8 +1160,16 @@ func TestTunnelWebSocketSignedCookieRejectsCrossOrigin(t *testing.T) {
 	response.Body.Close()
 	proxyURL := strings.TrimRight(h.server.URL, "/") + "/v1/tunnels/" + tunnel.ID + "/proxy/socket"
 	dialer := websocket.Dialer{Jar: jar}
-	if _, _, err := dialer.Dial("ws"+strings.TrimPrefix(proxyURL, "http"), http.Header{"Origin": []string{"http://evil.example"}}); err == nil {
+	_, response, err = dialer.Dial("ws"+strings.TrimPrefix(proxyURL, "http"), http.Header{"Origin": []string{"http://evil.example"}})
+	if err == nil {
 		t.Fatal("expected cross-origin websocket upgrade to be rejected")
+	}
+	if response == nil {
+		t.Fatal("expected websocket handshake response for rejected cross-origin request")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected cross-origin websocket upgrade status 403, got %d", response.StatusCode)
 	}
 }
 

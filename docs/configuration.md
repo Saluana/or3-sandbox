@@ -150,6 +150,8 @@ Important truth:
 Tunnel signing note:
 
 - signed browser tunnel URLs and the bootstrap cookie are HMAC-protected
+- the signed URL plus bootstrap cookie is a tunnel-scoped capability, not a general browser session
+- the current model is intentionally narrow and does not claim device binding, cross-site protection for unrelated endpoints, or global revocation beyond tunnel revoke/expiry
 - if you do not set an explicit tunnel signing secret, the daemon derives a stable fallback from the current auth configuration
 - an explicit shared secret is still the recommended operator choice for multi-replica deployments because it makes signing independent from auth-secret rotation
 
