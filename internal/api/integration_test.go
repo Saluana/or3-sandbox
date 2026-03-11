@@ -560,6 +560,87 @@ func TestJWTAuthorizationEnforcesRolePermissions(t *testing.T) {
 	h.expectStatus(t, serviceToken, http.MethodGet, "/metrics", nil, http.StatusOK)
 }
 
+func TestJWTServiceTokenSignedURLPrivilegesRespectExplicitRoles(t *testing.T) {
+	h := newJWTStubHarness(t)
+	defer h.close()
+
+	adminToken := h.jwtToken(t, "tenant-a", []string{"admin"}, false)
+	serviceToken := h.jwtToken(t, "tenant-a", nil, true)
+	restrictedServiceToken := h.jwtToken(t, "tenant-a", []string{"viewer"}, true)
+
+	sandbox := h.createSandbox(t, adminToken, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, adminToken, sandbox.ID, 8090)
+
+	signed := h.createTunnelSignedURL(t, serviceToken, tunnel.ID, model.CreateTunnelSignedURLRequest{Path: "/app/"})
+	if !strings.Contains(signed.URL, "/v1/tunnels/"+tunnel.ID+"/proxy/app/") {
+		t.Fatalf("expected service JWT to issue signed tunnel URL, got %q", signed.URL)
+	}
+
+	h.expectStatus(t, restrictedServiceToken, http.MethodDelete, "/v1/tunnels/"+tunnel.ID, nil, http.StatusForbidden)
+	h.expectStatus(t, restrictedServiceToken, http.MethodGet, "/v1/runtime/health", nil, http.StatusForbidden)
+	h.expectStatus(t, serviceToken, http.MethodDelete, "/v1/tunnels/"+tunnel.ID, nil, http.StatusNoContent)
+}
+
+func TestTunnelListIncludesRevokedAndReplacementTunnel(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+
+	first := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	listed := h.listTunnels(t, "token-a", sandbox.ID)
+	if len(listed) != 1 {
+		t.Fatalf("expected one listed tunnel, got %+v", listed)
+	}
+	if listed[0].ID != first.ID || listed[0].RevokedAt != nil {
+		t.Fatalf("unexpected initial tunnel list entry %+v", listed[0])
+	}
+	if listed[0].AccessToken != "" {
+		t.Fatalf("expected tunnel list to omit access token, got %+v", listed[0])
+	}
+
+	h.expectStatus(t, "token-a", http.MethodDelete, "/v1/tunnels/"+first.ID, nil, http.StatusNoContent)
+	second := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+
+	listed = h.listTunnels(t, "token-a", sandbox.ID)
+	if len(listed) != 2 {
+		t.Fatalf("expected revoked and replacement tunnels, got %+v", listed)
+	}
+	if listed[0].ID != first.ID || listed[0].RevokedAt == nil {
+		t.Fatalf("expected first tunnel to remain listed as revoked, got %+v", listed[0])
+	}
+	if listed[1].ID != second.ID || listed[1].RevokedAt != nil {
+		t.Fatalf("expected second tunnel to be active replacement, got %+v", listed[1])
+	}
+	if listed[1].AccessToken != "" {
+		t.Fatalf("expected replacement tunnel list entry to omit access token, got %+v", listed[1])
+	}
+
+	h.expectStatusWithHeaders(t, "token-a", http.MethodGet, "/v1/tunnels/"+first.ID+"/proxy", nil, http.StatusGone, map[string]string{"X-Tunnel-Token": first.AccessToken})
+	body := h.tunnelGET(t, "token-a", second.ID, second.AccessToken)
+	if body != "proxy-ok" {
+		t.Fatalf("unexpected replacement tunnel body %q", body)
+	}
+}
+
 func TestTunnelProxyTargetsSandboxLocalhost(t *testing.T) {
 	h := newStubHarness(t)
 	defer h.close()
@@ -669,6 +750,56 @@ func TestTunnelSignedURLBootstrapsBrowserSession(t *testing.T) {
 	}
 	if h.stubRuntime.lastProxyPath != "/" {
 		t.Fatalf("expected signed tunnel proxy root path, got %q", h.stubRuntime.lastProxyPath)
+	}
+}
+
+func TestTunnelSignedURLCookieAllowsFollowUpAssetRequest(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	signed := h.createTunnelSignedURL(t, "token-a", tunnel.ID, model.CreateTunnelSignedURLRequest{Path: "/app/"})
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar}
+
+	response, err := client.Get(signed.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "window.location.replace") {
+		t.Fatalf("unexpected signed tunnel bootstrap status %d: %s", response.StatusCode, string(body))
+	}
+
+	response, err = client.Get(h.server.URL + "/v1/tunnels/" + tunnel.ID + "/proxy/app/assets/main.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected follow-up asset status %d: %s", response.StatusCode, string(body))
+	}
+	if string(body) != "proxy-ok" {
+		t.Fatalf("unexpected follow-up asset body %q", string(body))
+	}
+	if h.stubRuntime.lastProxyPath != "/app/assets/main.js" {
+		t.Fatalf("expected cookie-authorized follow-up asset path, got %q", h.stubRuntime.lastProxyPath)
 	}
 }
 
@@ -1450,6 +1581,77 @@ func TestStreamExecFailureEmitsSSEErrorEvent(t *testing.T) {
 	}
 }
 
+func TestStreamExecSuccessEmitsOrderedSSEEvents(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	h.stubRuntime.execStdout = "stream-success"
+	h.stubRuntime.execStderr = "stream-warning"
+	h.stubRuntime.execResult = model.ExecResult{
+		ExitCode:    0,
+		Status:      model.ExecutionStatusSucceeded,
+		StartedAt:   time.Now().UTC(),
+		CompletedAt: time.Now().UTC().Add(50 * time.Millisecond),
+	}
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+
+	requestBody, err := json.Marshal(model.ExecRequest{
+		Command: []string{"sh", "-lc", "echo hi"},
+		Cwd:     "/workspace",
+		Timeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, h.server.URL+"/v1/sandboxes/"+sandbox.ID+"/exec?stream=1", bytes.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer token-a")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", response.StatusCode, string(body))
+	}
+	if got := response.Header.Get("Content-Type"); !strings.Contains(got, "text/event-stream") {
+		t.Fatalf("expected sse content type, got %q", got)
+	}
+	stream := string(body)
+	stdoutIndex := strings.Index(stream, "event: stdout\ndata: stream-success\n\n")
+	stderrIndex := strings.Index(stream, "event: stderr\ndata: stream-warning\n\n")
+	resultIndex := strings.Index(stream, "event: result")
+	if stdoutIndex == -1 || stderrIndex == -1 || resultIndex == -1 {
+		t.Fatalf("expected stdout, stderr, and result events, got %q", stream)
+	}
+	if !(stdoutIndex < stderrIndex && stderrIndex < resultIndex) {
+		t.Fatalf("expected stdout/stderr before result, got %q", stream)
+	}
+	if strings.Contains(stream, "event: error") {
+		t.Fatalf("did not expect error event for successful streamed exec, got %q", stream)
+	}
+	if !strings.Contains(stream, `"status":"succeeded"`) || !strings.Contains(stream, `"exit_code":0`) {
+		t.Fatalf("expected serialized execution result in stream, got %q", stream)
+	}
+}
+
 func TestTTYWebSocketLifecycleAndResize(t *testing.T) {
 	h := newStubHarness(t)
 	defer h.close()
@@ -2018,6 +2220,13 @@ func (h *harness) createTunnel(t *testing.T, token, sandboxID string, port int) 
 		Visibility: "private",
 	}, &tunnel, http.StatusCreated)
 	return tunnel
+}
+
+func (h *harness) listTunnels(t *testing.T, token, sandboxID string) []model.Tunnel {
+	t.Helper()
+	var tunnels []model.Tunnel
+	h.mustDoJSON(t, token, http.MethodGet, "/v1/sandboxes/"+sandboxID+"/tunnels", nil, &tunnels, http.StatusOK)
+	return tunnels
 }
 
 func (h *harness) createTunnelSignedURL(t *testing.T, token, tunnelID string, req model.CreateTunnelSignedURLRequest) model.TunnelSignedURL {
