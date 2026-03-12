@@ -12,6 +12,12 @@ Runtime rule of thumb:
 - use `docker` when cost and density matter more than isolation and the workload is trusted
 - use `qemu` when isolation strength matters more than density and you have validated the guest image, suspend/resume behavior, and recovery drills on your hosts
 
+Production default posture:
+
+- set `SANDBOX_DEPLOYMENT_PROFILE=production-qemu-core` for the smallest supported production footprint
+- use `SANDBOX_DEPLOYMENT_PROFILE=production-qemu-browser` only when browser tooling is explicitly required
+- use `SANDBOX_DEPLOYMENT_PROFILE=exception-container` only for time-bounded dangerous-profile exceptions with an audit reason
+
 The current Docker backend is not the hostile multi-tenant production boundary described by the architecture docs.
 
 The repository ships:
@@ -71,6 +77,25 @@ go run ./cmd/sandboxctl exec <sandbox-id> sh -lc 'echo hello > /workspace/hello.
 go run ./cmd/sandboxctl tty <sandbox-id>
 ```
 
+Production bootstrap path:
+
+```bash
+export SANDBOX_DEPLOYMENT_PROFILE=production-qemu-core
+export SANDBOX_PRODUCTION_TRANSPORT=terminated-proxy
+export SANDBOX_OPERATOR_HOST=https://sandbox.example.com
+export SANDBOX_TRUST_PROXY_HEADERS=true
+export SANDBOX_AUTH_MODE=jwt-hs256
+export SANDBOX_AUTH_JWT_ISSUER=https://issuer.example
+export SANDBOX_AUTH_JWT_AUDIENCE=sandbox-api
+export SANDBOX_AUTH_JWT_SECRET_PATHS=/run/secrets/or3-jwt-hmac
+export SANDBOX_TUNNEL_SIGNING_KEY_PATH=/run/secrets/or3-tunnel-signing-key
+
+go run ./cmd/sandboxctl config-lint
+go run ./cmd/sandboxctl doctor --production-qemu
+go run ./cmd/sandboxctl image promote --image /var/lib/or3-images/or3-guest-core.qcow2
+go run ./cmd/sandboxctl release-gate
+```
+
 ## Default Auth
 
 Development mode seeds bearer tokens from `SANDBOX_TOKENS`.
@@ -124,6 +149,21 @@ The active next-step design work is focused on:
 ```bash
 ./scripts/production-smoke.sh
 ```
+
+Production test matrix:
+
+| Claim | Evidence |
+| --- | --- |
+| Production runtime boundary defaults to VM-backed QEMU | `go test ./internal/config ./internal/service` |
+| Explicit RBAC and service-account scope checks | `go test ./internal/auth` |
+| Runtime info / operator inspection surfaces | `go test ./internal/api -run 'Test(StartAdmissionDenialAppearsInMetrics|RuntimeHealthEndpoint)'` |
+| Promoted image enforcement | `go test ./internal/service -run TestProductionQEMUCreateRequiresPromotedImage` |
+| SQLite migrations for hardening state | `go test ./internal/db ./internal/repository` |
+| Config lint and doctor bootstrap path | `go test ./cmd/sandboxctl -run 'Test(RunConfigLint|RunDoctorRequiresProductionQEMUFlag|ProductionQEMUDoctor.*)'` |
+| Host-gated QEMU posture | `./scripts/qemu-host-verification.sh --profile core --control-mode agent` |
+| Production smoke | `./scripts/qemu-production-smoke.sh` |
+| Abuse-path behavior | `./scripts/qemu-resource-abuse.sh` |
+| Recovery / restore drill | `./scripts/qemu-recovery-drill.sh` |
 
 For host-prepared QEMU verification, backup or restore procedures, and incident drills, use the operator docs under `docs/operations/`.
 

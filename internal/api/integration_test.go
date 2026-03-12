@@ -753,6 +753,63 @@ func TestTunnelSignedURLBootstrapsBrowserSession(t *testing.T) {
 	}
 }
 
+func TestTunnelSignedURLOneTimeBootstrapConsumesCapability(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetEnabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	signed := h.createTunnelSignedURL(t, "token-a", tunnel.ID, model.CreateTunnelSignedURLRequest{Path: "/", OneTime: true})
+	if signed.CapabilityID == "" {
+		t.Fatal("expected one-time signed URL capability id")
+	}
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar}
+
+	response, err := client.Get(signed.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "window.location.replace") {
+		t.Fatalf("unexpected one-time bootstrap status %d: %s", response.StatusCode, string(body))
+	}
+
+	response, err = client.Get(h.server.URL + "/v1/tunnels/" + tunnel.ID + "/proxy/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || string(body) != "proxy-ok" {
+		t.Fatalf("unexpected cookie-authorized follow-up status %d: %s", response.StatusCode, string(body))
+	}
+
+	response, err = http.Get(signed.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("expected consumed one-time URL to fail, got %d: %s", response.StatusCode, string(body))
+	}
+}
+
 func TestTunnelSignedURLCookieAllowsFollowUpAssetRequest(t *testing.T) {
 	h := newStubHarness(t)
 	defer h.close()

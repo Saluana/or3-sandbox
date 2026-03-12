@@ -26,6 +26,8 @@ Important truth:
 - SQLite plus snapshot artifacts are the minimum durable restore set for snapshot recovery
 - SQLite alone is not enough if you expect local snapshots to be restorable
 - export bundles are optional but useful when local snapshot artifacts are lost
+- the restore path now verifies recorded snapshot bundle checksums before using local or exported artifacts
+- production QEMU restore also re-checks the promoted-image registry before guest image reuse
 
 ## Cold backup procedure
 
@@ -74,3 +76,9 @@ Inspect:
 - the snapshot root for missing or truncated artifact files
 
 If restore succeeds but sandboxes fail to boot, switch to the guest boot failure runbook in [Incident Runbooks](incidents.md).
+
+## RPO / RTO expectations
+
+- baseline shipped expectation: **RPO <= 24h** when operators take at least daily cold backups of SQLite plus snapshot artifacts
+- baseline shipped expectation: **RTO <= 60m** for single-node restore on a prepared host with the approved guest images already present
+- tighter targets require operator-owned automation outside this repo

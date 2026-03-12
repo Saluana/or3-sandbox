@@ -179,6 +179,14 @@ func (s *Service) MetricsReport(ctx context.Context, tenantID string) (string, e
 	if err != nil {
 		return "", err
 	}
+	promotedImages, err := s.store.ListPromotedGuestImages(ctx)
+	if err != nil {
+		return "", err
+	}
+	releaseEvidence, err := s.store.ListReleaseEvidence(ctx, "")
+	if err != nil {
+		return "", err
+	}
 	var lines []string
 	lines = append(lines,
 		"# TYPE or3_sandbox_sandboxes_total gauge",
@@ -196,7 +204,11 @@ func (s *Service) MetricsReport(ctx context.Context, tenantID string) (string, e
 		fmt.Sprintf("or3_sandbox_node_running_cpu_millis %d", report.NodePressure.RunningCPUMillis),
 		fmt.Sprintf("or3_sandbox_node_running_memory_mb %d", report.NodePressure.RunningMemoryMB),
 		fmt.Sprintf("or3_sandbox_runtime_healthy %d", boolMetric(health.Healthy)),
+		fmt.Sprintf("or3_sandbox_promoted_guest_images_total %d", len(promotedImages)),
 	)
+	if len(releaseEvidence) > 0 {
+		lines = append(lines, fmt.Sprintf("or3_sandbox_release_gate_freshness_seconds %d", int(time.Since(releaseEvidence[0].StartedAt).Seconds())))
+	}
 	if report.NodePressure.FreeStorageBytes >= 0 {
 		lines = append(lines, fmt.Sprintf("or3_sandbox_node_free_storage_bytes %d", report.NodePressure.FreeStorageBytes))
 	}
@@ -233,6 +245,9 @@ func (s *Service) MetricsReport(ctx context.Context, tenantID string) (string, e
 			}
 			if action == "tunnel.create" || action == "tunnel.revoke" {
 				lines = append(lines, fmt.Sprintf("or3_sandbox_tunnel_events_total{action=%q,outcome=%q} %d", action, outcome, count))
+			}
+			if action == "policy.profile.override" {
+				lines = append(lines, fmt.Sprintf("or3_sandbox_dangerous_profile_exceptions_total{outcome=%q} %d", outcome, count))
 			}
 			if strings.HasPrefix(action, "sandbox.") && outcome == "error" {
 				lines = append(lines, fmt.Sprintf("or3_sandbox_lifecycle_failures_total{action=%q} %d", action, count))

@@ -125,6 +125,68 @@ func TestJWTAuthenticatorRejectsInvalidToken(t *testing.T) {
 	}
 }
 
+func TestJWTAuthenticatorEnforcesServiceAccountScopeAndRevocation(t *testing.T) {
+	store := newAuthTestStore(t)
+	secretPath := filepath.Join(t.TempDir(), "jwt.secret")
+	if err := os.WriteFile(secretPath, []byte("super-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expiresAt := time.Now().Add(time.Hour).UTC()
+	if err := store.UpsertServiceAccount(context.Background(), model.ServiceAccount{
+		ID:        "svc-buildkite",
+		TenantID:  "tenant-a",
+		Name:      "Buildkite",
+		Scopes:    []string{PermissionSandboxRead, PermissionExecRun},
+		CreatedAt: time.Now().UTC(),
+		ExpiresAt: &expiresAt,
+	}); err != nil {
+		t.Fatalf("upsert service account: %v", err)
+	}
+	authenticator := newAuthenticator(store, config.Config{
+		AuthMode:           "jwt-hs256",
+		AuthJWTIssuer:      "issuer.example",
+		AuthJWTAudience:    "sandbox-api",
+		AuthJWTSecretPaths: []string{secretPath},
+	}).(*jwtAuthenticator)
+	token := signedTestJWT(t, "super-secret", jwt.MapClaims{
+		"iss":                "issuer.example",
+		"aud":                "sandbox-api",
+		"sub":                "svc-buildkite",
+		"tenant_id":          "tenant-a",
+		"service":            true,
+		"service_account_id": "svc-buildkite",
+		"scope":              []string{PermissionSandboxRead},
+		"exp":                time.Now().Add(time.Hour).Unix(),
+	})
+
+	identity, _, _, err := authenticator.Authenticate(context.Background(), token)
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	ctx := context.WithValue(context.Background(), tenantContextKey{}, TenantContext{Identity: identity})
+	if err := Require(ctx, PermissionSandboxRead); err != nil {
+		t.Fatalf("expected scoped service account to read sandboxes: %v", err)
+	}
+	if err := Require(ctx, PermissionExecRun); err == nil {
+		t.Fatal("expected scope to deny exec.run")
+	}
+
+	revokedAt := time.Now().UTC()
+	if err := store.UpsertServiceAccount(context.Background(), model.ServiceAccount{
+		ID:        "svc-buildkite",
+		TenantID:  "tenant-a",
+		Name:      "Buildkite",
+		Scopes:    []string{PermissionSandboxRead, PermissionExecRun},
+		CreatedAt: time.Now().UTC(),
+		RevokedAt: &revokedAt,
+	}); err != nil {
+		t.Fatalf("revoke service account: %v", err)
+	}
+	if _, _, _, err := authenticator.Authenticate(context.Background(), token); err == nil {
+		t.Fatal("expected revoked service account to be denied")
+	}
+}
+
 func TestJWTAuthenticatorCachesSecretsAtConstruction(t *testing.T) {
 	store := newAuthTestStore(t)
 	secretPath := filepath.Join(t.TempDir(), "jwt.secret")

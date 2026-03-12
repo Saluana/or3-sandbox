@@ -27,3 +27,5 @@ Important truth:
 - `qemu` is the intended higher-isolation path once the documented verification drills pass on your hosts
 - `docker` stays a trusted or development runtime
 - production claims should be tied to passing tests and documented drills, not aspirational wording
+- keep SQLite audit history long enough to span at least one release-gate window and one operator investigation window; the default expectation is to retain audit rows until they are exported or archived by operator policy
+- common investigations should begin with `SELECT created_at, action, outcome, message FROM audit_events ORDER BY created_at DESC LIMIT 200;` plus the runtime-capacity and metrics endpoints documented in the API reference

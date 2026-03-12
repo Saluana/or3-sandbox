@@ -24,92 +24,97 @@ type TenantConfig struct {
 }
 
 type Config struct {
-	DeploymentMode                string
-	ListenAddress                 string
-	DatabasePath                  string
-	StorageRoot                   string
-	SnapshotRoot                  string
-	BaseImageRef                  string
-	RuntimeBackend                string
-	EnabledRuntimeSelections      []model.RuntimeSelection
-	DefaultRuntimeSelection       model.RuntimeSelection
-	AuthMode                      string
-	AuthJWTIssuer                 string
-	AuthJWTAudience               string
-	AuthJWTSecretPaths            []string
-	TLSCertPath                   string
-	TLSKeyPath                    string
-	TrustedProxyHeaders           bool
-	TrustedDockerRuntime          bool
-	PolicyAllowedImages           []string
-	PolicyAllowPublicTunnels      bool
-	PolicyMaxSandboxLifetime      time.Duration
-	PolicyMaxIdleTimeout          time.Duration
-	AdmissionMaxNodeSandboxes     int
-	AdmissionMaxNodeRunning       int
-	AdmissionMaxNodeCPU           model.CPUQuantity
-	AdmissionMaxNodeMemoryMB      int
-	AdmissionMinNodeFreeStorageMB int
-	AdmissionMaxTenantStarts      int
-	AdmissionMaxTenantHeavyOps    int
-	StorageWarningFileCount       int
-	SnapshotMaxBytes              int64
-	SnapshotMaxFiles              int
-	SnapshotMaxExpansionRatio     int
-	AllowedGuestProfiles          []model.GuestProfile
-	DangerousGuestProfiles        []model.GuestProfile
-	AllowDangerousProfiles        bool
-	DockerUser                    string
-	DockerTmpfsSizeMB             int
-	DockerSeccompProfile          string
-	DockerAppArmorProfile         string
-	DockerSELinuxLabel            string
-	DockerAllowDangerousOverrides bool
-	DefaultCPULimit               model.CPUQuantity
-	DefaultMemoryLimitMB          int
-	DefaultPIDsLimit              int
-	DefaultDiskLimitMB            int
-	DefaultNetworkMode            model.NetworkMode
-	DefaultAllowTunnels           bool
-	RequestRatePerMinute          int
-	RequestBurst                  int
-	DefaultQuota                  model.TenantQuota
-	GracefulShutdown              time.Duration
-	ReconcileInterval             time.Duration
-	CleanupInterval               time.Duration
-	OperatorHost                  string
-	TunnelSigningKey              string
-	TunnelSigningKeyPath          string
-	Tenants                       []TenantConfig
-	OptionalSnapshotExport        string
-	QEMUBinary                    string
-	QEMUAccel                     string
-	QEMUBaseImagePath             string
-	QEMUAllowedBaseImagePaths     []string
-	QEMUControlMode               model.GuestControlMode
-	QEMUAllowedProfiles           []model.GuestProfile
-	QEMUDangerousProfiles         []model.GuestProfile
-	QEMUAllowDangerousProfiles    bool
-	QEMUAllowSSHCompat            bool
-	QEMUSSHUser                   string
-	QEMUSSHPrivateKeyPath         string
-	QEMUSSHHostKeyPath            string
-	QEMUBootTimeout               time.Duration
-	KataBinary                    string
-	KataRuntimeClass              string
-	KataContainerdSocket          string
+	DeploymentMode                  string
+	DeploymentProfile               string
+	ProductionTransportMode         string
+	ProductionAllowDockerBreakglass bool
+	ListenAddress                   string
+	DatabasePath                    string
+	StorageRoot                     string
+	SnapshotRoot                    string
+	BaseImageRef                    string
+	RuntimeBackend                  string
+	EnabledRuntimeSelections        []model.RuntimeSelection
+	DefaultRuntimeSelection         model.RuntimeSelection
+	AuthMode                        string
+	AuthJWTIssuer                   string
+	AuthJWTAudience                 string
+	AuthJWTSecretPaths              []string
+	TLSCertPath                     string
+	TLSKeyPath                      string
+	TrustedProxyHeaders             bool
+	TrustedDockerRuntime            bool
+	PolicyAllowedImages             []string
+	PolicyAllowPublicTunnels        bool
+	PolicyMaxSandboxLifetime        time.Duration
+	PolicyMaxIdleTimeout            time.Duration
+	AdmissionMaxNodeSandboxes       int
+	AdmissionMaxNodeRunning         int
+	AdmissionMaxNodeCPU             model.CPUQuantity
+	AdmissionMaxNodeMemoryMB        int
+	AdmissionMinNodeFreeStorageMB   int
+	AdmissionMaxTenantStarts        int
+	AdmissionMaxTenantHeavyOps      int
+	StorageWarningFileCount         int
+	SnapshotMaxBytes                int64
+	SnapshotMaxFiles                int
+	SnapshotMaxExpansionRatio       int
+	AllowedGuestProfiles            []model.GuestProfile
+	DangerousGuestProfiles          []model.GuestProfile
+	AllowDangerousProfiles          bool
+	DockerUser                      string
+	DockerTmpfsSizeMB               int
+	DockerSeccompProfile            string
+	DockerAppArmorProfile           string
+	DockerSELinuxLabel              string
+	DockerAllowDangerousOverrides   bool
+	DefaultCPULimit                 model.CPUQuantity
+	DefaultMemoryLimitMB            int
+	DefaultPIDsLimit                int
+	DefaultDiskLimitMB              int
+	DefaultNetworkMode              model.NetworkMode
+	DefaultAllowTunnels             bool
+	RequestRatePerMinute            int
+	RequestBurst                    int
+	DefaultQuota                    model.TenantQuota
+	GracefulShutdown                time.Duration
+	ReconcileInterval               time.Duration
+	CleanupInterval                 time.Duration
+	OperatorHost                    string
+	TunnelSigningKey                string
+	TunnelSigningKeyPath            string
+	Tenants                         []TenantConfig
+	OptionalSnapshotExport          string
+	QEMUBinary                      string
+	QEMUAccel                       string
+	QEMUBaseImagePath               string
+	QEMUAllowedBaseImagePaths       []string
+	QEMUControlMode                 model.GuestControlMode
+	QEMUAllowedProfiles             []model.GuestProfile
+	QEMUDangerousProfiles           []model.GuestProfile
+	QEMUAllowDangerousProfiles      bool
+	QEMUAllowSSHCompat              bool
+	QEMUSSHUser                     string
+	QEMUSSHPrivateKeyPath           string
+	QEMUSSHHostKeyPath              string
+	QEMUBootTimeout                 time.Duration
+	KataBinary                      string
+	KataRuntimeClass                string
+	KataContainerdSocket            string
 }
 
 func Load(args []string) (Config, error) {
 	fs := flag.NewFlagSet("sandboxd", flag.ContinueOnError)
 	cfg := Config{}
 	fs.StringVar(&cfg.DeploymentMode, "mode", env("SANDBOX_MODE", "development"), "deployment mode")
+	fs.StringVar(&cfg.DeploymentProfile, "deployment-profile", env("SANDBOX_DEPLOYMENT_PROFILE", ""), "supported deployment profile")
+	fs.StringVar(&cfg.ProductionTransportMode, "production-transport", env("SANDBOX_PRODUCTION_TRANSPORT", "auto"), "production transport mode: auto, direct-tls, terminated-proxy")
 	fs.StringVar(&cfg.ListenAddress, "listen", env("SANDBOX_LISTEN", ":8080"), "HTTP listen address")
 	fs.StringVar(&cfg.DatabasePath, "db", env("SANDBOX_DB_PATH", "./data/sandbox.db"), "SQLite path")
 	fs.StringVar(&cfg.StorageRoot, "storage-root", env("SANDBOX_STORAGE_ROOT", "./data/storage"), "storage root")
 	fs.StringVar(&cfg.SnapshotRoot, "snapshot-root", env("SANDBOX_SNAPSHOT_ROOT", "./data/snapshots"), "snapshot root")
 	fs.StringVar(&cfg.BaseImageRef, "base-image", env("SANDBOX_BASE_IMAGE", "alpine:3.20"), "default base image")
-	fs.StringVar(&cfg.RuntimeBackend, "runtime", env("SANDBOX_RUNTIME", "docker"), "runtime backend")
+	fs.StringVar(&cfg.RuntimeBackend, "runtime", defaultRuntimeBackend(args), "runtime backend")
 	enabledRuntimeSelections := env("SANDBOX_ENABLED_RUNTIMES", "")
 	defaultRuntimeSelection := env("SANDBOX_DEFAULT_RUNTIME", "")
 	fs.StringVar(&enabledRuntimeSelections, "enabled-runtimes", enabledRuntimeSelections, "comma-separated enabled runtime selections")
@@ -153,7 +158,7 @@ func Load(args []string) (Config, error) {
 	qemuAllowedBaseImagePaths := env("SANDBOX_QEMU_ALLOWED_BASE_IMAGE_PATHS", "")
 	fs.StringVar(&qemuAllowedBaseImagePaths, "qemu-allowed-base-image-paths", qemuAllowedBaseImagePaths, "comma-separated qemu guest image paths tenants may request")
 	allowedGuestProfiles := env("SANDBOX_ALLOWED_PROFILES", "")
-	qemuAllowedProfiles := env("SANDBOX_QEMU_ALLOWED_PROFILES", "core,runtime,browser,container,debug")
+	qemuAllowedProfiles := env("SANDBOX_QEMU_ALLOWED_PROFILES", "")
 	fs.StringVar(&qemuAllowedProfiles, "qemu-allowed-profiles", qemuAllowedProfiles, "comma-separated qemu guest profiles allowed for sandbox creation")
 	dangerousGuestProfiles := env("SANDBOX_DANGEROUS_PROFILES", "")
 	qemuDangerousProfiles := env("SANDBOX_QEMU_DANGEROUS_PROFILES", "container,debug")
@@ -168,6 +173,8 @@ func Load(args []string) (Config, error) {
 	fs.BoolVar(&qemuAllowDangerousProfiles, "qemu-allow-dangerous-profiles", qemuAllowDangerousProfiles, "allow dangerous qemu guest profiles such as container and debug")
 	qemuAllowSSHCompat := strings.EqualFold(env("SANDBOX_QEMU_ALLOW_SSH_COMPAT", "false"), "true")
 	fs.BoolVar(&qemuAllowSSHCompat, "qemu-allow-ssh-compat", qemuAllowSSHCompat, "allow ssh-compat qemu image contracts in production validation and policy")
+	productionAllowDockerBreakglass := strings.EqualFold(env("SANDBOX_PRODUCTION_ALLOW_DOCKER_BREAKGLASS", "false"), "true")
+	fs.BoolVar(&productionAllowDockerBreakglass, "production-allow-docker-breakglass", productionAllowDockerBreakglass, "allow docker-dev as an explicit production break-glass default")
 	fs.StringVar(&cfg.QEMUSSHUser, "qemu-ssh-user", env("SANDBOX_QEMU_SSH_USER", ""), "qemu guest ssh user")
 	fs.StringVar(&cfg.QEMUSSHPrivateKeyPath, "qemu-ssh-private-key", env("SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH", ""), "qemu guest ssh private key path")
 	fs.StringVar(&cfg.QEMUSSHHostKeyPath, "qemu-ssh-host-key", env("SANDBOX_QEMU_SSH_HOST_KEY_PATH", ""), "qemu guest ssh host public key path")
@@ -232,6 +239,8 @@ func Load(args []string) (Config, error) {
 	cfg.QEMUDangerousProfiles = parseGuestProfiles(qemuDangerousProfiles)
 	cfg.QEMUAllowDangerousProfiles = qemuAllowDangerousProfiles
 	cfg.QEMUAllowSSHCompat = qemuAllowSSHCompat
+	cfg.ProductionTransportMode = normalizeProductionTransportMode(cfg.ProductionTransportMode)
+	cfg.ProductionAllowDockerBreakglass = productionAllowDockerBreakglass
 	cfg.DefaultQuota = model.TenantQuota{
 		MaxSandboxes:            envInt("SANDBOX_QUOTA_MAX_SANDBOXES", 10),
 		MaxRunningSandboxes:     envInt("SANDBOX_QUOTA_MAX_RUNNING", 5),
@@ -245,11 +254,13 @@ func Load(args []string) (Config, error) {
 		DefaultTunnelVisibility: env("SANDBOX_DEFAULT_TUNNEL_VISIBILITY", "private"),
 	}
 	cfg.Tenants = parseTenants(env("SANDBOX_TOKENS", "dev-token=tenant-dev"))
+	cfg.applyDeploymentProfile()
 	cfg.applyRuntimeSelectionCompatibility()
 	return cfg, cfg.Validate()
 }
 
 func (c Config) Validate() error {
+	c.applyDeploymentProfile()
 	c.applyRuntimeSelectionCompatibility()
 	var problems []string
 	if c.StorageWarningFileCount == 0 {
@@ -346,14 +357,35 @@ func (c Config) Validate() error {
 		problems = append(problems, "at least one tenant token is required")
 	}
 	if c.DeploymentMode == "production" {
+		if c.DefaultRuntimeSelection == model.RuntimeSelectionDockerDev && !c.ProductionAllowDockerBreakglass {
+			problems = append(problems, "production mode rejects docker-dev as the default runtime selection unless SANDBOX_PRODUCTION_ALLOW_DOCKER_BREAKGLASS=true")
+		}
 		if !c.DefaultRuntimeSelection.IsVMBacked() {
 			problems = append(problems, fmt.Sprintf("production mode requires a VM-backed runtime class; %q resolves to class %q which is not VM-backed", c.DefaultRuntimeSelection, c.DefaultRuntimeSelection.RuntimeClass()))
 		}
 		if c.AuthMode == "static" {
 			problems = append(problems, "production mode requires SANDBOX_AUTH_MODE=jwt-hs256")
 		}
-		if c.TLSCertPath == "" && !c.TrustedProxyHeaders {
-			problems = append(problems, "production mode requires TLS certificate paths or SANDBOX_TRUST_PROXY_HEADERS=true")
+		switch normalizeProductionTransportMode(c.ProductionTransportMode) {
+		case "auto":
+			if c.TLSCertPath == "" && !c.TrustedProxyHeaders {
+				problems = append(problems, "production mode requires TLS certificate paths or SANDBOX_TRUST_PROXY_HEADERS=true")
+			}
+		case "direct-tls":
+			if c.TLSCertPath == "" || c.TLSKeyPath == "" {
+				problems = append(problems, "production direct-tls mode requires SANDBOX_TLS_CERT_PATH and SANDBOX_TLS_KEY_PATH")
+			}
+		case "terminated-proxy":
+			if !c.TrustedProxyHeaders {
+				problems = append(problems, "production terminated-proxy mode requires SANDBOX_TRUST_PROXY_HEADERS=true")
+			}
+		default:
+			problems = append(problems, fmt.Sprintf("unsupported production transport mode %q", c.ProductionTransportMode))
+		}
+		for _, profile := range c.effectiveAllowedGuestProfiles("qemu") {
+			if c.DeploymentProfile != "exception-container" && (profile == model.GuestProfileContainer || profile == model.GuestProfileDebug) {
+				problems = append(problems, fmt.Sprintf("production mode rejects dangerous default qemu profile %q", profile))
+			}
 		}
 	}
 	for _, dir := range []string{filepath.Dir(c.DatabasePath), c.StorageRoot, c.SnapshotRoot} {
@@ -606,6 +638,10 @@ func (c *Config) applyRuntimeSelectionCompatibility() {
 	if c.DefaultRuntimeSelection.IsValid() {
 		c.RuntimeBackend = c.DefaultRuntimeSelection.Backend()
 	}
+	if c.DeploymentMode == "production" && !c.DefaultRuntimeSelection.IsValid() && c.RuntimeBackend == "" {
+		c.DefaultRuntimeSelection = model.RuntimeSelectionQEMUProfessional
+		c.RuntimeBackend = c.DefaultRuntimeSelection.Backend()
+	}
 }
 
 func parseRuntimeSelections(raw string) []model.RuntimeSelection {
@@ -624,6 +660,38 @@ func parseRuntimeSelections(raw string) []model.RuntimeSelection {
 		result = append(result, selection)
 	}
 	return result
+}
+
+func defaultRuntimeBackend(args []string) string {
+	if value := strings.TrimSpace(os.Getenv("SANDBOX_RUNTIME")); value != "" {
+		return value
+	}
+	if strings.EqualFold(strings.TrimSpace(flagValue(args, "mode")), "production") {
+		return "qemu"
+	}
+	if strings.EqualFold(strings.TrimSpace(env("SANDBOX_MODE", "development")), "production") {
+		return "qemu"
+	}
+	return "docker"
+}
+
+func flagValue(args []string, name string) string {
+	short := "-" + name
+	long := "--" + name
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		switch {
+		case strings.HasPrefix(arg, short+"="):
+			return strings.TrimPrefix(arg, short+"=")
+		case strings.HasPrefix(arg, long+"="):
+			return strings.TrimPrefix(arg, long+"=")
+		case arg == short || arg == long:
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+		}
+	}
+	return ""
 }
 
 func (c Config) EffectiveQEMUAllowedBaseImagePaths() []string {
@@ -701,6 +769,60 @@ func (c Config) effectiveAllowedGuestProfiles(runtimeBackend string) []model.Gue
 	}
 }
 
+func (c *Config) applyDeploymentProfile() {
+	switch strings.TrimSpace(c.DeploymentProfile) {
+	case "":
+		if c.DeploymentMode == "production" {
+			if c.RuntimeBackend == "" {
+				c.RuntimeBackend = "qemu"
+			}
+			if len(c.EnabledRuntimeSelections) == 0 && c.RuntimeBackend == "qemu" {
+				c.EnabledRuntimeSelections = []model.RuntimeSelection{model.RuntimeSelectionQEMUProfessional}
+			}
+			if !c.DefaultRuntimeSelection.IsValid() && c.RuntimeBackend == "qemu" {
+				c.DefaultRuntimeSelection = model.RuntimeSelectionQEMUProfessional
+			}
+			if len(c.QEMUAllowedProfiles) == 0 {
+				c.QEMUAllowedProfiles = []model.GuestProfile{model.GuestProfileCore, model.GuestProfileRuntime}
+			}
+		}
+	case "dev-trusted-docker":
+		c.DeploymentMode = "development"
+		c.RuntimeBackend = "docker"
+		c.TrustedDockerRuntime = true
+		c.EnabledRuntimeSelections = []model.RuntimeSelection{model.RuntimeSelectionDockerDev}
+		c.DefaultRuntimeSelection = model.RuntimeSelectionDockerDev
+	case "production-qemu-core":
+		c.DeploymentMode = "production"
+		c.RuntimeBackend = "qemu"
+		c.EnabledRuntimeSelections = []model.RuntimeSelection{model.RuntimeSelectionQEMUProfessional}
+		c.DefaultRuntimeSelection = model.RuntimeSelectionQEMUProfessional
+		c.QEMUAllowedProfiles = []model.GuestProfile{model.GuestProfileCore, model.GuestProfileRuntime}
+	case "production-qemu-browser":
+		c.DeploymentMode = "production"
+		c.RuntimeBackend = "qemu"
+		c.EnabledRuntimeSelections = []model.RuntimeSelection{model.RuntimeSelectionQEMUProfessional}
+		c.DefaultRuntimeSelection = model.RuntimeSelectionQEMUProfessional
+		c.QEMUAllowedProfiles = []model.GuestProfile{model.GuestProfileCore, model.GuestProfileRuntime, model.GuestProfileBrowser}
+	case "exception-container":
+		c.DeploymentMode = "production"
+		c.RuntimeBackend = "qemu"
+		c.EnabledRuntimeSelections = []model.RuntimeSelection{model.RuntimeSelectionQEMUProfessional}
+		c.DefaultRuntimeSelection = model.RuntimeSelectionQEMUProfessional
+		c.QEMUAllowedProfiles = []model.GuestProfile{model.GuestProfileCore, model.GuestProfileRuntime, model.GuestProfileContainer}
+		c.QEMUAllowDangerousProfiles = true
+	default:
+	}
+}
+
+func normalizeProductionTransportMode(value string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	if trimmed == "" {
+		return "auto"
+	}
+	return trimmed
+}
+
 func (c Config) effectiveDangerousGuestProfiles(runtimeBackend string) []model.GuestProfile {
 	if len(c.DangerousGuestProfiles) > 0 {
 		return c.DangerousGuestProfiles
@@ -750,6 +872,8 @@ func resolveQEMUAccel(value, goos string) (string, error) {
 			return "", fmt.Errorf("qemu accel %q is unsupported on host OS %q", value, goos)
 		}
 		return "hvf", nil
+	case "tcg":
+		return "tcg", nil
 	default:
 		return "", fmt.Errorf("unsupported qemu accelerator %q", value)
 	}

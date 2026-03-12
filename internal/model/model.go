@@ -135,18 +135,19 @@ type Sandbox struct {
 
 // CreateSandboxRequest is the JSON payload accepted by POST /v1/sandboxes.
 type CreateSandboxRequest struct {
-	RuntimeSelection RuntimeSelection `json:"runtime_selection,omitempty"`
-	BaseImageRef     string           `json:"base_image_ref"`
-	Profile          GuestProfile     `json:"profile,omitempty"`
-	Features         []string         `json:"features,omitempty"`
-	Capabilities     []string         `json:"capabilities,omitempty"`
-	CPULimit         CPUQuantity      `json:"cpu_limit"`
-	MemoryLimitMB    int              `json:"memory_limit_mb"`
-	PIDsLimit        int              `json:"pids_limit"`
-	DiskLimitMB      int              `json:"disk_limit_mb"`
-	NetworkMode      NetworkMode      `json:"network_mode"`
-	AllowTunnels     *bool            `json:"allow_tunnels,omitempty"`
-	Start            bool             `json:"start"`
+	RuntimeSelection       RuntimeSelection `json:"runtime_selection,omitempty"`
+	BaseImageRef           string           `json:"base_image_ref"`
+	Profile                GuestProfile     `json:"profile,omitempty"`
+	Features               []string         `json:"features,omitempty"`
+	Capabilities           []string         `json:"capabilities,omitempty"`
+	DangerousProfileReason string           `json:"dangerous_profile_reason,omitempty"`
+	CPULimit               CPUQuantity      `json:"cpu_limit"`
+	MemoryLimitMB          int              `json:"memory_limit_mb"`
+	PIDsLimit              int              `json:"pids_limit"`
+	DiskLimitMB            int              `json:"disk_limit_mb"`
+	NetworkMode            NetworkMode      `json:"network_mode"`
+	AllowTunnels           *bool            `json:"allow_tunnels,omitempty"`
+	Start                  bool             `json:"start"`
 }
 
 // LifecycleRequest is the JSON payload used by lifecycle mutation endpoints.
@@ -243,6 +244,7 @@ type CreateTunnelRequest struct {
 type CreateTunnelSignedURLRequest struct {
 	Path       string `json:"path,omitempty"`
 	TTLSeconds int    `json:"ttl_seconds,omitempty"`
+	OneTime    bool   `json:"one_time,omitempty"`
 }
 
 // Tunnel is the HTTP tunnel resource returned by tunnel endpoints.
@@ -263,8 +265,9 @@ type Tunnel struct {
 
 // TunnelSignedURL is the browser-launch capability returned by POST /v1/tunnels/{id}/signed-url.
 type TunnelSignedURL struct {
-	URL       string    `json:"url"`
-	ExpiresAt time.Time `json:"expires_at"`
+	URL          string    `json:"url"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	CapabilityID string    `json:"capability_id,omitempty"`
 }
 
 // CreateSnapshotRequest is the JSON payload accepted by snapshot creation.
@@ -287,6 +290,7 @@ type Snapshot struct {
 	ControlProtocolVersion   string           `json:"control_protocol_version,omitempty"`
 	WorkspaceContractVersion string           `json:"workspace_contract_version,omitempty"`
 	WorkspaceTar             string           `json:"-"`
+	BundleSHA256             string           `json:"bundle_sha256,omitempty"`
 	ExportLocation           string           `json:"export_location,omitempty"`
 	CreatedAt                time.Time        `json:"created_at"`
 	CompletedAt              *time.Time       `json:"completed_at,omitempty"`
@@ -362,4 +366,53 @@ type AuditEvent struct {
 	Outcome    string    `json:"outcome"`
 	Message    string    `json:"message"`
 	CreatedAt  time.Time `json:"created_at"`
+}
+
+type ServiceAccount struct {
+	ID        string     `json:"id"`
+	TenantID  string     `json:"tenant_id"`
+	Name      string     `json:"name"`
+	Scopes    []string   `json:"scopes,omitempty"`
+	Disabled  bool       `json:"disabled"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+}
+
+type PromotedGuestImage struct {
+	ImageRef               string           `json:"image_ref"`
+	ImageSHA256            string           `json:"image_sha256"`
+	Profile                GuestProfile     `json:"profile"`
+	ControlMode            GuestControlMode `json:"control_mode"`
+	ControlProtocolVersion string           `json:"control_protocol_version"`
+	ContractVersion        string           `json:"contract_version"`
+	ProvenanceJSON         string           `json:"provenance_json,omitempty"`
+	VerificationStatus     string           `json:"verification_status"`
+	PromotionStatus        string           `json:"promotion_status"`
+	PromotedAt             *time.Time       `json:"promoted_at,omitempty"`
+	PromotedBy             string           `json:"promoted_by,omitempty"`
+}
+
+type ReleaseEvidence struct {
+	ID               string           `json:"id"`
+	GateName         string           `json:"gate_name"`
+	HostFingerprint  string           `json:"host_fingerprint"`
+	RuntimeSelection RuntimeSelection `json:"runtime_selection,omitempty"`
+	ImageRef         string           `json:"image_ref,omitempty"`
+	Profile          GuestProfile     `json:"profile,omitempty"`
+	Outcome          string           `json:"outcome"`
+	ArtifactPath     string           `json:"artifact_path,omitempty"`
+	StartedAt        time.Time        `json:"started_at"`
+	CompletedAt      *time.Time       `json:"completed_at,omitempty"`
+}
+
+type TunnelCapability struct {
+	ID         string     `json:"id"`
+	TunnelID   string     `json:"tunnel_id"`
+	NonceHash  string     `json:"-"`
+	Path       string     `json:"path"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	ConsumedAt *time.Time `json:"consumed_at,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
 }

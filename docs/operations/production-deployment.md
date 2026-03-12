@@ -5,7 +5,7 @@ This guide describes the supported single-node production deployment shape for `
 ## Supported production boundary
 
 - use `SANDBOX_MODE=production`
-- use `SANDBOX_RUNTIME=qemu` (the only backend whose runtime class is VM-backed)
+- use `SANDBOX_DEPLOYMENT_PROFILE=production-qemu-core` (or `production-qemu-browser` only when browser tooling is required)
 - use the agent-based `core` guest profile unless there is an explicitly approved reason to use a heavier profile
 - use JWT auth, not static bearer tokens
 - terminate TLS either inside `sandboxd` or at a trusted reverse proxy
@@ -110,7 +110,8 @@ Baseline production configuration:
 
 ```bash
 export SANDBOX_MODE=production
-export SANDBOX_RUNTIME=qemu
+export SANDBOX_DEPLOYMENT_PROFILE=production-qemu-core
+export SANDBOX_PRODUCTION_TRANSPORT=terminated-proxy
 export SANDBOX_AUTH_MODE=jwt-hs256
 export SANDBOX_AUTH_JWT_ISSUER=https://issuer.example
 export SANDBOX_AUTH_JWT_AUDIENCE=sandbox-api
@@ -123,8 +124,6 @@ export SANDBOX_OPERATOR_HOST=https://sandbox.example.com
 export SANDBOX_QEMU_BINARY=qemu-system-x86_64
 export SANDBOX_QEMU_ACCEL=auto
 export SANDBOX_QEMU_CONTROL_MODE=agent
-export SANDBOX_QEMU_ALLOWED_PROFILES=core,runtime,browser,container
-export SANDBOX_QEMU_DANGEROUS_PROFILES=debug
 export SANDBOX_QEMU_BASE_IMAGE_PATH=/var/lib/or3-images/or3-guest-core.qcow2
 export SANDBOX_QEMU_ALLOWED_BASE_IMAGE_PATHS=/var/lib/or3-images/or3-guest-core.qcow2,/var/lib/or3-images/or3-guest-runtime.qcow2
 ```
@@ -143,6 +142,16 @@ Transport options:
 
 - in-process TLS: set both `SANDBOX_TLS_CERT_PATH` and `SANDBOX_TLS_KEY_PATH`
 - reverse proxy TLS termination: set `SANDBOX_TRUST_PROXY_HEADERS=true` and keep `SANDBOX_OPERATOR_HOST` on the final `https://` origin
+- set `SANDBOX_PRODUCTION_TRANSPORT=direct-tls` or `terminated-proxy` explicitly in operator-managed production config
+
+Promotion and readiness flow:
+
+```bash
+go run ./cmd/sandboxctl config-lint
+go run ./cmd/sandboxctl doctor --production-qemu
+go run ./cmd/sandboxctl image promote --image /var/lib/or3-images/or3-guest-core.qcow2
+go run ./cmd/sandboxctl release-gate
+```
 
 ## Startup ordering
 
@@ -170,6 +179,7 @@ Normal production posture:
 Break-glass guidance:
 
 - keep dangerous-profile approval time-bounded and auditable
+- dangerous-profile exceptions should use `SANDBOX_DEPLOYMENT_PROFILE=exception-container`
 - enable `SANDBOX_QEMU_ALLOW_DANGEROUS_PROFILES` or `SANDBOX_QEMU_ALLOW_SSH_COMPAT` only for the smallest necessary window
 - record who approved the exception, why it was needed, and which sandboxes/images were affected
 - remove the allow flags once the emergency or migration window closes

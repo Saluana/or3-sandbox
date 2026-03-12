@@ -2,15 +2,18 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"or3-sandbox/internal/auth"
+	"or3-sandbox/internal/guestimage"
 	"or3-sandbox/internal/model"
+	"or3-sandbox/internal/repository"
 )
 
-func (s *Service) enforceCreatePolicy(ctx context.Context, tenantID string, req model.CreateSandboxRequest) error {
+func (s *Service) enforceCreatePolicy(ctx context.Context, tenantID string, req model.CreateSandboxRequest, contract guestimage.Contract) error {
 	selection := s.resolveRuntimeSelection(req)
 	if !s.cfg.IsRuntimeSelectionEnabled(selection) {
 		message := fmt.Sprintf("runtime selection %q is not enabled", selection)
@@ -22,7 +25,10 @@ func (s *Service) enforceCreatePolicy(ctx context.Context, tenantID string, req 
 		s.recordAudit(ctx, tenantID, "", "policy.create", req.BaseImageRef, "denied", message)
 		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
 	}
-	if err := s.enforceGuestProfilePolicy(ctx, tenantID, "", selection.Backend(), req.Profile, "policy.create"); err != nil {
+	if err := s.enforceGuestProfilePolicy(ctx, tenantID, "", selection.Backend(), req.Profile, req.DangerousProfileReason, "policy.create"); err != nil {
+		return err
+	}
+	if err := s.enforcePromotedImagePolicy(ctx, tenantID, "", selection, req.BaseImageRef, "policy.create", contract); err != nil {
 		return err
 	}
 	if selection.Backend() == "docker" {
@@ -67,13 +73,16 @@ func (s *Service) enforceLifecyclePolicy(ctx context.Context, sandbox model.Sand
 			return err
 		}
 	}
-	if err := s.enforceGuestProfilePolicy(ctx, sandbox.TenantID, sandbox.ID, selection.Backend(), sandbox.Profile, "policy."+action); err != nil {
+	if err := s.enforceGuestProfilePolicy(ctx, sandbox.TenantID, sandbox.ID, selection.Backend(), sandbox.Profile, "", "policy."+action); err != nil {
+		return err
+	}
+	if err := s.enforcePromotedImagePolicy(ctx, sandbox.TenantID, sandbox.ID, selection, sandbox.BaseImageRef, "policy."+action, guestimage.Contract{}); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (s *Service) enforceGuestProfilePolicy(ctx context.Context, tenantID, sandboxID, runtimeBackend string, profile model.GuestProfile, action string) error {
+func (s *Service) enforceGuestProfilePolicy(ctx context.Context, tenantID, sandboxID, runtimeBackend string, profile model.GuestProfile, reason string, action string) error {
 	if profile == "" {
 		return nil
 	}
@@ -87,12 +96,87 @@ func (s *Service) enforceGuestProfilePolicy(ctx context.Context, tenantID, sandb
 		s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, auditKV("runtime", runtimeBackend)))
 		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
 	}
+	if s.cfg.DeploymentMode == "production" && s.cfg.IsDangerousGuestProfile(runtimeBackend, profile) && strings.TrimSpace(reason) == "" && action == "policy.create" {
+		message := fmt.Sprintf("sandbox profile %q requires dangerous_profile_reason for audited exception use", profile)
+		s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, auditKV("runtime", runtimeBackend)))
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
 	if s.cfg.IsDangerousGuestProfile(runtimeBackend, profile) && s.cfg.AllowsDangerousGuestProfiles(runtimeBackend) && action == "policy.create" {
+		auditReason := strings.TrimSpace(reason)
+		if auditReason == "" {
+			auditReason = "dangerous_profile_explicitly_allowed"
+		}
 		s.recordAudit(ctx, tenantID, sandboxID, "policy.profile.override", sandboxID, "ok", auditDetail(
 			auditKV("runtime", runtimeBackend),
 			auditKV("profile", profile),
-			auditKV("reason", "dangerous_profile_explicitly_allowed"),
+			auditKV("reason", auditReason),
 		))
+	}
+	return nil
+}
+
+func (s *Service) enforcePromotedImagePolicy(ctx context.Context, tenantID, sandboxID string, selection model.RuntimeSelection, imageRef, action string, contract guestimage.Contract) error {
+	if s.cfg.DeploymentMode != "production" || selection.Backend() != "qemu" {
+		return nil
+	}
+	record, err := s.store.GetPromotedGuestImage(ctx, imageRef)
+	if err != nil {
+		if !errors.Is(err, repository.ErrNotFound) {
+			return err
+		}
+		message := fmt.Sprintf("production qemu workloads require a promoted guest image; %q is not promoted", imageRef)
+		s.recordAudit(ctx, tenantID, sandboxID, action, imageRef, "denied", message)
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	if !strings.EqualFold(record.VerificationStatus, "verified") || !strings.EqualFold(record.PromotionStatus, "promoted") {
+		message := fmt.Sprintf("guest image %q is not production-ready (verification=%s promotion=%s)", imageRef, record.VerificationStatus, record.PromotionStatus)
+		s.recordAudit(ctx, tenantID, sandboxID, action, imageRef, "denied", message)
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	if !requiresPromotedImageContractValidation(action) {
+		return nil
+	}
+	if contract.ImageSHA256 == "" {
+		contract, err = guestimage.Load(imageRef)
+		if err != nil {
+			return err
+		}
+		if err := guestimage.Validate(imageRef, contract); err != nil {
+			return err
+		}
+	}
+	if err := promotedImageContractMatchesRecord(contract, record); err != nil {
+		message := fmt.Sprintf("guest image %q no longer matches promoted record: %s", imageRef, err)
+		s.recordAudit(ctx, tenantID, sandboxID, action, imageRef, "denied", message)
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	return nil
+}
+
+func requiresPromotedImageContractValidation(action string) bool {
+	switch action {
+	case "policy.create", "policy.start", "policy.resume", "policy.snapshot.restore":
+		return true
+	default:
+		return false
+	}
+}
+
+func promotedImageContractMatchesRecord(contract guestimage.Contract, record model.PromotedGuestImage) error {
+	if !strings.EqualFold(strings.TrimSpace(contract.ImageSHA256), strings.TrimSpace(record.ImageSHA256)) {
+		return fmt.Errorf("checksum mismatch")
+	}
+	if contract.Profile != record.Profile {
+		return fmt.Errorf("profile mismatch")
+	}
+	if contract.Control.Mode != record.ControlMode {
+		return fmt.Errorf("control mode mismatch")
+	}
+	if contract.Control.ProtocolVersion != record.ControlProtocolVersion {
+		return fmt.Errorf("control protocol version mismatch")
+	}
+	if contract.ContractVersion != record.ContractVersion {
+		return fmt.Errorf("contract version mismatch")
 	}
 	return nil
 }
