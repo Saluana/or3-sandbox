@@ -114,7 +114,7 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.StorageRoot, "storage-root", env("SANDBOX_STORAGE_ROOT", "./data/storage"), "storage root")
 	fs.StringVar(&cfg.SnapshotRoot, "snapshot-root", env("SANDBOX_SNAPSHOT_ROOT", "./data/snapshots"), "snapshot root")
 	fs.StringVar(&cfg.BaseImageRef, "base-image", env("SANDBOX_BASE_IMAGE", "alpine:3.20"), "default base image")
-	fs.StringVar(&cfg.RuntimeBackend, "runtime", env("SANDBOX_RUNTIME", "docker"), "runtime backend")
+	fs.StringVar(&cfg.RuntimeBackend, "runtime", defaultRuntimeBackend(args), "runtime backend")
 	enabledRuntimeSelections := env("SANDBOX_ENABLED_RUNTIMES", "")
 	defaultRuntimeSelection := env("SANDBOX_DEFAULT_RUNTIME", "")
 	fs.StringVar(&enabledRuntimeSelections, "enabled-runtimes", enabledRuntimeSelections, "comma-separated enabled runtime selections")
@@ -383,7 +383,7 @@ func (c Config) Validate() error {
 			problems = append(problems, fmt.Sprintf("unsupported production transport mode %q", c.ProductionTransportMode))
 		}
 		for _, profile := range c.effectiveAllowedGuestProfiles("qemu") {
-			if profile == model.GuestProfileContainer || profile == model.GuestProfileDebug {
+			if c.DeploymentProfile != "exception-container" && (profile == model.GuestProfileContainer || profile == model.GuestProfileDebug) {
 				problems = append(problems, fmt.Sprintf("production mode rejects dangerous default qemu profile %q", profile))
 			}
 		}
@@ -660,6 +660,38 @@ func parseRuntimeSelections(raw string) []model.RuntimeSelection {
 		result = append(result, selection)
 	}
 	return result
+}
+
+func defaultRuntimeBackend(args []string) string {
+	if value := strings.TrimSpace(os.Getenv("SANDBOX_RUNTIME")); value != "" {
+		return value
+	}
+	if strings.EqualFold(strings.TrimSpace(flagValue(args, "mode")), "production") {
+		return "qemu"
+	}
+	if strings.EqualFold(strings.TrimSpace(env("SANDBOX_MODE", "development")), "production") {
+		return "qemu"
+	}
+	return "docker"
+}
+
+func flagValue(args []string, name string) string {
+	short := "-" + name
+	long := "--" + name
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		switch {
+		case strings.HasPrefix(arg, short+"="):
+			return strings.TrimPrefix(arg, short+"=")
+		case strings.HasPrefix(arg, long+"="):
+			return strings.TrimPrefix(arg, long+"=")
+		case arg == short || arg == long:
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+		}
+	}
+	return ""
 }
 
 func (c Config) EffectiveQEMUAllowedBaseImagePaths() []string {

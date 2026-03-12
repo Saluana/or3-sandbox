@@ -1061,6 +1061,7 @@ func (rt *Router) authorizeTunnelBrowserSession(w http.ResponseWriter, r *http.R
 	query := redirectURL.Query()
 	query.Del(tunnelSignedURLExpiryKey)
 	query.Del(tunnelSignedURLSigKey)
+	query.Del(tunnelSignedURLCapabilityKey)
 	redirectURL.RawQuery = query.Encode()
 	rt.serveTunnelBootstrapPage(w, redirectURL.String())
 	return false, true
@@ -1332,7 +1333,7 @@ func tunnelCapabilityFromProxyRequest(r *http.Request, tunnelID string) (string,
 	}
 	values := url.Values{}
 	for key, rawValues := range r.URL.Query() {
-		if key == tunnelSignedURLExpiryKey || key == tunnelSignedURLSigKey {
+		if key == tunnelSignedURLExpiryKey || key == tunnelSignedURLSigKey || key == tunnelSignedURLCapabilityKey {
 			continue
 		}
 		for _, value := range rawValues {

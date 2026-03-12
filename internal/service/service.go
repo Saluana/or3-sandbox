@@ -82,7 +82,7 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 	if err != nil {
 		return model.Sandbox{}, err
 	}
-	if err := s.enforceCreatePolicy(ctx, tenant.ID, req); err != nil {
+	if err := s.enforceCreatePolicy(ctx, tenant.ID, req, contract); err != nil {
 		return model.Sandbox{}, err
 	}
 	id := newID("sbx-")
@@ -1713,7 +1713,11 @@ func (s *Service) validateSnapshotCompatibility(snapshot model.Snapshot, sandbox
 	if snapshot.WorkspaceContractVersion != "" && sandbox.WorkspaceContractVersion != "" && snapshot.WorkspaceContractVersion != sandbox.WorkspaceContractVersion {
 		return fmt.Errorf("snapshot workspace contract version %q does not match target sandbox workspace contract version %q", snapshot.WorkspaceContractVersion, sandbox.WorkspaceContractVersion)
 	}
-	if err := s.enforcePromotedImagePolicy(context.Background(), sandbox.TenantID, sandbox.ID, resolvedSandboxRuntimeSelection(sandbox), snapshot.ImageRef, "policy.snapshot.restore"); err != nil {
+	restoreImageRef := snapshot.ImageRef
+	if sandboxSelection.Backend() == "qemu" {
+		restoreImageRef = sandbox.BaseImageRef
+	}
+	if err := s.enforcePromotedImagePolicy(context.Background(), sandbox.TenantID, sandbox.ID, resolvedSandboxRuntimeSelection(sandbox), restoreImageRef, "policy.snapshot.restore", guestimage.Contract{}); err != nil {
 		return err
 	}
 	return nil

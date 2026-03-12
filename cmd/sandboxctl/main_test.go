@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -229,7 +230,7 @@ func TestRunConfigLint(t *testing.T) {
 	t.Setenv("SANDBOX_AUTH_JWT_SECRET_PATHS", secret)
 	t.Setenv("SANDBOX_TRUST_PROXY_HEADERS", "true")
 	t.Setenv("SANDBOX_OPERATOR_HOST", "https://sandbox.example")
-	t.Setenv("SANDBOX_QEMU_BINARY", "/bin/true")
+	t.Setenv("SANDBOX_QEMU_BINARY", testTrueBinary(t))
 	t.Setenv("SANDBOX_QEMU_BASE_IMAGE_PATH", image)
 	t.Setenv("SANDBOX_QEMU_ACCEL", "tcg")
 
@@ -265,6 +266,15 @@ func TestProductionQEMUDoctorFailsOnUnsupportedHostOS(t *testing.T) {
 		}
 	}
 	t.Fatalf("expected host-os check, got %#v", summary.Checks)
+}
+
+func testTrueBinary(t *testing.T) string {
+	t.Helper()
+	path, err := exec.LookPath("true")
+	if err != nil {
+		t.Fatalf("look up true binary: %v", err)
+	}
+	return path
 }
 
 func TestProductionQEMUDoctorAccumulatesChecksAfterConfigLoadFailure(t *testing.T) {

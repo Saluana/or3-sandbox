@@ -2739,21 +2739,7 @@ func TestProductionQEMUCreateRequiresPromotedImage(t *testing.T) {
 		t.Fatalf("expected unpromoted image denial, got %v", err)
 	}
 
-	now := time.Now().UTC()
-	if err := store.UpsertPromotedGuestImage(ctx, model.PromotedGuestImage{
-		ImageRef:               svc.cfg.QEMUBaseImagePath,
-		ImageSHA256:            "sha256",
-		Profile:                model.GuestProfileCore,
-		ControlMode:            model.GuestControlModeAgent,
-		ControlProtocolVersion: model.DefaultGuestControlProtocolVersion,
-		ContractVersion:        model.DefaultImageContractVersion,
-		VerificationStatus:     "verified",
-		PromotionStatus:        "promoted",
-		PromotedAt:             &now,
-		PromotedBy:             "test",
-	}); err != nil {
-		t.Fatalf("upsert promoted image: %v", err)
-	}
+	promoteGuestImage(t, store, svc.cfg.QEMUBaseImagePath)
 
 	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
 		BaseImageRef:  svc.cfg.QEMUBaseImagePath,
@@ -2766,6 +2752,80 @@ func TestProductionQEMUCreateRequiresPromotedImage(t *testing.T) {
 		Start:         false,
 	}); err != nil {
 		t.Fatalf("expected promoted image to pass, got %v", err)
+	}
+}
+
+func TestProductionQEMUCreateRejectsChangedPromotedImage(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.DeploymentMode = "production"
+
+	contract, err := guestimage.Load(svc.cfg.QEMUBaseImagePath)
+	if err != nil {
+		t.Fatalf("load guest image contract: %v", err)
+	}
+	promoteGuestImage(t, store, svc.cfg.QEMUBaseImagePath)
+	if err := os.WriteFile(svc.cfg.QEMUBaseImagePath, []byte("rotated-qcow2"), 0o644); err != nil {
+		t.Fatalf("rewrite guest image: %v", err)
+	}
+	writeGuestImageContract(t, svc.cfg.QEMUBaseImagePath, contract)
+
+	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  svc.cfg.QEMUBaseImagePath,
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	}); err == nil || !strings.Contains(err.Error(), "no longer matches promoted record") {
+		t.Fatalf("expected modified promoted image denial, got %v", err)
+	}
+}
+
+func TestProductionQEMURestoreUsesBaseImagePromotion(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	runtime.restoreState = model.RuntimeState{RuntimeID: "rt-restore", Status: model.SandboxStatusStopped}
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.DeploymentMode = "production"
+	promoteGuestImage(t, store, svc.cfg.QEMUBaseImagePath)
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  svc.cfg.QEMUBaseImagePath,
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	snapshotRootfs := filepath.Join(t.TempDir(), "snapshot-rootfs.img")
+	if err := os.WriteFile(snapshotRootfs, []byte("snapshot-rootfs"), 0o644); err != nil {
+		t.Fatalf("write snapshot rootfs: %v", err)
+	}
+	runtime.snapshotInfo = model.SnapshotInfo{ImageRef: snapshotRootfs}
+
+	snapshot, err := svc.CreateSnapshot(ctx, tenantA.ID, sandbox.ID, model.CreateSnapshotRequest{Name: "snap"})
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if snapshot.ImageRef == svc.cfg.QEMUBaseImagePath {
+		t.Fatalf("expected snapshot image ref to be copied artifact, got %q", snapshot.ImageRef)
+	}
+
+	if _, err := svc.RestoreSnapshot(ctx, tenantA.ID, snapshot.ID, model.RestoreSnapshotRequest{TargetSandboxID: sandbox.ID}); err != nil {
+		t.Fatalf("restore snapshot: %v", err)
+	}
+	if runtime.restoredSnapshot.ImageRef != snapshot.ImageRef {
+		t.Fatalf("expected restore to use snapshot artifact %q, got %q", snapshot.ImageRef, runtime.restoredSnapshot.ImageRef)
 	}
 }
 
@@ -2852,6 +2912,31 @@ func writeGuestImageContract(t *testing.T, imagePath string, contract guestimage
 	if err := os.WriteFile(guestimage.SidecarPath(imagePath), data, 0o644); err != nil {
 		t.Fatalf("write guest image contract: %v", err)
 	}
+}
+
+func promoteGuestImage(t *testing.T, store *repository.Store, imagePath string) model.PromotedGuestImage {
+	t.Helper()
+	contract, err := guestimage.Load(imagePath)
+	if err != nil {
+		t.Fatalf("load guest image contract: %v", err)
+	}
+	now := time.Now().UTC()
+	record := model.PromotedGuestImage{
+		ImageRef:               imagePath,
+		ImageSHA256:            contract.ImageSHA256,
+		Profile:                contract.Profile,
+		ControlMode:            contract.Control.Mode,
+		ControlProtocolVersion: contract.Control.ProtocolVersion,
+		ContractVersion:        contract.ContractVersion,
+		VerificationStatus:     "verified",
+		PromotionStatus:        "promoted",
+		PromotedAt:             &now,
+		PromotedBy:             "test",
+	}
+	if err := store.UpsertPromotedGuestImage(context.Background(), record); err != nil {
+		t.Fatalf("upsert promoted image: %v", err)
+	}
+	return record
 }
 
 func boolPtr(value bool) *bool {

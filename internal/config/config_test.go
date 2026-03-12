@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -604,7 +605,7 @@ func TestLoadAppliesProductionDeploymentProfileDefaults(t *testing.T) {
 	t.Setenv("SANDBOX_AUTH_JWT_SECRET_PATHS", secret)
 	t.Setenv("SANDBOX_TRUST_PROXY_HEADERS", "true")
 	t.Setenv("SANDBOX_OPERATOR_HOST", "https://sandbox.example")
-	t.Setenv("SANDBOX_QEMU_BINARY", "/bin/true")
+	t.Setenv("SANDBOX_QEMU_BINARY", trueBinary(t))
 	t.Setenv("SANDBOX_QEMU_BASE_IMAGE_PATH", image)
 	t.Setenv("SANDBOX_QEMU_ACCEL", "tcg")
 
@@ -620,6 +621,72 @@ func TestLoadAppliesProductionDeploymentProfileDefaults(t *testing.T) {
 	}
 	if cfg.IsAllowedGuestProfile("qemu", model.GuestProfileContainer) {
 		t.Fatal("expected dangerous container profile to remain blocked")
+	}
+}
+
+func TestLoadDefaultsProductionModeToQEMU(t *testing.T) {
+	root := t.TempDir()
+	secret := filepath.Join(root, "jwt.secret")
+	image := filepath.Join(root, "base.qcow2")
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(image, []byte("qcow2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SANDBOX_MODE", "production")
+	t.Setenv("SANDBOX_AUTH_MODE", "jwt-hs256")
+	t.Setenv("SANDBOX_AUTH_JWT_ISSUER", "issuer.example")
+	t.Setenv("SANDBOX_AUTH_JWT_AUDIENCE", "sandbox-api")
+	t.Setenv("SANDBOX_AUTH_JWT_SECRET_PATHS", secret)
+	t.Setenv("SANDBOX_TRUST_PROXY_HEADERS", "true")
+	t.Setenv("SANDBOX_OPERATOR_HOST", "https://sandbox.example")
+	t.Setenv("SANDBOX_QEMU_BINARY", trueBinary(t))
+	t.Setenv("SANDBOX_QEMU_BASE_IMAGE_PATH", image)
+	t.Setenv("SANDBOX_QEMU_ACCEL", "tcg")
+
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.RuntimeBackend != "qemu" {
+		t.Fatalf("runtime backend = %q, want qemu", cfg.RuntimeBackend)
+	}
+	if cfg.DefaultRuntimeSelection != model.RuntimeSelectionQEMUProfessional {
+		t.Fatalf("default runtime selection = %q", cfg.DefaultRuntimeSelection)
+	}
+}
+
+func TestLoadAllowsExceptionContainerDeploymentProfile(t *testing.T) {
+	root := t.TempDir()
+	secret := filepath.Join(root, "jwt.secret")
+	image := filepath.Join(root, "base.qcow2")
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(image, []byte("qcow2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SANDBOX_DEPLOYMENT_PROFILE", "exception-container")
+	t.Setenv("SANDBOX_AUTH_MODE", "jwt-hs256")
+	t.Setenv("SANDBOX_AUTH_JWT_ISSUER", "issuer.example")
+	t.Setenv("SANDBOX_AUTH_JWT_AUDIENCE", "sandbox-api")
+	t.Setenv("SANDBOX_AUTH_JWT_SECRET_PATHS", secret)
+	t.Setenv("SANDBOX_TRUST_PROXY_HEADERS", "true")
+	t.Setenv("SANDBOX_OPERATOR_HOST", "https://sandbox.example")
+	t.Setenv("SANDBOX_QEMU_BINARY", trueBinary(t))
+	t.Setenv("SANDBOX_QEMU_BASE_IMAGE_PATH", image)
+	t.Setenv("SANDBOX_QEMU_ACCEL", "tcg")
+
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.IsAllowedGuestProfile("qemu", model.GuestProfileContainer) {
+		t.Fatal("expected exception-container profile to allow container")
+	}
+	if !cfg.AllowsDangerousGuestProfiles("qemu") {
+		t.Fatal("expected exception-container profile to enable dangerous qemu profiles")
 	}
 }
 
@@ -700,4 +767,13 @@ type errString string
 
 func (e errString) Error() string {
 	return string(e)
+}
+
+func trueBinary(t *testing.T) string {
+	t.Helper()
+	path, err := exec.LookPath("true")
+	if err != nil {
+		t.Fatalf("look up true binary: %v", err)
+	}
+	return path
 }
