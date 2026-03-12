@@ -1,6 +1,18 @@
 package model
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
+
+const MaxWorkspaceFileTransferBytes = 64 * 1024 * 1024
+
+var ErrFileTransferTooLarge = errors.New("workspace file transfer too large")
+
+func FileTransferTooLargeError(limit int64) error {
+	return fmt.Errorf("%w: workspace file exceeds maximum transfer size of %d bytes", ErrFileTransferTooLarge, limit)
+}
 
 type SandboxStatus string
 

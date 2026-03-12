@@ -128,9 +128,15 @@ func (r *Runtime) agentReadWorkspaceFileBytes(ctx context.Context, layout sandbo
 		if result.Offset != offset {
 			return nil, fmt.Errorf("guest agent returned unexpected file offset: host=%d guest=%d", offset, result.Offset)
 		}
+		if result.Size > model.MaxWorkspaceFileTransferBytes {
+			return nil, model.FileTransferTooLargeError(model.MaxWorkspaceFileTransferBytes)
+		}
 		chunk, err := agentproto.DecodeBytes(result.Content)
 		if err != nil {
 			return nil, err
+		}
+		if int64(len(output)+len(chunk)) > model.MaxWorkspaceFileTransferBytes {
+			return nil, model.FileTransferTooLargeError(model.MaxWorkspaceFileTransferBytes)
 		}
 		output = append(output, chunk...)
 		offset += int64(len(chunk))

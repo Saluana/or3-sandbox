@@ -83,14 +83,6 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 	if err := s.enforceCreatePolicy(ctx, tenant.ID, req); err != nil {
 		return model.Sandbox{}, err
 	}
-	if err := s.checkQuota(ctx, tenant.ID, quota, req); err != nil {
-		return model.Sandbox{}, err
-	}
-	if req.Start {
-		if err := s.checkRunningQuota(ctx, tenant.ID, quota); err != nil {
-			return model.Sandbox{}, err
-		}
-	}
 	id := newID("sbx-")
 	baseDir := filepath.Join(s.cfg.StorageRoot, id)
 	storageRoot := filepath.Join(baseDir, "rootfs")
@@ -138,7 +130,7 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 		UpdatedAt:                now,
 		LastActiveAt:             now,
 	}
-	if err := s.reserveSandboxCreate(ctx, tenant.ID, sandbox, req); err != nil {
+	if err := s.reserveSandboxCreate(ctx, tenant.ID, quota, sandbox, req); err != nil {
 		_ = os.RemoveAll(filepath.Join(s.cfg.StorageRoot, id))
 		return model.Sandbox{}, err
 	}
@@ -341,11 +333,7 @@ func (s *Service) resolveRuntimeSelection(req model.CreateSandboxRequest) model.
 }
 
 func (s *Service) StartSandbox(ctx context.Context, tenantID, sandboxID string, quota model.TenantQuota) (model.Sandbox, error) {
-	var err error
-	if err := s.checkRunningQuota(ctx, tenantID, quota); err != nil {
-		return model.Sandbox{}, err
-	}
-	sandbox, err := s.reserveLifecycleTransition(ctx, tenantID, sandboxID, "start", model.SandboxStatusStarting, admissionDelta{
+	sandbox, err := s.reserveLifecycleTransition(ctx, tenantID, sandboxID, "start", &quota, model.SandboxStatusStarting, admissionDelta{
 		nodeRunning:  1,
 		tenantStarts: 1,
 		tenantHeavy:  1,
@@ -413,11 +401,7 @@ func (s *Service) SuspendSandbox(ctx context.Context, tenantID, sandboxID string
 }
 
 func (s *Service) ResumeSandbox(ctx context.Context, tenantID, sandboxID string, quota model.TenantQuota) (model.Sandbox, error) {
-	var err error
-	if err := s.checkRunningQuota(ctx, tenantID, quota); err != nil {
-		return model.Sandbox{}, err
-	}
-	sandbox, err := s.reserveLifecycleTransition(ctx, tenantID, sandboxID, "resume", model.SandboxStatusStarting, admissionDelta{
+	sandbox, err := s.reserveLifecycleTransition(ctx, tenantID, sandboxID, "resume", &quota, model.SandboxStatusStarting, admissionDelta{
 		nodeRunning:  1,
 		tenantStarts: 1,
 		tenantHeavy:  1,
@@ -495,13 +479,6 @@ func (s *Service) ExecSandbox(ctx context.Context, tenant model.Tenant, quota mo
 	if err := s.enforceLifecyclePolicy(ctx, sandbox, "exec"); err != nil {
 		return model.Execution{}, err
 	}
-	usage, err := s.store.TenantUsage(ctx, tenant.ID)
-	if err != nil {
-		return model.Execution{}, err
-	}
-	if usage.ConcurrentExecs >= quota.MaxConcurrentExecs {
-		return model.Execution{}, fmt.Errorf("tenant exec quota exceeded")
-	}
 	id := newID("exec-")
 	started := time.Now().UTC()
 	execution := model.Execution{
@@ -517,7 +494,7 @@ func (s *Service) ExecSandbox(ctx context.Context, tenant model.Tenant, quota mo
 	if execution.TimeoutSeconds == 0 && req.Timeout > 0 {
 		execution.TimeoutSeconds = 1
 	}
-	if err := s.store.CreateExecution(ctx, execution); err != nil {
+	if err := s.reserveExecutionSlot(ctx, tenant.ID, quota, execution); err != nil {
 		return model.Execution{}, err
 	}
 	stdoutCapture := &boundedBuffer{limit: previewLimit}
@@ -651,7 +628,7 @@ func (s *Service) ReadFile(ctx context.Context, tenantID, sandboxID, path, encod
 	if err != nil {
 		return model.FileReadResponse{}, err
 	}
-	data, err := os.ReadFile(target)
+	data, err := readWorkspaceFileBytes(target)
 	if err != nil {
 		return model.FileReadResponse{}, err
 	}
@@ -667,6 +644,9 @@ func (s *Service) WriteFileBytes(ctx context.Context, tenantID, sandboxID, path 
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {
 		return err
+	}
+	if int64(len(content)) > model.MaxWorkspaceFileTransferBytes {
+		return model.FileTransferTooLargeError(model.MaxWorkspaceFileTransferBytes)
 	}
 	relativePath, err := cleanWorkspaceRelativePath(path)
 	if err != nil {
@@ -718,7 +698,7 @@ func (s *Service) readWorkspaceBytes(ctx context.Context, sandbox model.Sandbox,
 	if err != nil {
 		return nil, err
 	}
-	return os.ReadFile(target)
+	return readWorkspaceFileBytes(target)
 }
 
 func (s *Service) DeleteFile(ctx context.Context, tenantID, sandboxID, path string) error {
@@ -784,19 +764,6 @@ func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, 
 		s.recordAudit(ctx, tenantID, sandboxID, "tunnel.create", sandboxID, "denied", auditKV("reason", "sandbox_tunnel_policy_denied"))
 		return model.Tunnel{}, fmt.Errorf("sandbox does not allow tunnels")
 	}
-	usage, err := s.store.TenantUsage(ctx, tenantID)
-	if err != nil {
-		return model.Tunnel{}, err
-	}
-	quota, err := s.store.GetQuota(ctx, tenantID)
-	if err == nil && !quota.AllowTunnels {
-		s.recordAudit(ctx, tenantID, sandboxID, "tunnel.create", sandboxID, "denied", auditKV("reason", "tenant_tunnel_policy_denied"))
-		return model.Tunnel{}, fmt.Errorf("tenant tunnel policy denied")
-	}
-	if err == nil && usage.ActiveTunnels >= quota.MaxTunnels {
-		s.recordAudit(ctx, tenantID, sandboxID, "tunnel.create", sandboxID, "denied", auditKV("reason", "tunnel_quota_exceeded"))
-		return model.Tunnel{}, fmt.Errorf("tunnel quota exceeded")
-	}
 	id := newID("tun-")
 	if req.TargetPort < 1 || req.TargetPort > 65535 {
 		return model.Tunnel{}, fmt.Errorf("target_port must be between 1 and 65535")
@@ -807,25 +774,7 @@ func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, 
 	if req.Protocol != model.TunnelProtocolHTTP {
 		return model.Tunnel{}, fmt.Errorf("unsupported tunnel protocol %q", req.Protocol)
 	}
-	if req.AuthMode == "" && err == nil {
-		req.AuthMode = quota.DefaultTunnelAuthMode
-	}
-	if req.AuthMode == "" {
-		req.AuthMode = "token"
-	}
-	if req.AuthMode != "token" && req.AuthMode != "none" {
-		return model.Tunnel{}, fmt.Errorf("unsupported auth_mode %q", req.AuthMode)
-	}
-	if req.Visibility == "" && err == nil {
-		req.Visibility = quota.DefaultTunnelVisibility
-	}
-	if req.Visibility == "" {
-		req.Visibility = "private"
-	}
-	if req.Visibility != "private" && req.Visibility != "public" {
-		return model.Tunnel{}, fmt.Errorf("unsupported visibility %q", req.Visibility)
-	}
-	if err := s.enforceTunnelPolicy(ctx, sandbox, req); err != nil {
+	if err := s.applyTunnelRequestDefaults(ctx, tenantID, &req); err != nil {
 		return model.Tunnel{}, err
 	}
 	policy := buildNetworkPolicy(sandbox.NetworkMode, sandbox.AllowTunnels)
@@ -846,7 +795,7 @@ func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, 
 		tunnel.AccessToken = accessToken
 		tunnel.AuthSecretHash = config.HashToken(accessToken)
 	}
-	if err := s.store.CreateTunnel(ctx, tunnel); err != nil {
+	if err := s.reserveTunnelCreate(ctx, tenantID, sandbox, &tunnel, &req); err != nil {
 		return model.Tunnel{}, err
 	}
 	_ = s.touchSandboxActivity(ctx, sandbox)
@@ -1532,7 +1481,7 @@ func (s *Service) revokeActiveTunnels(ctx context.Context, tenantID string, sand
 	return nil
 }
 
-func (s *Service) reserveSandboxCreate(ctx context.Context, tenantID string, sandbox model.Sandbox, req model.CreateSandboxRequest) error {
+func (s *Service) reserveSandboxCreate(ctx context.Context, tenantID string, quota model.TenantQuota, sandbox model.Sandbox, req model.CreateSandboxRequest) error {
 	createDelta := admissionDelta{nodeSandboxes: 1, tenantHeavy: 1}
 	if req.Start {
 		createDelta.nodeRunning = 1
@@ -1542,13 +1491,21 @@ func (s *Service) reserveSandboxCreate(ctx context.Context, tenantID string, san
 	}
 	s.admissionMu.Lock()
 	defer s.admissionMu.Unlock()
+	if err := s.checkQuota(ctx, tenantID, quota, req); err != nil {
+		return err
+	}
+	if req.Start {
+		if err := s.checkRunningQuota(ctx, tenantID, quota); err != nil {
+			return err
+		}
+	}
 	if err := s.enforceAdmission(ctx, tenantID, sandbox.ID, "create", createDelta); err != nil {
 		return err
 	}
 	return s.store.CreateSandbox(ctx, sandbox)
 }
 
-func (s *Service) reserveLifecycleTransition(ctx context.Context, tenantID, sandboxID, action string, transitional model.SandboxStatus, delta admissionDelta) (model.Sandbox, error) {
+func (s *Service) reserveLifecycleTransition(ctx context.Context, tenantID, sandboxID, action string, quota *model.TenantQuota, transitional model.SandboxStatus, delta admissionDelta) (model.Sandbox, error) {
 	s.admissionMu.Lock()
 	defer s.admissionMu.Unlock()
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
@@ -1564,6 +1521,11 @@ func (s *Service) reserveLifecycleTransition(ctx context.Context, tenantID, sand
 	if err := s.enforceLifecyclePolicy(ctx, sandbox, action); err != nil {
 		return model.Sandbox{}, err
 	}
+	if quota != nil {
+		if err := s.checkRunningQuota(ctx, tenantID, *quota); err != nil {
+			return model.Sandbox{}, err
+		}
+	}
 	if err := s.enforceAdmission(ctx, tenantID, sandbox.ID, action, delta); err != nil {
 		return model.Sandbox{}, err
 	}
@@ -1574,6 +1536,78 @@ func (s *Service) reserveLifecycleTransition(ctx context.Context, tenantID, sand
 		return model.Sandbox{}, err
 	}
 	return sandbox, nil
+}
+
+func (s *Service) reserveExecutionSlot(ctx context.Context, tenantID string, quota model.TenantQuota, execution model.Execution) error {
+	s.admissionMu.Lock()
+	defer s.admissionMu.Unlock()
+	usage, err := s.store.TenantUsage(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	if usage.ConcurrentExecs >= quota.MaxConcurrentExecs {
+		return fmt.Errorf("tenant exec quota exceeded")
+	}
+	return s.store.CreateExecution(ctx, execution)
+}
+
+func (s *Service) applyTunnelRequestDefaults(ctx context.Context, tenantID string, req *model.CreateTunnelRequest) error {
+	quota, quotaErr := s.store.GetQuota(ctx, tenantID)
+	return applyTunnelRequestDefaults(req, quota, quotaErr)
+}
+
+func applyTunnelRequestDefaults(req *model.CreateTunnelRequest, quota model.TenantQuota, quotaErr error) error {
+	if req.AuthMode == "" && quotaErr == nil {
+		req.AuthMode = quota.DefaultTunnelAuthMode
+	}
+	if req.AuthMode == "" {
+		req.AuthMode = "token"
+	}
+	if req.AuthMode != "token" && req.AuthMode != "none" {
+		return fmt.Errorf("unsupported auth_mode %q", req.AuthMode)
+	}
+	if req.Visibility == "" && quotaErr == nil {
+		req.Visibility = quota.DefaultTunnelVisibility
+	}
+	if req.Visibility == "" {
+		req.Visibility = "private"
+	}
+	if req.Visibility != "private" && req.Visibility != "public" {
+		return fmt.Errorf("unsupported visibility %q", req.Visibility)
+	}
+	return nil
+}
+
+func (s *Service) reserveTunnelCreate(ctx context.Context, tenantID string, sandbox model.Sandbox, tunnel *model.Tunnel, req *model.CreateTunnelRequest) error {
+	s.admissionMu.Lock()
+	defer s.admissionMu.Unlock()
+
+	usage, err := s.store.TenantUsage(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	quota, quotaErr := s.store.GetQuota(ctx, tenantID)
+	if quotaErr == nil && !quota.AllowTunnels {
+		s.recordAudit(ctx, tenantID, sandbox.ID, "tunnel.create", sandbox.ID, "denied", auditKV("reason", "tenant_tunnel_policy_denied"))
+		return fmt.Errorf("tenant tunnel policy denied")
+	}
+	if quotaErr == nil && usage.ActiveTunnels >= quota.MaxTunnels {
+		s.recordAudit(ctx, tenantID, sandbox.ID, "tunnel.create", sandbox.ID, "denied", auditKV("reason", "tunnel_quota_exceeded"))
+		return fmt.Errorf("tunnel quota exceeded")
+	}
+	if err := applyTunnelRequestDefaults(req, quota, quotaErr); err != nil {
+		return err
+	}
+	if err := s.enforceTunnelPolicy(ctx, sandbox, *req); err != nil {
+		return err
+	}
+
+	tunnel.AuthMode = req.AuthMode
+	tunnel.Visibility = req.Visibility
+	if err := s.store.CreateTunnel(ctx, *tunnel); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Service) executeReservedTransition(ctx context.Context, tenantID string, sandbox model.Sandbox, auditAction string, transitional, finalStatus model.SandboxStatus, action func(model.Sandbox) (model.RuntimeState, error)) (model.Sandbox, error) {

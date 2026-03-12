@@ -10,6 +10,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"or3-sandbox/internal/model"
 )
 
 const ProtocolVersion = "2"
@@ -17,7 +19,7 @@ const ProtocolVersion = "2"
 const (
 	MaxMessageSize      = 16 * 1024 * 1024
 	MaxRequestIDLength  = 128
-	MaxFileTransferSize = 64 * 1024 * 1024
+	MaxFileTransferSize = model.MaxWorkspaceFileTransferBytes
 	MaxFileChunkSize    = 256 * 1024
 	MaxBridgeChunkSize  = 32 * 1024
 )

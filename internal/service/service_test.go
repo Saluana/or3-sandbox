@@ -150,6 +150,89 @@ func TestLocalFileOpsStayScopedToWorkspaceAndMeasuredStorage(t *testing.T) {
 	}
 }
 
+func TestLocalFileOpsRejectWorkspaceSymlinkEscapes(t *testing.T) {
+	ctx := context.Background()
+	runtime := newRuntimeOnlyStub()
+	svc, _, quota, tenant, _ := newServiceHarness(t, runtime, "docker")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenant, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "alpine:3.20",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     64,
+		DiskLimitMB:   256,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	outsideRoot := t.TempDir()
+	outsideFile := filepath.Join(outsideRoot, "host.txt")
+	if err := os.WriteFile(outsideFile, []byte("host"), 0o644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	linkPath := filepath.Join(sandbox.WorkspaceRoot, "escape")
+	if err := os.Symlink(outsideRoot, linkPath); err != nil {
+		t.Fatalf("symlink outside root: %v", err)
+	}
+
+	if _, err := svc.ReadFile(ctx, tenant.ID, sandbox.ID, "escape/host.txt", ""); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected symlink read rejection, got %v", err)
+	}
+	if err := svc.WriteFile(ctx, tenant.ID, sandbox.ID, "escape/new.txt", "nope"); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected symlink write rejection, got %v", err)
+	}
+	if err := svc.Mkdir(ctx, tenant.ID, sandbox.ID, "escape/nested"); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected symlink mkdir rejection, got %v", err)
+	}
+	if err := svc.DeleteFile(ctx, tenant.ID, sandbox.ID, "escape/host.txt"); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected symlink delete rejection, got %v", err)
+	}
+	if data, err := os.ReadFile(outsideFile); err != nil || string(data) != "host" {
+		t.Fatalf("expected outside file to remain unchanged, got %q err=%v", string(data), err)
+	}
+}
+
+func TestLocalFileReadsRejectOversizeTransfers(t *testing.T) {
+	ctx := context.Background()
+	runtime := newRuntimeOnlyStub()
+	svc, _, quota, tenant, _ := newServiceHarness(t, runtime, "docker")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenant, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "alpine:3.20",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     64,
+		DiskLimitMB:   256,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	target := filepath.Join(sandbox.WorkspaceRoot, "large.bin")
+	file, err := os.Create(target)
+	if err != nil {
+		t.Fatalf("create oversize file: %v", err)
+	}
+	if err := file.Truncate(model.MaxWorkspaceFileTransferBytes + 1); err != nil {
+		file.Close()
+		t.Fatalf("truncate oversize file: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close oversize file: %v", err)
+	}
+
+	if _, err := svc.ReadFile(ctx, tenant.ID, sandbox.ID, "large.bin", ""); !errors.Is(err, model.ErrFileTransferTooLarge) {
+		t.Fatalf("expected oversize read rejection, got %v", err)
+	}
+}
+
 func TestOpenSandboxLocalConnUsesRuntimeBridge(t *testing.T) {
 	ctx := context.Background()
 	runtime := newStubRuntime()
@@ -1564,6 +1647,48 @@ func TestTunnelPolicyRejectsDefaultPublicVisibility(t *testing.T) {
 		AuthMode:   "token",
 	}); !errors.Is(err, auth.ErrForbidden) {
 		t.Fatalf("expected default public tunnel denial, got %v", err)
+	}
+}
+
+func TestCreateTunnelMintsSecretForDefaultTokenAuth(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	quota.AllowTunnels = true
+	quota.DefaultTunnelAuthMode = "token"
+	quota.DefaultTunnelVisibility = "private"
+	if err := store.SeedTenants(ctx, []config.TenantConfig{{ID: tenantA.ID, Name: tenantA.Name, Token: "token-a"}}, quota); err != nil {
+		t.Fatalf("seed tenants: %v", err)
+	}
+
+	sandbox, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	tunnel, err := svc.CreateTunnel(ctx, tenantA.ID, sandbox.ID, model.CreateTunnelRequest{TargetPort: 8080})
+	if err != nil {
+		t.Fatalf("create tunnel: %v", err)
+	}
+	if tunnel.AuthMode != "token" {
+		t.Fatalf("expected default token auth mode, got %q", tunnel.AuthMode)
+	}
+	if tunnel.AccessToken == "" {
+		t.Fatalf("expected access token to be minted")
+	}
+	if tunnel.AuthSecretHash == "" {
+		t.Fatalf("expected auth secret hash to be persisted")
+	}
+	if got, want := tunnel.AuthSecretHash, config.HashToken(tunnel.AccessToken); got != want {
+		t.Fatalf("expected auth secret hash %q, got %q", want, got)
 	}
 }
 

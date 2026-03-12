@@ -368,6 +368,26 @@ func TestAgentReadWorkspaceFileBytesAssemblesChunks(t *testing.T) {
 	}
 }
 
+func TestAgentReadWorkspaceFileBytesRejectsOversizePayload(t *testing.T) {
+	socketPath := startTestAgentSocket(t, func(conn net.Conn) {
+		defer conn.Close()
+		request, _ := agentproto.ReadMessage(conn)
+		result, _ := json.Marshal(agentproto.FileReadResult{
+			Path:    "/workspace/large.bin",
+			Content: agentproto.EncodeBytes([]byte("ok")),
+			Offset:  0,
+			Size:    model.MaxWorkspaceFileTransferBytes + 1,
+			EOF:     true,
+		})
+		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+	})
+	r := &Runtime{}
+	_, err := r.agentReadWorkspaceFileBytes(context.Background(), sandboxLayout{agentSocketPath: socketPath}, "large.bin")
+	if !errors.Is(err, model.ErrFileTransferTooLarge) {
+		t.Fatalf("expected oversize read rejection, got %v", err)
+	}
+}
+
 func TestAgentTTYHandleRejectsWrongSessionData(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()

@@ -44,6 +44,7 @@ const (
 	tunnelSignedURLExpiryKey  = "or3_exp"
 	tunnelSignedURLSigKey     = "or3_sig"
 	tunnelAuthCookieName      = "or3_tunnel_auth"
+	fileUploadBodyBytes       = ((model.MaxWorkspaceFileTransferBytes + 2) / 3 * 4) + 64*1024
 )
 
 func New(log *slog.Logger, svc *service.Service, cfg config.Config) http.Handler {
@@ -572,7 +573,12 @@ func (rt *Router) handleFiles(w http.ResponseWriter, r *http.Request, tenantID, 
 		writeJSON(w, http.StatusOK, content)
 	case http.MethodPut:
 		var req model.FileWriteRequest
-		if err := decodeJSON(r, &req); err != nil {
+		if err := decodeJSONLimited(w, r, fileUploadBodyBytes, &req); err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				writeError(w, http.StatusRequestEntityTooLarge, errorCodeForStatus(http.StatusRequestEntityTooLarge), fmt.Sprintf("file upload body exceeds maximum size of %d bytes", fileUploadBodyBytes))
+				return
+			}
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
@@ -1344,7 +1350,18 @@ func decodeJSON(r *http.Request, out any) error {
 	defer r.Body.Close()
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
-	return decoder.Decode(out)
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("request body must contain a single JSON value")
+	}
+	return nil
+}
+
+func decodeJSONLimited(w http.ResponseWriter, r *http.Request, maxBytes int64, out any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	return decodeJSON(r, out)
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -1377,6 +1394,8 @@ func errorCodeForStatus(status int) string {
 		return "method_not_allowed"
 	case http.StatusConflict:
 		return "conflict"
+	case http.StatusRequestEntityTooLarge:
+		return "payload_too_large"
 	case http.StatusTooManyRequests:
 		return "rate_limited"
 	case http.StatusBadGateway:
@@ -1397,6 +1416,8 @@ func classifyError(err error) (status int, code string, message string) {
 			status = http.StatusTooManyRequests
 		}
 		return status, errorCodeForStatus(status), admissionErr.Error()
+	case errors.Is(err, model.ErrFileTransferTooLarge):
+		return http.StatusRequestEntityTooLarge, errorCodeForStatus(http.StatusRequestEntityTooLarge), err.Error()
 	case errors.Is(err, auth.ErrForbidden):
 		return http.StatusForbidden, "forbidden", "forbidden"
 	case errors.Is(err, repository.ErrNotFound):

@@ -319,6 +319,11 @@ Session lifecycle:
 
 Read a workspace file.
 
+Limits and safety:
+
+- Paths stay inside the workspace root; traversal and symlink escapes are rejected.
+- The daemon returns `413 payload_too_large` when the requested file exceeds 64 MiB.
+
 Text response example:
 
 ```json
@@ -346,6 +351,12 @@ Use `?encoding=base64` when the file may contain arbitrary bytes.
 ### `PUT /v1/sandboxes/{id}/files/{path}`
 
 Write a file.
+
+Limits and safety:
+
+- Paths stay inside the workspace root; traversal and symlink escapes are rejected.
+- File writes are capped at 64 MiB of decoded content.
+- Oversized upload bodies fail with `413 payload_too_large`.
 
 Text upload:
 

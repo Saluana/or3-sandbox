@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,7 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,16 +29,26 @@ import (
 const (
 	defaultPortPath        = "/dev/virtio-ports/org.or3.guest_agent"
 	defaultProfileManifest = "/etc/or3/profile-manifest.json"
+	defaultWorkloadUser    = "sandbox"
 	readyMarkerPath        = "/var/lib/or3/bootstrap.ready"
 	previewLimit           = 64 * 1024
+	workloadHelperModeEnv  = "OR3_GUEST_AGENT_HELPER_MODE"
 )
 
 func main() {
+	if mode := strings.TrimSpace(os.Getenv(workloadHelperModeEnv)); mode != "" {
+		if err := runHelperMode(mode, os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	agent := &guestAgent{
 		portPath:            env("OR3_GUEST_AGENT_PORT_PATH", defaultPortPath),
 		profileManifestPath: env("OR3_GUEST_AGENT_PROFILE_MANIFEST", defaultProfileManifest),
+		workloadUser:        env("OR3_GUEST_AGENT_WORKLOAD_USER", defaultWorkloadUser),
 	}
 	if err := agent.run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, err)
@@ -44,12 +57,16 @@ func main() {
 }
 
 type guestAgent struct {
-	portPath            string
-	profileManifestPath string
-	workspaceContract   string
-	capabilities        []string
-	allowedOps          map[string]struct{}
-	messageCounter      atomic.Uint64
+	portPath             string
+	profileManifestPath  string
+	workloadUser         string
+	workspaceContract    string
+	capabilities         []string
+	allowedOps           map[string]struct{}
+	messageCounter       atomic.Uint64
+	workloadIdentity     workloadIdentity
+	workloadIdentityErr  error
+	workloadIdentityOnce sync.Once
 }
 
 type guestProfileManifest struct {
@@ -58,6 +75,25 @@ type guestProfileManifest struct {
 	Control                  struct {
 		Mode string `json:"mode"`
 	} `json:"control"`
+}
+
+type workloadIdentity struct {
+	Username string
+	UID      uint32
+	GID      uint32
+	HomeDir  string
+}
+
+type workloadFileOpRequest struct {
+	Op     string                      `json:"op"`
+	Target string                      `json:"target"`
+	Read   agentproto.FileReadRequest  `json:"read,omitempty"`
+	Write  agentproto.FileWriteRequest `json:"write,omitempty"`
+	Data   string                      `json:"data,omitempty"`
+}
+
+type workloadFileOpResponse struct {
+	Read agentproto.FileReadResult `json:"read,omitempty"`
 }
 
 func (a *guestAgent) run(ctx context.Context) error {
@@ -138,6 +174,13 @@ func (a *guestAgent) allows(op string) bool {
 	return ok
 }
 
+func (a *guestAgent) workloadIdentityInfo() (workloadIdentity, error) {
+	a.workloadIdentityOnce.Do(func() {
+		a.workloadIdentity, a.workloadIdentityErr = lookupWorkloadIdentity(a.workloadUser)
+	})
+	return a.workloadIdentity, a.workloadIdentityErr
+}
+
 func (a *guestAgent) serveConn(ctx context.Context, conn io.ReadWriter) error {
 	for {
 		message, err := agentproto.ReadMessage(conn)
@@ -200,7 +243,11 @@ func (a *guestAgent) handle(ctx context.Context, message agentproto.Message) (ag
 		if err := json.Unmarshal(message.Result, &req); err != nil {
 			return agentproto.Message{}, err
 		}
-		result, err := runExec(ctx, req)
+		identity, err := a.workloadIdentityInfo()
+		if err != nil {
+			return agentproto.Message{}, err
+		}
+		result, err := runExec(ctx, req, identity)
 		if err != nil {
 			return agentproto.Message{}, err
 		}
@@ -215,7 +262,11 @@ func (a *guestAgent) handle(ctx context.Context, message agentproto.Message) (ag
 		if err != nil {
 			return agentproto.Message{}, err
 		}
-		result, err := readFileChunk(target, req)
+		identity, err := a.workloadIdentityInfo()
+		if err != nil {
+			return agentproto.Message{}, err
+		}
+		result, err := readFileChunkAsWorkload(ctx, identity, target, req)
 		if err != nil {
 			return agentproto.Message{}, err
 		}
@@ -234,7 +285,11 @@ func (a *guestAgent) handle(ctx context.Context, message agentproto.Message) (ag
 		if err != nil {
 			return agentproto.Message{}, err
 		}
-		if err := writeFileChunk(target, req, data); err != nil {
+		identity, err := a.workloadIdentityInfo()
+		if err != nil {
+			return agentproto.Message{}, err
+		}
+		if err := writeFileChunkAsWorkload(ctx, identity, target, req, data); err != nil {
 			return agentproto.Message{}, err
 		}
 		return agentproto.Message{ID: message.ID, Op: message.Op, OK: true}, nil
@@ -247,7 +302,11 @@ func (a *guestAgent) handle(ctx context.Context, message agentproto.Message) (ag
 		if err != nil {
 			return agentproto.Message{}, err
 		}
-		return agentproto.Message{ID: message.ID, Op: message.Op, OK: true}, os.RemoveAll(target)
+		identity, err := a.workloadIdentityInfo()
+		if err != nil {
+			return agentproto.Message{}, err
+		}
+		return agentproto.Message{ID: message.ID, Op: message.Op, OK: true}, deletePathAsWorkload(ctx, identity, target)
 	case agentproto.OpMkdir:
 		var req agentproto.PathRequest
 		if err := json.Unmarshal(message.Result, &req); err != nil {
@@ -257,7 +316,11 @@ func (a *guestAgent) handle(ctx context.Context, message agentproto.Message) (ag
 		if err != nil {
 			return agentproto.Message{}, err
 		}
-		return agentproto.Message{ID: message.ID, Op: message.Op, OK: true}, os.MkdirAll(target, 0o755)
+		identity, err := a.workloadIdentityInfo()
+		if err != nil {
+			return agentproto.Message{}, err
+		}
+		return agentproto.Message{ID: message.ID, Op: message.Op, OK: true}, mkdirAsWorkload(ctx, identity, target)
 	case agentproto.OpShutdown:
 		go func() {
 			_ = exec.Command("/sbin/poweroff").Run()
@@ -272,6 +335,10 @@ func (a *guestAgent) servePTY(ctx context.Context, conn io.ReadWriter, requestID
 	if !a.allows(agentproto.OpPTYOpen) {
 		return agentproto.WriteMessage(conn, agentproto.Message{ID: requestID, Op: agentproto.OpPTYOpen, OK: false, Error: fmt.Sprintf("guest profile does not allow operation %q", agentproto.OpPTYOpen)})
 	}
+	identity, err := a.workloadIdentityInfo()
+	if err != nil {
+		return agentproto.WriteMessage(conn, agentproto.Message{ID: requestID, Op: agentproto.OpPTYOpen, OK: false, Error: err.Error()})
+	}
 	command := req.Command
 	if len(command) == 0 {
 		command = []string{"bash"}
@@ -279,6 +346,7 @@ func (a *guestAgent) servePTY(ctx context.Context, conn io.ReadWriter, requestID
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	cmd.Dir = defaultString(req.Cwd, "/workspace")
 	cmd.Env = append(os.Environ(), flattenEnv(req.Env)...)
+	configureWorkloadCommand(cmd, identity)
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(defaultInt(req.Rows, 24)), Cols: uint16(defaultInt(req.Cols, 80))})
 	if err != nil {
 		return agentproto.WriteMessage(conn, agentproto.Message{ID: requestID, Op: agentproto.OpPTYOpen, OK: false, Error: err.Error()})
@@ -527,7 +595,7 @@ func (a *guestAgent) serveTCPBridge(ctx context.Context, conn io.ReadWriter, req
 	}
 }
 
-func runExec(ctx context.Context, req agentproto.ExecRequest) (agentproto.ExecResult, error) {
+func runExec(ctx context.Context, req agentproto.ExecRequest, identity workloadIdentity) (agentproto.ExecResult, error) {
 	command := req.Command
 	if len(command) == 0 {
 		command = []string{"sh", "-lc", "pwd"}
@@ -548,6 +616,7 @@ func runExec(ctx context.Context, req agentproto.ExecRequest) (agentproto.ExecRe
 	cmd := exec.CommandContext(runCtx, command[0], command[1:]...)
 	cmd.Dir = defaultString(req.Cwd, "/workspace")
 	cmd.Env = append(os.Environ(), flattenEnv(req.Env)...)
+	configureWorkloadCommand(cmd, identity)
 	stdout := &limitedBuffer{limit: previewLimit}
 	stderr := &limitedBuffer{limit: previewLimit}
 	cmd.Stdout = stdout
@@ -633,6 +702,174 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func lookupWorkloadIdentity(username string) (workloadIdentity, error) {
+	trimmed := strings.TrimSpace(username)
+	if trimmed == "" {
+		trimmed = defaultWorkloadUser
+	}
+	account, err := user.Lookup(trimmed)
+	if err != nil {
+		return workloadIdentity{}, fmt.Errorf("lookup workload user %q: %w", trimmed, err)
+	}
+	uid, err := strconv.ParseUint(account.Uid, 10, 32)
+	if err != nil {
+		return workloadIdentity{}, fmt.Errorf("parse workload uid %q: %w", account.Uid, err)
+	}
+	gid, err := strconv.ParseUint(account.Gid, 10, 32)
+	if err != nil {
+		return workloadIdentity{}, fmt.Errorf("parse workload gid %q: %w", account.Gid, err)
+	}
+	return workloadIdentity{
+		Username: trimmed,
+		UID:      uint32(uid),
+		GID:      uint32(gid),
+		HomeDir:  defaultString(account.HomeDir, "/workspace"),
+	}, nil
+}
+
+func configureWorkloadCommand(cmd *exec.Cmd, identity workloadIdentity) {
+	cmd.Env = setEnvValue(cmd.Env, "HOME", defaultString(identity.HomeDir, "/workspace"))
+	cmd.Env = setEnvValue(cmd.Env, "USER", identity.Username)
+	cmd.Env = setEnvValue(cmd.Env, "LOGNAME", identity.Username)
+	if uint32(os.Geteuid()) == identity.UID && uint32(os.Getegid()) == identity.GID {
+		return
+	}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Credential = &syscall.Credential{Uid: identity.UID, Gid: identity.GID}
+}
+
+func setEnvValue(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
+}
+
+func readFileChunkAsWorkload(ctx context.Context, identity workloadIdentity, target string, req agentproto.FileReadRequest) (agentproto.FileReadResult, error) {
+	if uint32(os.Geteuid()) == identity.UID && uint32(os.Getegid()) == identity.GID {
+		return readFileChunk(target, req)
+	}
+	response, err := runWorkloadFileOp(ctx, identity, workloadFileOpRequest{
+		Op:     agentproto.OpFileRead,
+		Target: target,
+		Read:   req,
+	})
+	if err != nil {
+		return agentproto.FileReadResult{}, err
+	}
+	return response.Read, nil
+}
+
+func writeFileChunkAsWorkload(ctx context.Context, identity workloadIdentity, target string, req agentproto.FileWriteRequest, data []byte) error {
+	if uint32(os.Geteuid()) == identity.UID && uint32(os.Getegid()) == identity.GID {
+		return writeFileChunk(target, req, data)
+	}
+	_, err := runWorkloadFileOp(ctx, identity, workloadFileOpRequest{
+		Op:     agentproto.OpFileWrite,
+		Target: target,
+		Write:  req,
+		Data:   agentproto.EncodeBytes(data),
+	})
+	return err
+}
+
+func deletePathAsWorkload(ctx context.Context, identity workloadIdentity, target string) error {
+	if uint32(os.Geteuid()) == identity.UID && uint32(os.Getegid()) == identity.GID {
+		return os.RemoveAll(target)
+	}
+	_, err := runWorkloadFileOp(ctx, identity, workloadFileOpRequest{
+		Op:     agentproto.OpFileDelete,
+		Target: target,
+	})
+	return err
+}
+
+func mkdirAsWorkload(ctx context.Context, identity workloadIdentity, target string) error {
+	if uint32(os.Geteuid()) == identity.UID && uint32(os.Getegid()) == identity.GID {
+		return os.MkdirAll(target, 0o755)
+	}
+	_, err := runWorkloadFileOp(ctx, identity, workloadFileOpRequest{
+		Op:     agentproto.OpMkdir,
+		Target: target,
+	})
+	return err
+}
+
+func runWorkloadFileOp(ctx context.Context, identity workloadIdentity, req workloadFileOpRequest) (workloadFileOpResponse, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return workloadFileOpResponse{}, err
+	}
+	exePath, err := os.Executable()
+	if err != nil {
+		return workloadFileOpResponse{}, err
+	}
+	cmd := exec.CommandContext(ctx, exePath)
+	cmd.Env = append(os.Environ(), workloadHelperModeEnv+"=file-op")
+	configureWorkloadCommand(cmd, identity)
+	cmd.Stdin = bytes.NewReader(payload)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if stderr.Len() > 0 {
+			return workloadFileOpResponse{}, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+		}
+		return workloadFileOpResponse{}, err
+	}
+	if stdout.Len() == 0 {
+		return workloadFileOpResponse{}, nil
+	}
+	var response workloadFileOpResponse
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		return workloadFileOpResponse{}, err
+	}
+	return response, nil
+}
+
+func runHelperMode(mode string, in io.Reader, out io.Writer) error {
+	switch mode {
+	case "file-op":
+		return runFileOpHelper(in, out)
+	default:
+		return fmt.Errorf("unknown helper mode %q", mode)
+	}
+}
+
+func runFileOpHelper(in io.Reader, out io.Writer) error {
+	var req workloadFileOpRequest
+	if err := json.NewDecoder(in).Decode(&req); err != nil {
+		return err
+	}
+	switch req.Op {
+	case agentproto.OpFileRead:
+		result, err := readFileChunk(req.Target, req.Read)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(out).Encode(workloadFileOpResponse{Read: result})
+	case agentproto.OpFileWrite:
+		data, err := agentproto.DecodeBytes(req.Data)
+		if err != nil {
+			return err
+		}
+		return writeFileChunk(req.Target, req.Write, data)
+	case agentproto.OpFileDelete:
+		return os.RemoveAll(req.Target)
+	case agentproto.OpMkdir:
+		return os.MkdirAll(req.Target, 0o755)
+	default:
+		return fmt.Errorf("unsupported helper operation %q", req.Op)
+	}
 }
 
 func readFileChunk(target string, req agentproto.FileReadRequest) (agentproto.FileReadResult, error) {

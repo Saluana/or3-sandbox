@@ -223,8 +223,8 @@ The QEMU backend:
 - boots a guest image with QEMU
 - waits for the guest agent to report readiness on agent-first images
 - checks for a readiness marker at `/var/lib/or3/bootstrap.ready`
-- runs commands through the guest agent by default
-- manages guest files through the guest boundary
+- runs commands and PTY sessions through the guest agent as the unprivileged `sandbox` workload user by default
+- manages guest files through the guest boundary with bounded 64 MiB transfer limits
 
 SSH still exists, but only as the explicit compatibility/debug path for `ssh-compat` images.
 

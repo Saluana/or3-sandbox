@@ -3,6 +3,7 @@ package service
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -26,10 +27,61 @@ func resolveWorkspacePath(root, requested string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if relativePath == "" {
-		return root, nil
+	cleanRoot, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(root, relativePath), nil
+	if cleanRoot == "." || cleanRoot == "" {
+		return "", fmt.Errorf("workspace root is empty")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(cleanRoot)
+	if err != nil {
+		return "", err
+	}
+	rootInfo, err := os.Stat(resolvedRoot)
+	if err != nil {
+		return "", err
+	}
+	if !rootInfo.IsDir() {
+		return "", fmt.Errorf("workspace root is not a directory")
+	}
+	if relativePath == "" {
+		return resolvedRoot, nil
+	}
+	current := resolvedRoot
+	parts := strings.Split(relativePath, string(filepath.Separator))
+	for i, part := range parts {
+		next := filepath.Join(current, part)
+		info, err := os.Lstat(next)
+		switch {
+		case err == nil:
+			if info.Mode()&os.ModeSymlink != 0 {
+				resolvedNext, err := filepath.EvalSymlinks(next)
+				if err != nil {
+					return "", err
+				}
+				if !pathWithinRoot(resolvedRoot, resolvedNext) {
+					return "", fmt.Errorf("path escapes workspace through symlink")
+				}
+				current = resolvedNext
+				continue
+			}
+			current = next
+		case errors.Is(err, os.ErrNotExist):
+			return filepath.Join(current, filepath.Join(parts[i:]...)), nil
+		default:
+			return "", err
+		}
+	}
+	return current, nil
+}
+
+func pathWithinRoot(root, target string) bool {
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func cleanWorkspaceRelativePath(requested string) (string, error) {
@@ -91,6 +143,32 @@ func copyFile(dst, src string) error {
 		return err
 	}
 	return out.Close()
+}
+
+func readWorkspaceFileBytes(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("path is a directory")
+	}
+	if info.Size() > model.MaxWorkspaceFileTransferBytes {
+		return nil, model.FileTransferTooLargeError(model.MaxWorkspaceFileTransferBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, model.MaxWorkspaceFileTransferBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > model.MaxWorkspaceFileTransferBytes {
+		return nil, model.FileTransferTooLargeError(model.MaxWorkspaceFileTransferBytes)
+	}
+	return data, nil
 }
 
 func isReadableFile(path string) bool {

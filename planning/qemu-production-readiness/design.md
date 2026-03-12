@@ -229,6 +229,7 @@ Recommended identities:
 
 - `or3-agent`
   - guest-agent service identity or tightly scoped control identity
+  - if the service keeps elevated control privileges for boot or shutdown tasks, exec, PTY, and workspace file operations must still drop to the workload identity
 - `sandbox`
   - unprivileged workload execution identity
 
