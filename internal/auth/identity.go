@@ -13,11 +13,13 @@ var ErrForbidden = errors.New("forbidden")
 type tenantContextKey struct{}
 
 type Identity struct {
-	Subject    string
-	TenantID   string
-	Roles      []string
-	IsService  bool
-	AuthMethod string
+	Subject          string
+	TenantID         string
+	Roles            []string
+	Scopes           []string
+	ServiceAccountID string
+	IsService        bool
+	AuthMethod       string
 }
 
 type TenantContext struct {
@@ -59,9 +61,12 @@ func Require(ctx context.Context, permissions ...string) error {
 }
 
 func (t TenantContext) HasPermission(permission string) bool {
+	if t.Identity.IsService && len(t.Identity.Scopes) > 0 && !containsPermission(t.Identity.Scopes, permission) {
+		return false
+	}
 	for _, role := range t.Identity.Roles {
 		for _, granted := range rolePermissions(strings.ToLower(strings.TrimSpace(role))) {
-			if granted == "*" || granted == permission {
+			if granted == permission {
 				return true
 			}
 		}
@@ -69,11 +74,27 @@ func (t TenantContext) HasPermission(permission string) bool {
 	return false
 }
 
+func AllPermissions() []string {
+	return []string{
+		PermissionSandboxRead,
+		PermissionSandboxLifecycle,
+		PermissionExecRun,
+		PermissionTTYAttach,
+		PermissionFilesRead,
+		PermissionFilesWrite,
+		PermissionSnapshotsRead,
+		PermissionSnapshotsWrite,
+		PermissionTunnelsRead,
+		PermissionTunnelsWrite,
+		PermissionAdminInspect,
+	}
+}
+
 func rolePermissions(role string) []string {
 	switch role {
-	case "admin", "operator":
-		return []string{"*"}
-	case "developer":
+	case "operator":
+		return AllPermissions()
+	case "tenant-admin", "admin":
 		return []string{
 			PermissionSandboxRead,
 			PermissionSandboxLifecycle,
@@ -86,14 +107,27 @@ func rolePermissions(role string) []string {
 			PermissionTunnelsRead,
 			PermissionTunnelsWrite,
 		}
-	case "viewer":
+	case "tenant-developer", "developer":
+		return []string{
+			PermissionSandboxRead,
+			PermissionSandboxLifecycle,
+			PermissionExecRun,
+			PermissionTTYAttach,
+			PermissionFilesRead,
+			PermissionFilesWrite,
+			PermissionSnapshotsRead,
+			PermissionSnapshotsWrite,
+			PermissionTunnelsRead,
+			PermissionTunnelsWrite,
+		}
+	case "tenant-viewer", "viewer":
 		return []string{
 			PermissionSandboxRead,
 			PermissionFilesRead,
 			PermissionSnapshotsRead,
 			PermissionTunnelsRead,
 		}
-	case "service":
+	case "service-account", "service":
 		return []string{
 			PermissionSandboxRead,
 			PermissionSandboxLifecycle,
@@ -110,4 +144,13 @@ func rolePermissions(role string) []string {
 	default:
 		return nil
 	}
+}
+
+func containsPermission(granted []string, permission string) bool {
+	for _, value := range granted {
+		if strings.EqualFold(strings.TrimSpace(value), permission) {
+			return true
+		}
+	}
+	return false
 }

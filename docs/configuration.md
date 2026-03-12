@@ -40,11 +40,16 @@ There are four big groups:
 | Setting | Default | What it means |
 | --- | --- | --- |
 | `SANDBOX_MODE` | `development` | choose `development` or `production` |
+| `SANDBOX_DEPLOYMENT_PROFILE` | empty | supported profile preset: `dev-trusted-docker`, `production-qemu-core`, `production-qemu-browser`, `exception-container` |
+| `SANDBOX_PRODUCTION_TRANSPORT` | `auto` | `auto`, `direct-tls`, or `terminated-proxy` |
+| `SANDBOX_PRODUCTION_ALLOW_DOCKER_BREAKGLASS` | `false` | explicit break-glass override for a Docker default in production |
 
 Important truth:
 
 - `development` mode allows the trusted Docker path and static tokens
 - `production` mode rejects Docker and requires a VM-backed default runtime selection plus secure auth and transport settings
+- production defaults to `qemu-professional` when the runtime is otherwise unspecified
+- the production deployment profiles narrow QEMU profiles to safe defaults, with dangerous profiles reserved for the explicit `exception-container` path
 
 These settings answer the question:
 
@@ -91,6 +96,15 @@ SANDBOX_TRUSTED_DOCKER_RUNTIME=true
 SANDBOX_KATA_BINARY=ctr
 SANDBOX_KATA_RUNTIME_CLASS=io.containerd.kata.v2
 SANDBOX_KATA_CONTAINERD_SOCKET=/run/containerd/containerd.sock
+```
+
+Example production QEMU core profile:
+
+```bash
+SANDBOX_DEPLOYMENT_PROFILE=production-qemu-core
+SANDBOX_PRODUCTION_TRANSPORT=terminated-proxy
+SANDBOX_OPERATOR_HOST=https://sandbox.example.com
+SANDBOX_TRUST_PROXY_HEADERS=true
 ```
 
 Platform note:
@@ -151,14 +165,16 @@ JWT mode is the production-ready auth path in this repo.
 - tokens must match the configured issuer and audience
 - secrets are loaded from files, not written directly into logs or code
 - service identities are supported with a `service=true` claim
+- service-account JWTs may also carry `service_account_id` and `scope`
 - roles control what an identity may do
 
 Useful role examples:
 
-- `admin` or `operator`: full access
-- `developer`: lifecycle, exec, file, snapshot, and tunnel actions
-- `viewer`: read-only sandbox, file, snapshot, and tunnel inspection
-- `service`: automation-friendly access including admin inspection
+- `tenant-admin`: tenant lifecycle plus read/write tenant operations
+- `tenant-developer`: lifecycle, exec, file, snapshot, and tunnel actions
+- `tenant-viewer`: read-only sandbox, file, snapshot, and tunnel inspection
+- `operator`: full access including admin inspection
+- `service-account`: automation-friendly access bounded by stored scopes and revocation state
 
 ## Transport security
 
@@ -175,6 +191,8 @@ Important truth:
 - you must provide both TLS files together or neither
 - if you use trusted proxy mode, set `SANDBOX_OPERATOR_HOST` to an `https://` address
 - production mode requires either in-process TLS or trusted-proxy mode
+- `SANDBOX_PRODUCTION_TRANSPORT=direct-tls` requires both TLS files
+- `SANDBOX_PRODUCTION_TRANSPORT=terminated-proxy` requires `SANDBOX_TRUST_PROXY_HEADERS=true` plus an `https://` operator host
 - set one of `SANDBOX_TUNNEL_SIGNING_KEY` or `SANDBOX_TUNNEL_SIGNING_KEY_PATH` for rolling restarts or multiple replicas so signed browser tunnel URLs stay valid across instances
 
 Tunnel signing note:
@@ -226,6 +244,7 @@ Curated image/profile guidance:
 - browser tooling should stay on explicit `browser` images such as the Playwright example
 - production operators should prefer digest-pinned curated refs in `SANDBOX_POLICY_ALLOWED_IMAGES`, for example `or3-sandbox/base@sha256:...` or `mcr.microsoft.com/playwright@sha256:...`
 - dangerous profiles such as `container` and `debug` stay blocked unless `SANDBOX_ALLOW_DANGEROUS_PROFILES=true`
+- in production, dangerous profiles also require `dangerous_profile_reason` on the create request so the exception is audit-visible
 
 ## Timing settings
 
@@ -255,6 +274,7 @@ Only use these when `SANDBOX_RUNTIME=qemu`.
 | `SANDBOX_QEMU_ACCEL` | `auto` | accelerator selection |
 | `SANDBOX_QEMU_BASE_IMAGE_PATH` | empty | guest base image path |
 | `SANDBOX_QEMU_ALLOWED_BASE_IMAGE_PATHS` | empty | comma-separated guest image paths tenants may request; default image is always allowed |
+| `SANDBOX_QEMU_ALLOWED_PROFILES` | empty | explicit QEMU profile allowlist; production profiles populate this safely |
 | `SANDBOX_QEMU_SSH_USER` | empty | guest SSH user |
 | `SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH` | empty | SSH private key path |
 | `SANDBOX_QEMU_SSH_HOST_KEY_PATH` | empty | guest SSH host public key path used for pinning |
@@ -275,6 +295,7 @@ The daemon now exposes two operator-facing views for production monitoring:
 
 - `GET /v1/runtime/capacity` returns tenant-aware counts for sandboxes, running sandboxes, execs, snapshots, storage, and quota pressure
 - `GET /metrics` returns scrape-friendly text counters for sandbox states, runtime health, snapshot counts, exec counts, and quota pressure
+- `GET /metrics` also includes promoted-image counts, release-gate freshness, tunnel event counters, and dangerous-profile exception counters
 
 Important truth:
 
@@ -317,7 +338,7 @@ export SANDBOX_SNAPSHOT_ROOT=./data/snapshots
 
 ```bash
 export SANDBOX_MODE=production
-export SANDBOX_RUNTIME=qemu
+export SANDBOX_DEPLOYMENT_PROFILE=production-qemu-core
 export SANDBOX_AUTH_MODE=jwt-hs256
 export SANDBOX_AUTH_JWT_ISSUER=https://issuer.example
 export SANDBOX_AUTH_JWT_AUDIENCE=sandbox-api
@@ -325,6 +346,7 @@ export SANDBOX_AUTH_JWT_SECRET_PATHS=/run/secrets/or3-jwt-hmac
 export SANDBOX_TUNNEL_SIGNING_KEY_PATH=/run/secrets/or3-tunnel-signing-key
 export SANDBOX_TRUST_PROXY_HEADERS=true
 export SANDBOX_OPERATOR_HOST=https://sandbox.example.com
+export SANDBOX_PRODUCTION_TRANSPORT=terminated-proxy
 export SANDBOX_POLICY_ALLOWED_IMAGES=ghcr.io/acme/runner:*,alpine:3.20
 export SANDBOX_POLICY_ALLOW_PUBLIC_TUNNELS=false
 export SANDBOX_POLICY_MAX_SANDBOX_LIFETIME=24h
@@ -333,10 +355,14 @@ export SANDBOX_QEMU_BINARY=qemu-system-aarch64
 export SANDBOX_QEMU_ACCEL=hvf
 export SANDBOX_QEMU_BASE_IMAGE_PATH=$PWD/images/guest/base.qcow2
 export SANDBOX_QEMU_ALLOWED_BASE_IMAGE_PATHS=$PWD/images/guest/base.qcow2
-export SANDBOX_QEMU_SSH_USER=or3
-export SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH=$HOME/.ssh/or3-sandbox
-export SANDBOX_QEMU_SSH_HOST_KEY_PATH=$PWD/images/guest/base.qcow2.ssh-host-key.pub
 ```
+
+## Promotion, release evidence, and lint workflows
+
+- `sandboxctl config-lint` validates the daemon configuration without starting `sandboxd`
+- `sandboxctl image promote --image <path>` validates the guest sidecar contract, checksum, and stores a promoted-image record in SQLite
+- `sandboxctl image list` shows the operator-facing promoted-image registry
+- `sandboxctl release-gate` runs the shipped smoke / verification / recovery scripts in order and records bounded release evidence in SQLite
 
 Pick the binary and accelerator that match your host.
 

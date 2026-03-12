@@ -110,6 +110,30 @@ func runProductionQEMUDoctor() doctorSummary {
 	} else {
 		add("pass", "auth", "jwt auth is enabled")
 	}
+	switch cfg.ProductionTransportMode {
+	case "", "auto":
+		if cfg.TLSCertPath != "" && cfg.TLSKeyPath != "" {
+			add("pass", "transport", "direct TLS material is configured")
+		} else if cfg.TrustedProxyHeaders && strings.HasPrefix(strings.ToLower(cfg.OperatorHost), "https://") {
+			add("pass", "transport", "trusted terminated-proxy transport is configured")
+		} else {
+			add("fail", "transport", "production transport requires direct TLS material or trusted terminated-proxy posture")
+		}
+	case "direct-tls":
+		if cfg.TLSCertPath == "" || cfg.TLSKeyPath == "" {
+			add("fail", "transport", "production direct-tls mode requires SANDBOX_TLS_CERT_PATH and SANDBOX_TLS_KEY_PATH")
+		} else {
+			add("pass", "transport", "production direct-tls mode is configured")
+		}
+	case "terminated-proxy":
+		if !cfg.TrustedProxyHeaders || !strings.HasPrefix(strings.ToLower(cfg.OperatorHost), "https://") {
+			add("fail", "transport", "production terminated-proxy mode requires SANDBOX_TRUST_PROXY_HEADERS=true and an https operator host")
+		} else {
+			add("pass", "transport", "production terminated-proxy mode is configured")
+		}
+	default:
+		add("fail", "transport", fmt.Sprintf("unsupported production transport mode %q", cfg.ProductionTransportMode))
+	}
 	if doctorHostOS != "linux" {
 		add("fail", "host-os", fmt.Sprintf("host OS %s is not the supported hostile-production target; production-qemu requires Linux with KVM", doctorHostOS))
 	} else {
@@ -290,6 +314,13 @@ func reportQEMUDoctor(add func(string, string, string), cfg config.Config) {
 func doctorConfigFromEnv() config.Config {
 	return config.Config{
 		RuntimeBackend:             env("SANDBOX_RUNTIME", ""),
+		DeploymentMode:             env("SANDBOX_MODE", ""),
+		DeploymentProfile:          env("SANDBOX_DEPLOYMENT_PROFILE", ""),
+		ProductionTransportMode:    env("SANDBOX_PRODUCTION_TRANSPORT", ""),
+		TLSCertPath:                env("SANDBOX_TLS_CERT_PATH", ""),
+		TLSKeyPath:                 env("SANDBOX_TLS_KEY_PATH", ""),
+		TrustedProxyHeaders:        strings.EqualFold(env("SANDBOX_TRUST_PROXY_HEADERS", "false"), "true"),
+		OperatorHost:               env("SANDBOX_OPERATOR_HOST", ""),
 		AuthMode:                   env("SANDBOX_AUTH_MODE", ""),
 		AuthJWTSecretPaths:         splitCommaSeparated(env("SANDBOX_AUTH_JWT_SECRET_PATHS", "")),
 		DatabasePath:               env("SANDBOX_DB_PATH", ""),

@@ -4,7 +4,9 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -819,8 +821,23 @@ func (s *Service) RevokeTunnel(ctx context.Context, tenantID, tunnelID string) e
 	if err := s.store.RevokeTunnel(ctx, tenantID, tunnelID); err != nil {
 		return err
 	}
+	if err := s.store.RevokeTunnelCapabilities(ctx, tunnelID); err != nil {
+		return err
+	}
 	s.recordAudit(ctx, tenantID, tunnel.SandboxID, "tunnel.revoke", tunnelID, "ok", tunnelAuditDetail(tunnel))
 	return nil
+}
+
+func (s *Service) CreateTunnelCapability(ctx context.Context, capability model.TunnelCapability) error {
+	return s.store.CreateTunnelCapability(ctx, capability)
+}
+
+func (s *Service) GetTunnelCapability(ctx context.Context, capabilityID string) (model.TunnelCapability, error) {
+	return s.store.GetTunnelCapability(ctx, capabilityID)
+}
+
+func (s *Service) ConsumeTunnelCapability(ctx context.Context, capabilityID string) error {
+	return s.store.ConsumeTunnelCapability(ctx, capabilityID)
 }
 
 func (s *Service) GetTunnel(ctx context.Context, tenantID, tunnelID string) (model.Tunnel, model.Sandbox, error) {
@@ -941,6 +958,13 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 	snapshot.Status = model.SnapshotStatusReady
 	completed := time.Now().UTC()
 	snapshot.CompletedAt = &completed
+	if snapshot.WorkspaceTar != "" && looksLikeFilesystemPath(snapshot.WorkspaceTar) {
+		sum, err := fileSHA256(snapshot.WorkspaceTar)
+		if err != nil {
+			return failSnapshot(err)
+		}
+		snapshot.BundleSHA256 = sum
+	}
 	if s.cfg.OptionalSnapshotExport != "" {
 		stage = "export_bundle"
 		exportLocation, err := s.exportSnapshotBundle(ctx, sandbox, snapshot)
@@ -1473,6 +1497,9 @@ func (s *Service) revokeActiveTunnels(ctx context.Context, tenantID string, sand
 		if err := s.store.RevokeTunnel(ctx, tenantID, tunnel.ID); err != nil {
 			return err
 		}
+		if err := s.store.RevokeTunnelCapabilities(ctx, tunnel.ID); err != nil {
+			return err
+		}
 		s.recordAudit(ctx, tenantID, sandbox.ID, "tunnel.revoke", tunnel.ID, "ok", auditDetail(
 			auditKV("reason", reason),
 			tunnelAuditDetail(tunnel),
@@ -1686,6 +1713,9 @@ func (s *Service) validateSnapshotCompatibility(snapshot model.Snapshot, sandbox
 	if snapshot.WorkspaceContractVersion != "" && sandbox.WorkspaceContractVersion != "" && snapshot.WorkspaceContractVersion != sandbox.WorkspaceContractVersion {
 		return fmt.Errorf("snapshot workspace contract version %q does not match target sandbox workspace contract version %q", snapshot.WorkspaceContractVersion, sandbox.WorkspaceContractVersion)
 	}
+	if err := s.enforcePromotedImagePolicy(context.Background(), sandbox.TenantID, sandbox.ID, resolvedSandboxRuntimeSelection(sandbox), snapshot.ImageRef, "policy.snapshot.restore"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1745,6 +1775,15 @@ func (s *Service) ensureSnapshotArtifacts(ctx context.Context, sandbox model.San
 		}
 	}
 	if haveLocal {
+		if snapshot.BundleSHA256 != "" && snapshot.WorkspaceTar != "" && looksLikeFilesystemPath(snapshot.WorkspaceTar) {
+			sum, err := fileSHA256(snapshot.WorkspaceTar)
+			if err != nil {
+				return model.Snapshot{}, err
+			}
+			if !strings.EqualFold(sum, snapshot.BundleSHA256) {
+				return model.Snapshot{}, fmt.Errorf("snapshot bundle checksum mismatch")
+			}
+		}
 		return snapshot, nil
 	}
 	if snapshot.ExportLocation == "" {
@@ -1764,6 +1803,15 @@ func (s *Service) ensureSnapshotArtifacts(ctx context.Context, sandbox model.San
 	}
 	snapshot.ImageRef = rebindSnapshotArtifactPath(targetDir, snapshot.ImageRef)
 	snapshot.WorkspaceTar = rebindSnapshotArtifactPath(targetDir, snapshot.WorkspaceTar)
+	if snapshot.BundleSHA256 != "" && snapshot.WorkspaceTar != "" && looksLikeFilesystemPath(snapshot.WorkspaceTar) {
+		sum, err := fileSHA256(snapshot.WorkspaceTar)
+		if err != nil {
+			return model.Snapshot{}, err
+		}
+		if !strings.EqualFold(sum, snapshot.BundleSHA256) {
+			return model.Snapshot{}, fmt.Errorf("snapshot bundle checksum mismatch")
+		}
+	}
 	return snapshot, nil
 }
 
@@ -1854,6 +1902,19 @@ func writeTarGz(destination, root string) error {
 		_, err = io.Copy(tw, file)
 		return err
 	})
+}
+
+func fileSHA256(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func extractTarGz(source, destination string) error {

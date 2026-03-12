@@ -36,6 +36,8 @@ func main() {
 	switch os.Args[1] {
 	case "doctor":
 		err = runDoctor(os.Args[2:])
+	case "config-lint":
+		err = runConfigLint(os.Args[2:])
 	case "create":
 		err = runCreate(client, os.Args[2:])
 	case "list":
@@ -78,6 +80,10 @@ func main() {
 		err = runSnapshotRestore(client, os.Args[2:])
 	case "preset":
 		err = runPreset(client, os.Args[2:])
+	case "image":
+		err = runImage(os.Args[2:])
+	case "release-gate":
+		err = runReleaseGate(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)

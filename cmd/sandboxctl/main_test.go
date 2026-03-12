@@ -212,6 +212,37 @@ func TestProductionQEMUDoctorReportsConfigFailures(t *testing.T) {
 	}
 }
 
+func TestRunConfigLint(t *testing.T) {
+	root := t.TempDir()
+	secret := filepath.Join(root, "jwt.secret")
+	image := filepath.Join(root, "base.qcow2")
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(image, []byte("qcow2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SANDBOX_DEPLOYMENT_PROFILE", "production-qemu-core")
+	t.Setenv("SANDBOX_AUTH_MODE", "jwt-hs256")
+	t.Setenv("SANDBOX_AUTH_JWT_ISSUER", "issuer.example")
+	t.Setenv("SANDBOX_AUTH_JWT_AUDIENCE", "sandbox-api")
+	t.Setenv("SANDBOX_AUTH_JWT_SECRET_PATHS", secret)
+	t.Setenv("SANDBOX_TRUST_PROXY_HEADERS", "true")
+	t.Setenv("SANDBOX_OPERATOR_HOST", "https://sandbox.example")
+	t.Setenv("SANDBOX_QEMU_BINARY", "/bin/true")
+	t.Setenv("SANDBOX_QEMU_BASE_IMAGE_PATH", image)
+	t.Setenv("SANDBOX_QEMU_ACCEL", "tcg")
+
+	output := captureStdout(t, func() {
+		if err := runConfigLint(nil); err != nil {
+			t.Fatalf("runConfigLint failed: %v", err)
+		}
+	})
+	if !strings.Contains(output, "config lint ok") {
+		t.Fatalf("unexpected output: %s", output)
+	}
+}
+
 func TestProductionQEMUDoctorFailsOnUnsupportedHostOS(t *testing.T) {
 	originalHostOS := doctorHostOS
 	doctorHostOS = "darwin"

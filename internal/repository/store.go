@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -505,15 +506,45 @@ func (s *Store) RevokeTunnel(ctx context.Context, tenantID, tunnelID string) err
 	return err
 }
 
+func (s *Store) CreateTunnelCapability(ctx context.Context, capability model.TunnelCapability) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO tunnel_capabilities(capability_id, tunnel_id, nonce_hash, path, expires_at, consumed_at, revoked_at, created_at)
+		VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)
+	`, capability.ID, capability.TunnelID, capability.NonceHash, capability.Path, capability.ExpiresAt.UTC().Format(time.RFC3339Nano), capability.CreatedAt.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *Store) GetTunnelCapability(ctx context.Context, capabilityID string) (model.TunnelCapability, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT capability_id, tunnel_id, nonce_hash, path, expires_at, consumed_at, revoked_at, created_at
+		FROM tunnel_capabilities WHERE capability_id=?
+	`, capabilityID)
+	return scanTunnelCapability(row)
+}
+
+func (s *Store) ConsumeTunnelCapability(ctx context.Context, capabilityID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE tunnel_capabilities SET consumed_at=? WHERE capability_id=? AND consumed_at IS NULL AND revoked_at IS NULL
+	`, time.Now().UTC().Format(time.RFC3339Nano), capabilityID)
+	return err
+}
+
+func (s *Store) RevokeTunnelCapabilities(ctx context.Context, tunnelID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE tunnel_capabilities SET revoked_at=? WHERE tunnel_id=? AND revoked_at IS NULL
+	`, time.Now().UTC().Format(time.RFC3339Nano), tunnelID)
+	return err
+}
+
 func (s *Store) CreateSnapshot(ctx context.Context, snapshot model.Snapshot) error {
 	var completed interface{}
 	if snapshot.CompletedAt != nil {
 		completed = snapshot.CompletedAt.UTC().Format(time.RFC3339Nano)
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO snapshots(snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, export_location, created_at, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, snapshot.ID, snapshot.SandboxID, snapshot.TenantID, snapshot.Name, string(snapshot.Status), snapshot.ImageRef, string(snapshot.RuntimeSelection), snapshot.RuntimeBackend, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceContractVersion, snapshot.WorkspaceTar, snapshot.ExportLocation, snapshot.CreatedAt.UTC().Format(time.RFC3339Nano), completed)
+		INSERT INTO snapshots(snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, bundle_sha256, export_location, created_at, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, snapshot.ID, snapshot.SandboxID, snapshot.TenantID, snapshot.Name, string(snapshot.Status), snapshot.ImageRef, string(snapshot.RuntimeSelection), snapshot.RuntimeBackend, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceContractVersion, snapshot.WorkspaceTar, snapshot.BundleSHA256, snapshot.ExportLocation, snapshot.CreatedAt.UTC().Format(time.RFC3339Nano), completed)
 	return err
 }
 
@@ -524,15 +555,15 @@ func (s *Store) UpdateSnapshot(ctx context.Context, snapshot model.Snapshot) err
 	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE snapshots
-		SET status=?, image_ref=?, runtime_selection=?, runtime_backend=?, profile=?, image_contract_version=?, control_protocol_version=?, workspace_contract_version=?, workspace_tar=?, export_location=?, completed_at=?
+		SET status=?, image_ref=?, runtime_selection=?, runtime_backend=?, profile=?, image_contract_version=?, control_protocol_version=?, workspace_contract_version=?, workspace_tar=?, bundle_sha256=?, export_location=?, completed_at=?
 		WHERE snapshot_id=? AND tenant_id=?
-	`, string(snapshot.Status), snapshot.ImageRef, string(snapshot.RuntimeSelection), snapshot.RuntimeBackend, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceContractVersion, snapshot.WorkspaceTar, snapshot.ExportLocation, completed, snapshot.ID, snapshot.TenantID)
+	`, string(snapshot.Status), snapshot.ImageRef, string(snapshot.RuntimeSelection), snapshot.RuntimeBackend, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceContractVersion, snapshot.WorkspaceTar, snapshot.BundleSHA256, snapshot.ExportLocation, completed, snapshot.ID, snapshot.TenantID)
 	return err
 }
 
 func (s *Store) GetSnapshot(ctx context.Context, tenantID, snapshotID string) (model.Snapshot, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, export_location, created_at, completed_at
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, bundle_sha256, export_location, created_at, completed_at
 		FROM snapshots WHERE tenant_id=? AND snapshot_id=?
 	`, tenantID, snapshotID)
 	return scanSnapshot(row)
@@ -540,7 +571,7 @@ func (s *Store) GetSnapshot(ctx context.Context, tenantID, snapshotID string) (m
 
 func (s *Store) ListSnapshots(ctx context.Context, tenantID, sandboxID string) ([]model.Snapshot, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, export_location, created_at, completed_at
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, bundle_sha256, export_location, created_at, completed_at
 		FROM snapshots
 		WHERE tenant_id=? AND sandbox_id=?
 		ORDER BY created_at DESC
@@ -606,7 +637,7 @@ func (s *Store) ListRunningExecutions(ctx context.Context) ([]model.Execution, e
 
 func (s *Store) ListSnapshotsByStatus(ctx context.Context, status model.SnapshotStatus) ([]model.Snapshot, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, export_location, created_at, completed_at
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, bundle_sha256, export_location, created_at, completed_at
 		FROM snapshots
 		WHERE status = ?
 		ORDER BY created_at
@@ -728,6 +759,113 @@ func (s *Store) AuditEventCounts(ctx context.Context, tenantID string) (map[stri
 	return counts, rows.Err()
 }
 
+func (s *Store) UpsertServiceAccount(ctx context.Context, account model.ServiceAccount) error {
+	scopeJSON, err := json.Marshal(account.Scopes)
+	if err != nil {
+		return err
+	}
+	var expiresAt, revokedAt any
+	if account.ExpiresAt != nil {
+		expiresAt = account.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	if account.RevokedAt != nil {
+		revokedAt = account.RevokedAt.UTC().Format(time.RFC3339Nano)
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO service_accounts(service_account_id, tenant_id, name, scope_json, disabled, expires_at, created_at, revoked_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(service_account_id) DO UPDATE SET tenant_id=excluded.tenant_id, name=excluded.name, scope_json=excluded.scope_json, disabled=excluded.disabled, expires_at=excluded.expires_at, revoked_at=excluded.revoked_at
+	`, account.ID, account.TenantID, account.Name, string(scopeJSON), boolToInt(account.Disabled), expiresAt, account.CreatedAt.UTC().Format(time.RFC3339Nano), revokedAt)
+	return err
+}
+
+func (s *Store) GetServiceAccount(ctx context.Context, serviceAccountID string) (model.ServiceAccount, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT service_account_id, tenant_id, name, scope_json, disabled, expires_at, created_at, revoked_at
+		FROM service_accounts WHERE service_account_id=?
+	`, serviceAccountID)
+	return scanServiceAccount(row)
+}
+
+func (s *Store) UpsertPromotedGuestImage(ctx context.Context, image model.PromotedGuestImage) error {
+	var promotedAt any
+	if image.PromotedAt != nil {
+		promotedAt = image.PromotedAt.UTC().Format(time.RFC3339Nano)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO promoted_guest_images(image_ref, image_sha256, profile, control_mode, control_protocol_version, contract_version, provenance_json, verification_status, promotion_status, promoted_at, promoted_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(image_ref) DO UPDATE SET image_sha256=excluded.image_sha256, profile=excluded.profile, control_mode=excluded.control_mode, control_protocol_version=excluded.control_protocol_version, contract_version=excluded.contract_version, provenance_json=excluded.provenance_json, verification_status=excluded.verification_status, promotion_status=excluded.promotion_status, promoted_at=excluded.promoted_at, promoted_by=excluded.promoted_by
+	`, image.ImageRef, image.ImageSHA256, string(image.Profile), string(image.ControlMode), image.ControlProtocolVersion, image.ContractVersion, image.ProvenanceJSON, image.VerificationStatus, image.PromotionStatus, promotedAt, image.PromotedBy)
+	return err
+}
+
+func (s *Store) GetPromotedGuestImage(ctx context.Context, imageRef string) (model.PromotedGuestImage, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT image_ref, image_sha256, profile, control_mode, control_protocol_version, contract_version, provenance_json, verification_status, promotion_status, promoted_at, promoted_by
+		FROM promoted_guest_images WHERE image_ref=?
+	`, imageRef)
+	return scanPromotedGuestImage(row)
+}
+
+func (s *Store) ListPromotedGuestImages(ctx context.Context) ([]model.PromotedGuestImage, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT image_ref, image_sha256, profile, control_mode, control_protocol_version, contract_version, provenance_json, verification_status, promotion_status, promoted_at, promoted_by
+		FROM promoted_guest_images ORDER BY image_ref
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var images []model.PromotedGuestImage
+	for rows.Next() {
+		image, err := scanPromotedGuestImage(rows)
+		if err != nil {
+			return nil, err
+		}
+		images = append(images, image)
+	}
+	return images, rows.Err()
+}
+
+func (s *Store) CreateReleaseEvidence(ctx context.Context, evidence model.ReleaseEvidence) error {
+	var completedAt any
+	if evidence.CompletedAt != nil {
+		completedAt = evidence.CompletedAt.UTC().Format(time.RFC3339Nano)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO release_evidence(evidence_id, gate_name, host_fingerprint, runtime_selection, image_ref, profile, outcome, artifact_path, started_at, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, evidence.ID, evidence.GateName, evidence.HostFingerprint, string(evidence.RuntimeSelection), evidence.ImageRef, string(evidence.Profile), evidence.Outcome, evidence.ArtifactPath, evidence.StartedAt.UTC().Format(time.RFC3339Nano), completedAt)
+	return err
+}
+
+func (s *Store) ListReleaseEvidence(ctx context.Context, gateName string) ([]model.ReleaseEvidence, error) {
+	query := `
+		SELECT evidence_id, gate_name, host_fingerprint, runtime_selection, image_ref, profile, outcome, artifact_path, started_at, completed_at
+		FROM release_evidence`
+	args := []any{}
+	if strings.TrimSpace(gateName) != "" {
+		query += ` WHERE gate_name=?`
+		args = append(args, gateName)
+	}
+	query += ` ORDER BY started_at DESC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var evidence []model.ReleaseEvidence
+	for rows.Next() {
+		entry, err := scanReleaseEvidence(rows)
+		if err != nil {
+			return nil, err
+		}
+		evidence = append(evidence, entry)
+	}
+	return evidence, rows.Err()
+}
+
 func scanSandbox(scanner interface{ Scan(...any) error }) (model.Sandbox, error) {
 	var sandbox model.Sandbox
 	var created, updated, lastActive string
@@ -820,7 +958,7 @@ func scanSnapshot(scanner interface{ Scan(...any) error }) (model.Snapshot, erro
 	var created string
 	var completed sql.NullString
 	var runtimeSelection, runtimeBackend, profile, imageContractVersion, controlProtocolVersion, workspaceContractVersion string
-	if err := scanner.Scan(&snapshot.ID, &snapshot.SandboxID, &snapshot.TenantID, &snapshot.Name, &snapshot.Status, &snapshot.ImageRef, &runtimeSelection, &runtimeBackend, &profile, &imageContractVersion, &controlProtocolVersion, &workspaceContractVersion, &snapshot.WorkspaceTar, &snapshot.ExportLocation, &created, &completed); err != nil {
+	if err := scanner.Scan(&snapshot.ID, &snapshot.SandboxID, &snapshot.TenantID, &snapshot.Name, &snapshot.Status, &snapshot.ImageRef, &runtimeSelection, &runtimeBackend, &profile, &imageContractVersion, &controlProtocolVersion, &workspaceContractVersion, &snapshot.WorkspaceTar, &snapshot.BundleSHA256, &snapshot.ExportLocation, &created, &completed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.Snapshot{}, ErrNotFound
 		}
@@ -845,6 +983,130 @@ func scanSnapshot(scanner interface{ Scan(...any) error }) (model.Snapshot, erro
 		snapshot.CompletedAt = &t
 	}
 	return snapshot, nil
+}
+
+func scanServiceAccount(scanner interface{ Scan(...any) error }) (model.ServiceAccount, error) {
+	var account model.ServiceAccount
+	var scopeJSON string
+	var expiresAt, revokedAt sql.NullString
+	var createdAt string
+	var disabled int
+	if err := scanner.Scan(&account.ID, &account.TenantID, &account.Name, &scopeJSON, &disabled, &expiresAt, &createdAt, &revokedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.ServiceAccount{}, ErrNotFound
+		}
+		return model.ServiceAccount{}, err
+	}
+	account.Disabled = disabled == 1
+	if err := json.Unmarshal([]byte(scopeJSON), &account.Scopes); err != nil {
+		return model.ServiceAccount{}, err
+	}
+	created, err := parseTime(createdAt)
+	if err != nil {
+		return model.ServiceAccount{}, err
+	}
+	account.CreatedAt = created
+	if expiresAt.Valid {
+		parsed, err := parseTime(expiresAt.String)
+		if err != nil {
+			return model.ServiceAccount{}, err
+		}
+		account.ExpiresAt = &parsed
+	}
+	if revokedAt.Valid {
+		parsed, err := parseTime(revokedAt.String)
+		if err != nil {
+			return model.ServiceAccount{}, err
+		}
+		account.RevokedAt = &parsed
+	}
+	return account, nil
+}
+
+func scanPromotedGuestImage(scanner interface{ Scan(...any) error }) (model.PromotedGuestImage, error) {
+	var image model.PromotedGuestImage
+	var profile, controlMode string
+	var promotedAt sql.NullString
+	if err := scanner.Scan(&image.ImageRef, &image.ImageSHA256, &profile, &controlMode, &image.ControlProtocolVersion, &image.ContractVersion, &image.ProvenanceJSON, &image.VerificationStatus, &image.PromotionStatus, &promotedAt, &image.PromotedBy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.PromotedGuestImage{}, ErrNotFound
+		}
+		return model.PromotedGuestImage{}, err
+	}
+	image.Profile = model.GuestProfile(profile)
+	image.ControlMode = model.GuestControlMode(controlMode)
+	if promotedAt.Valid {
+		parsed, err := parseTime(promotedAt.String)
+		if err != nil {
+			return model.PromotedGuestImage{}, err
+		}
+		image.PromotedAt = &parsed
+	}
+	return image, nil
+}
+
+func scanReleaseEvidence(scanner interface{ Scan(...any) error }) (model.ReleaseEvidence, error) {
+	var evidence model.ReleaseEvidence
+	var runtimeSelection, profile, started string
+	var completed sql.NullString
+	if err := scanner.Scan(&evidence.ID, &evidence.GateName, &evidence.HostFingerprint, &runtimeSelection, &evidence.ImageRef, &profile, &evidence.Outcome, &evidence.ArtifactPath, &started, &completed); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.ReleaseEvidence{}, ErrNotFound
+		}
+		return model.ReleaseEvidence{}, err
+	}
+	evidence.RuntimeSelection = model.ParseRuntimeSelection(runtimeSelection)
+	evidence.Profile = model.GuestProfile(profile)
+	startedAt, err := parseTime(started)
+	if err != nil {
+		return model.ReleaseEvidence{}, err
+	}
+	evidence.StartedAt = startedAt
+	if completed.Valid {
+		parsed, err := parseTime(completed.String)
+		if err != nil {
+			return model.ReleaseEvidence{}, err
+		}
+		evidence.CompletedAt = &parsed
+	}
+	return evidence, nil
+}
+
+func scanTunnelCapability(scanner interface{ Scan(...any) error }) (model.TunnelCapability, error) {
+	var capability model.TunnelCapability
+	var expiresAt, createdAt string
+	var consumedAt, revokedAt sql.NullString
+	if err := scanner.Scan(&capability.ID, &capability.TunnelID, &capability.NonceHash, &capability.Path, &expiresAt, &consumedAt, &revokedAt, &createdAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.TunnelCapability{}, ErrNotFound
+		}
+		return model.TunnelCapability{}, err
+	}
+	parsedExpiresAt, err := parseTime(expiresAt)
+	if err != nil {
+		return model.TunnelCapability{}, err
+	}
+	capability.ExpiresAt = parsedExpiresAt
+	parsedCreatedAt, err := parseTime(createdAt)
+	if err != nil {
+		return model.TunnelCapability{}, err
+	}
+	capability.CreatedAt = parsedCreatedAt
+	if consumedAt.Valid {
+		parsed, err := parseTime(consumedAt.String)
+		if err != nil {
+			return model.TunnelCapability{}, err
+		}
+		capability.ConsumedAt = &parsed
+	}
+	if revokedAt.Valid {
+		parsed, err := parseTime(revokedAt.String)
+		if err != nil {
+			return model.TunnelCapability{}, err
+		}
+		capability.RevokedAt = &parsed
+	}
+	return capability, nil
 }
 
 func parseTime(value string) (time.Time, error) {

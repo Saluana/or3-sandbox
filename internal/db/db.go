@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 func Open(ctx context.Context, path string) (*sql.DB, error) {
 	dsn, err := sqliteDSN(path)
@@ -148,9 +148,55 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			control_protocol_version TEXT NOT NULL DEFAULT '',
 			workspace_contract_version TEXT NOT NULL DEFAULT '',
 			workspace_tar TEXT NOT NULL,
+			bundle_sha256 TEXT NOT NULL DEFAULT '',
 			export_location TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
 			completed_at TEXT
+		);`,
+		`CREATE TABLE IF NOT EXISTS service_accounts (
+			service_account_id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			scope_json TEXT NOT NULL DEFAULT '[]',
+			disabled INTEGER NOT NULL DEFAULT 0,
+			expires_at TEXT,
+			created_at TEXT NOT NULL,
+			revoked_at TEXT
+		);`,
+		`CREATE TABLE IF NOT EXISTS promoted_guest_images (
+			image_ref TEXT PRIMARY KEY,
+			image_sha256 TEXT NOT NULL,
+			profile TEXT NOT NULL,
+			control_mode TEXT NOT NULL,
+			control_protocol_version TEXT NOT NULL,
+			contract_version TEXT NOT NULL,
+			provenance_json TEXT NOT NULL DEFAULT '',
+			verification_status TEXT NOT NULL,
+			promotion_status TEXT NOT NULL,
+			promoted_at TEXT,
+			promoted_by TEXT NOT NULL DEFAULT ''
+		);`,
+		`CREATE TABLE IF NOT EXISTS release_evidence (
+			evidence_id TEXT PRIMARY KEY,
+			gate_name TEXT NOT NULL,
+			host_fingerprint TEXT NOT NULL,
+			runtime_selection TEXT NOT NULL DEFAULT '',
+			image_ref TEXT NOT NULL DEFAULT '',
+			profile TEXT NOT NULL DEFAULT '',
+			outcome TEXT NOT NULL,
+			artifact_path TEXT NOT NULL DEFAULT '',
+			started_at TEXT NOT NULL,
+			completed_at TEXT
+		);`,
+		`CREATE TABLE IF NOT EXISTS tunnel_capabilities (
+			capability_id TEXT PRIMARY KEY,
+			tunnel_id TEXT NOT NULL REFERENCES tunnels(tunnel_id) ON DELETE CASCADE,
+			nonce_hash TEXT NOT NULL,
+			path TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			consumed_at TEXT,
+			revoked_at TEXT,
+			created_at TEXT NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS executions (
 			execution_id TEXT PRIMARY KEY,
@@ -201,6 +247,9 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_executions_tenant_status ON executions(tenant_id, status);`,
 		`CREATE INDEX IF NOT EXISTS idx_tunnels_tenant_sandbox_revoked ON tunnels(tenant_id, sandbox_id, revoked_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_snapshots_tenant_status ON snapshots(tenant_id, status);`,
+		`CREATE INDEX IF NOT EXISTS idx_service_accounts_tenant_id ON service_accounts(tenant_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_release_evidence_gate_started ON release_evidence(gate_name, started_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_tunnel_capabilities_tunnel_id ON tunnel_capabilities(tunnel_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_created ON audit_events(tenant_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_action_outcome ON audit_events(tenant_id, action, outcome);`,
 	}
@@ -257,6 +306,9 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := ensureColumn(ctx, tx, "snapshots", "workspace_contract_version", `ALTER TABLE snapshots ADD COLUMN workspace_contract_version TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "snapshots", "bundle_sha256", `ALTER TABLE snapshots ADD COLUMN bundle_sha256 TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
 	if err := ensureColumn(ctx, tx, "sandboxes", "runtime_class", `ALTER TABLE sandboxes ADD COLUMN runtime_class TEXT NOT NULL DEFAULT ''`); err != nil {

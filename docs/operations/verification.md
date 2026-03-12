@@ -26,6 +26,14 @@ If you prefer not to use the script:
 /usr/local/go/bin/go test ./internal/config ./internal/auth ./internal/service ./internal/api ./cmd/sandboxctl
 ```
 
+The operator-facing wrapper is:
+
+```bash
+go run ./cmd/sandboxctl release-gate
+```
+
+That command runs the shipped smoke, host verification, production smoke, and recovery drill scripts in order and records bounded release evidence in SQLite.
+
 ## Gated QEMU host verification
 
 Run the host-gated wrapper on a prepared Linux/KVM host:
@@ -116,6 +124,21 @@ Output classes:
 - `FAIL` — blocking issue; do not treat the host as production-ready until it is fixed
 
 The doctor verifies runtime/auth posture, KVM/QEMU availability, free-space posture for the database/storage/snapshot roots, tunnel-signing-key posture, basic cgroup-controller posture, and approved guest image sidecar contracts.
+
+## Supported host matrix and evidence mapping
+
+| Production claim | Evidence path |
+| --- | --- |
+| Safe VM-backed production boundary | `go test ./internal/config ./internal/service` + `sandboxctl doctor --production-qemu` |
+| Explicit JWT role and service-account scope checks | `go test ./internal/auth` |
+| Runtime info / health / metrics inspection surfaces | `go test ./internal/api -run 'Test(StartAdmissionDenialAppearsInMetrics|RuntimeHealthEndpoint)'` |
+| Promoted image registry and production QEMU admission | `sandboxctl image promote` + `go test ./internal/service -run TestProductionQEMUCreateRequiresPromotedImage` |
+| Additive SQLite hardening state | `go test ./internal/db ./internal/repository` |
+| Bootstrap and config lint path | `go test ./cmd/sandboxctl -run 'Test(RunConfigLint|RunDoctorRequiresProductionQEMUFlag|ProductionQEMUDoctor.*)'` |
+| Linux/KVM host substrate | `./scripts/qemu-host-verification.sh --profile core --control-mode agent` |
+| Production smoke | `./scripts/qemu-production-smoke.sh` |
+| Abuse-path runtime behavior | `./scripts/qemu-resource-abuse.sh` |
+| Recovery and restore behavior | `./scripts/qemu-recovery-drill.sh` |
 
 ## Guest image verification
 
@@ -235,3 +258,5 @@ Before using “production-ready” language for a deployment, run at least:
 6. one restart/recovery drill via `./scripts/qemu-recovery-drill.sh` during an approved window
 
 For runtime-affecting changes, treat these as the release gate rather than optional extra coverage.
+
+Treat release evidence as stale once it no longer represents the currently deployed daemon build, guest image promotion set, or host patch window. Re-run `sandboxctl release-gate` after those changes and keep the most recent successful evidence as the source of truth for production-readiness claims.

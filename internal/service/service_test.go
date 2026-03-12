@@ -2720,6 +2720,55 @@ func TestReconcileToleratesLegacySandboxWithNoRuntimeClass(t *testing.T) {
 	}
 }
 
+func TestProductionQEMUCreateRequiresPromotedImage(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, store, quota, tenantA, _ := newServiceHarness(t, runtime, "qemu")
+	svc.cfg.DeploymentMode = "production"
+
+	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  svc.cfg.QEMUBaseImagePath,
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	}); err == nil || !strings.Contains(err.Error(), "promoted guest image") {
+		t.Fatalf("expected unpromoted image denial, got %v", err)
+	}
+
+	now := time.Now().UTC()
+	if err := store.UpsertPromotedGuestImage(ctx, model.PromotedGuestImage{
+		ImageRef:               svc.cfg.QEMUBaseImagePath,
+		ImageSHA256:            "sha256",
+		Profile:                model.GuestProfileCore,
+		ControlMode:            model.GuestControlModeAgent,
+		ControlProtocolVersion: model.DefaultGuestControlProtocolVersion,
+		ContractVersion:        model.DefaultImageContractVersion,
+		VerificationStatus:     "verified",
+		PromotionStatus:        "promoted",
+		PromotedAt:             &now,
+		PromotedBy:             "test",
+	}); err != nil {
+		t.Fatalf("upsert promoted image: %v", err)
+	}
+
+	if _, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		BaseImageRef:  svc.cfg.QEMUBaseImagePath,
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 512,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	}); err != nil {
+		t.Fatalf("expected promoted image to pass, got %v", err)
+	}
+}
+
 func newServiceHarness(t *testing.T, runtime model.RuntimeManager, backend string) (*Service, *repository.Store, model.TenantQuota, model.Tenant, model.Tenant) {
 	t.Helper()
 	root := t.TempDir()

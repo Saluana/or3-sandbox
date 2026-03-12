@@ -35,16 +35,19 @@ type Router struct {
 	service          *service.Service
 	operatorHost     string
 	tunnelSigningKey []byte
+	deploymentMode   string
 	upgrader         websocket.Upgrader
 }
 
 const (
-	tunnelSignedURLDefaultTTL = 5 * time.Minute
-	tunnelSignedURLMaxTTL     = 15 * time.Minute
-	tunnelSignedURLExpiryKey  = "or3_exp"
-	tunnelSignedURLSigKey     = "or3_sig"
-	tunnelAuthCookieName      = "or3_tunnel_auth"
-	fileUploadBodyBytes       = ((model.MaxWorkspaceFileTransferBytes + 2) / 3 * 4) + 64*1024
+	tunnelSignedURLDefaultTTL    = 5 * time.Minute
+	tunnelSignedURLProductionTTL = 2 * time.Minute
+	tunnelSignedURLMaxTTL        = 15 * time.Minute
+	tunnelSignedURLExpiryKey     = "or3_exp"
+	tunnelSignedURLSigKey        = "or3_sig"
+	tunnelSignedURLCapabilityKey = "or3_cap"
+	tunnelAuthCookieName         = "or3_tunnel_auth"
+	fileUploadBodyBytes          = ((model.MaxWorkspaceFileTransferBytes + 2) / 3 * 4) + 64*1024
 )
 
 func New(log *slog.Logger, svc *service.Service, cfg config.Config) http.Handler {
@@ -53,6 +56,7 @@ func New(log *slog.Logger, svc *service.Service, cfg config.Config) http.Handler
 		service:          svc,
 		operatorHost:     strings.TrimRight(cfg.OperatorHost, "/"),
 		tunnelSigningKey: newTunnelSigningKey(cfg),
+		deploymentMode:   cfg.DeploymentMode,
 		upgrader:         websocket.Upgrader{},
 	}
 	router.upgrader.CheckOrigin = router.checkWebSocketOrigin
@@ -778,6 +782,9 @@ func (rt *Router) handleTunnelSignedURL(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	ttl := tunnelSignedURLDefaultTTL
+	if rt.deploymentMode == "production" {
+		ttl = tunnelSignedURLProductionTTL
+	}
 	if req.TTLSeconds > 0 {
 		ttl = time.Duration(req.TTLSeconds) * time.Second
 	}
@@ -791,11 +798,27 @@ func (rt *Router) handleTunnelSignedURL(w http.ResponseWriter, r *http.Request, 
 	}
 	expiresAt := time.Now().UTC().Add(ttl)
 	expiry := strconv.FormatInt(expiresAt.Unix(), 10)
-	sig := rt.signTunnelCapability(tunnel.ID, capabilityPath, expiry)
-	signedURL, err := rt.buildTunnelProxyURL(tunnel.ID, capabilityPath, url.Values{
+	capabilityID := ""
+	query := url.Values{
 		tunnelSignedURLExpiryKey: []string{expiry},
-		tunnelSignedURLSigKey:    []string{sig},
-	}, r)
+		tunnelSignedURLSigKey:    []string{rt.signTunnelCapability(tunnel.ID, capabilityPath, expiry)},
+	}
+	if req.OneTime {
+		capabilityID = newTunnelCapabilityID()
+		if err := rt.service.CreateTunnelCapability(r.Context(), model.TunnelCapability{
+			ID:        capabilityID,
+			TunnelID:  tunnel.ID,
+			NonceHash: config.HashToken(capabilityID),
+			Path:      capabilityPath,
+			ExpiresAt: expiresAt,
+			CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			handleError(w, err)
+			return
+		}
+		query.Set(tunnelSignedURLCapabilityKey, capabilityID)
+	}
+	signedURL, err := rt.buildTunnelProxyURL(tunnel.ID, capabilityPath, query, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
@@ -812,7 +835,7 @@ func (rt *Router) handleTunnelSignedURL(w http.ResponseWriter, r *http.Request, 
 		"ttl_seconds", int(ttl.Seconds()),
 		"outcome", "ok",
 	)
-	writeJSON(w, http.StatusOK, model.TunnelSignedURL{URL: signedURL, ExpiresAt: expiresAt})
+	writeJSON(w, http.StatusOK, model.TunnelSignedURL{URL: signedURL, ExpiresAt: expiresAt, CapabilityID: capabilityID})
 }
 
 func (rt *Router) handleTunnelProxy(w http.ResponseWriter, r *http.Request, tunnelID string) {
@@ -1010,7 +1033,7 @@ func (rt *Router) authorizeTunnelBrowserSession(w http.ResponseWriter, r *http.R
 		return false, false
 	}
 	if cookie, err := r.Cookie(tunnelAuthCookieName); err == nil {
-		if capabilityPath, expiry, sig, ok := parseTunnelAuthCookie(cookie.Value); ok && rt.validateTunnelCapability(tunnel.ID, capabilityPath, expiry, sig) && tunnelCapabilityAllowsRequest(capabilityPath, requestCapability) {
+		if capabilityPath, expiry, sig, capabilityID, ok := parseTunnelAuthCookie(cookie.Value); ok && rt.validateTunnelCapability(r.Context(), tunnel.ID, capabilityPath, expiry, sig, capabilityID) && tunnelCapabilityAllowsRequest(capabilityPath, requestCapability) {
 			return true, false
 		}
 	}
@@ -1019,14 +1042,15 @@ func (rt *Router) authorizeTunnelBrowserSession(w http.ResponseWriter, r *http.R
 	}
 	expiry := r.URL.Query().Get(tunnelSignedURLExpiryKey)
 	sig := r.URL.Query().Get(tunnelSignedURLSigKey)
-	if !rt.validateTunnelCapability(tunnel.ID, requestCapability, expiry, sig) {
+	capabilityID := r.URL.Query().Get(tunnelSignedURLCapabilityKey)
+	if !rt.validateTunnelCapability(r.Context(), tunnel.ID, requestCapability, expiry, sig, capabilityID) {
 		return false, false
 	}
 	expiresAt, _ := strconv.ParseInt(expiry, 10, 64)
 	cookiePath := "/v1/tunnels/" + tunnel.ID + "/proxy" + tunnelCapabilityCookiePath(requestCapability)
 	http.SetCookie(w, &http.Cookie{
 		Name:     tunnelAuthCookieName,
-		Value:    tunnelAuthCookieValue(requestCapability, expiry, sig),
+		Value:    tunnelAuthCookieValue(requestCapability, expiry, sig, ""),
 		Path:     cookiePath,
 		Expires:  time.Unix(expiresAt, 0).UTC(),
 		HttpOnly: true,
@@ -1102,7 +1126,7 @@ func (rt *Router) signTunnelCapability(tunnelID, capabilityPath, expiry string) 
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (rt *Router) validateTunnelCapability(tunnelID, capabilityPath, expiry, signature string) bool {
+func (rt *Router) validateTunnelCapability(ctx context.Context, tunnelID, capabilityPath, expiry, signature, capabilityID string) bool {
 	if strings.TrimSpace(expiry) == "" || strings.TrimSpace(signature) == "" {
 		return false
 	}
@@ -1114,7 +1138,23 @@ func (rt *Router) validateTunnelCapability(tunnelID, capabilityPath, expiry, sig
 		return false
 	}
 	expected := rt.signTunnelCapability(tunnelID, capabilityPath, expiry)
-	return hmac.Equal([]byte(expected), []byte(signature))
+	if !hmac.Equal([]byte(expected), []byte(signature)) {
+		return false
+	}
+	if strings.TrimSpace(capabilityID) == "" {
+		return true
+	}
+	capability, err := rt.service.GetTunnelCapability(ctx, capabilityID)
+	if err != nil {
+		return false
+	}
+	if capability.TunnelID != tunnelID || capability.RevokedAt != nil || capability.ConsumedAt != nil || time.Now().UTC().After(capability.ExpiresAt) || capability.Path != capabilityPath {
+		return false
+	}
+	if err := rt.service.ConsumeTunnelCapability(ctx, capabilityID); err != nil {
+		return false
+	}
+	return true
 }
 
 func newTunnelSigningKey(cfg config.Config) []byte {
@@ -1181,7 +1221,7 @@ func tunnelUpstreamQuery(query url.Values, queryAccessToken string) url.Values {
 	filtered := url.Values{}
 	for key, values := range query {
 		switch key {
-		case tunnelSignedURLExpiryKey, tunnelSignedURLSigKey:
+		case tunnelSignedURLExpiryKey, tunnelSignedURLSigKey, tunnelSignedURLCapabilityKey:
 			continue
 		case "token":
 			preserved := make([]string, 0, len(values))
@@ -1227,20 +1267,31 @@ func sanitizeTunnelProxyRequest(header http.Header) {
 	}
 }
 
-func tunnelAuthCookieValue(capabilityPath, expiry, sig string) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(capabilityPath)) + "." + expiry + "." + sig
+func tunnelAuthCookieValue(capabilityPath, expiry, sig, capabilityID string) string {
+	value := base64.RawURLEncoding.EncodeToString([]byte(capabilityPath)) + "." + expiry + "." + sig
+	if strings.TrimSpace(capabilityID) == "" {
+		return value
+	}
+	return value + "." + base64.RawURLEncoding.EncodeToString([]byte(capabilityID))
 }
 
-func parseTunnelAuthCookie(value string) (capabilityPath string, expiry string, sig string, ok bool) {
-	parts := strings.SplitN(value, ".", 3)
-	if len(parts) != 3 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[2]) == "" {
-		return "", "", "", false
+func parseTunnelAuthCookie(value string) (capabilityPath string, expiry string, sig string, capabilityID string, ok bool) {
+	parts := strings.SplitN(value, ".", 4)
+	if len(parts) < 3 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[2]) == "" {
+		return "", "", "", "", false
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return "", "", "", false
+		return "", "", "", "", false
 	}
-	return string(decoded), parts[1], parts[2], true
+	if len(parts) == 4 && strings.TrimSpace(parts[3]) != "" {
+		capabilityBytes, err := base64.RawURLEncoding.DecodeString(parts[3])
+		if err != nil {
+			return "", "", "", "", false
+		}
+		capabilityID = string(capabilityBytes)
+	}
+	return string(decoded), parts[1], parts[2], capabilityID, true
 }
 
 func normalizeTunnelCapabilityPath(raw string) (string, error) {
@@ -1485,6 +1536,10 @@ func sanitizeTunnelAuditPath(path string) string {
 		return "/"
 	}
 	return sanitized
+}
+
+func newTunnelCapabilityID() string {
+	return fmt.Sprintf("cap-%d", time.Now().UTC().UnixNano())
 }
 
 type responseRecorder struct {

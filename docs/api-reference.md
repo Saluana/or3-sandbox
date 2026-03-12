@@ -91,6 +91,8 @@ Example response:
 
 Returns runtime/operator capacity data. Treat this as an operator-facing report rather than a stable end-user UI payload.
 
+Operationally, this report is where operators should look for degraded sandbox counts, runtime-selection mix, guest-profile mix, snapshot counts, and audit-derived pressure signals.
+
 ### `GET /v1/quotas/me`
 
 Returns the caller's effective quota and current usage view.
@@ -98,6 +100,8 @@ Returns the caller's effective quota and current usage view.
 ### `GET /metrics`
 
 Returns Prometheus text format. This endpoint is intentionally raw text, not JSON.
+
+The metrics surface includes launch-critical counters such as runtime health, storage pressure, tunnel events, dangerous-profile exceptions, promoted-image totals, and release-gate freshness.
 
 ## Sandboxes
 

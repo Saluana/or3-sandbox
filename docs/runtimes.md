@@ -49,6 +49,8 @@ The current runtime info including enabled selections is visible through `GET /v
 
 The `sandboxctl doctor --production-qemu` command also reports the resolved class and flags non-VM production posture as blocking.
 
+For the recommended production posture, use `SANDBOX_DEPLOYMENT_PROFILE=production-qemu-core`. That profile keeps QEMU on the safe `core` / `runtime` guest profile set. Add browser capability only with `production-qemu-browser`, and reserve `exception-container` for audited dangerous-profile exceptions.
+
 ## Quick comparison
 
 | Runtime | Best for | Runtime class | Main control method |
@@ -225,6 +227,7 @@ The QEMU backend:
 - checks for a readiness marker at `/var/lib/or3/bootstrap.ready`
 - runs commands and PTY sessions through the guest agent as the unprivileged `sandbox` workload user by default
 - manages guest files through the guest boundary with bounded 64 MiB transfer limits
+- rejects unpromoted production images until `sandboxctl image promote --image <path>` records a verified promotion in SQLite
 
 SSH still exists, but only as the explicit compatibility/debug path for `ssh-compat` images.
 
@@ -237,6 +240,7 @@ The main ones are:
 - setup is more involved than Docker
 - operator-owned guest image prep matters a lot
 - Linux/KVM is the supported hostile-production target and still needs host-specific validation before production claims
+- production release claims should be backed by `sandboxctl release-gate` plus the host-gated verification scripts
 
 ### Runtime state signals
 

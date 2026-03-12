@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	jwt "github.com/golang-jwt/jwt/v5"
 
@@ -32,9 +33,11 @@ type jwtAuthenticator struct {
 }
 
 type jwtClaims struct {
-	TenantID string   `json:"tenant_id"`
-	Roles    []string `json:"roles"`
-	Service  bool     `json:"service"`
+	TenantID         string   `json:"tenant_id"`
+	Roles            []string `json:"roles"`
+	ServiceAccountID string   `json:"service_account_id,omitempty"`
+	Scope            []string `json:"scope,omitempty"`
+	Service          bool     `json:"service"`
 	jwt.RegisteredClaims
 }
 
@@ -63,7 +66,7 @@ func (a *staticAuthenticator) Authenticate(ctx context.Context, token string) (I
 	return Identity{
 		Subject:    tenant.ID,
 		TenantID:   tenant.ID,
-		Roles:      []string{"admin"},
+		Roles:      []string{"operator"},
 		AuthMethod: "static",
 	}, tenant, quota, nil
 }
@@ -101,8 +104,8 @@ func (a *jwtAuthenticator) Authenticate(ctx context.Context, token string) (Iden
 		claims.RegisteredClaims.Subject = claims.TenantID
 	}
 	roles := append([]string(nil), claims.Roles...)
-	if claims.Service && len(roles) == 0 {
-		roles = []string{"service"}
+	if (claims.Service || claims.ServiceAccountID != "") && len(roles) == 0 {
+		roles = []string{"service-account"}
 	}
 	tenant := model.Tenant{ID: claims.TenantID, Name: claims.TenantID}
 	quota, err := a.store.GetQuota(ctx, claims.TenantID)
@@ -115,12 +118,36 @@ func (a *jwtAuthenticator) Authenticate(ctx context.Context, token string) (Iden
 	if err != nil {
 		return Identity{}, model.Tenant{}, model.TenantQuota{}, err
 	}
+	scope := append([]string(nil), claims.Scope...)
+	serviceAccountID := strings.TrimSpace(claims.ServiceAccountID)
+	if serviceAccountID != "" {
+		account, err := a.store.GetServiceAccount(ctx, serviceAccountID)
+		if err != nil {
+			return Identity{}, model.Tenant{}, model.TenantQuota{}, err
+		}
+		if account.TenantID != claims.TenantID {
+			return Identity{}, model.Tenant{}, model.TenantQuota{}, fmt.Errorf("service account tenant mismatch")
+		}
+		if account.Disabled || account.RevokedAt != nil {
+			return Identity{}, model.Tenant{}, model.TenantQuota{}, fmt.Errorf("service account revoked")
+		}
+		if account.ExpiresAt != nil && time.Now().UTC().After(account.ExpiresAt.UTC()) {
+			return Identity{}, model.Tenant{}, model.TenantQuota{}, fmt.Errorf("service account expired")
+		}
+		if len(scope) == 0 {
+			scope = append(scope, account.Scopes...)
+		} else if !scopesSubset(scope, account.Scopes) {
+			return Identity{}, model.Tenant{}, model.TenantQuota{}, fmt.Errorf("service account scope exceeds registered scope")
+		}
+	}
 	return Identity{
-		Subject:    claims.RegisteredClaims.Subject,
-		TenantID:   claims.TenantID,
-		Roles:      roles,
-		IsService:  claims.Service,
-		AuthMethod: "jwt-hs256",
+		Subject:          claims.RegisteredClaims.Subject,
+		TenantID:         claims.TenantID,
+		Roles:            roles,
+		Scopes:           scope,
+		ServiceAccountID: serviceAccountID,
+		IsService:        claims.Service || serviceAccountID != "",
+		AuthMethod:       "jwt-hs256",
 	}, tenant, quota, nil
 }
 
@@ -141,4 +168,17 @@ func loadSecretValues(paths []string) ([]string, error) {
 		return nil, fmt.Errorf("no jwt secrets loaded")
 	}
 	return values, nil
+}
+
+func scopesSubset(requested, allowed []string) bool {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, value := range allowed {
+		allowedSet[strings.TrimSpace(value)] = struct{}{}
+	}
+	for _, value := range requested {
+		if _, ok := allowedSet[strings.TrimSpace(value)]; !ok {
+			return false
+		}
+	}
+	return true
 }

@@ -22,6 +22,7 @@ func TestOpenCreatesMillicoreColumns(t *testing.T) {
 		{table: "sandboxes", column: "runtime_selection"},
 		{table: "quotas", column: "max_cpu_millis"},
 		{table: "snapshots", column: "runtime_selection"},
+		{table: "snapshots", column: "bundle_sha256"},
 	} {
 		rows, err := database.QueryContext(context.Background(), "PRAGMA table_info("+tc.table+")")
 		if err != nil {
@@ -46,6 +47,21 @@ func TestOpenCreatesMillicoreColumns(t *testing.T) {
 		rows.Close()
 		if !found {
 			t.Fatalf("missing %s column on %s", tc.column, tc.table)
+		}
+	}
+}
+
+func TestOpenCreatesHardeningTables(t *testing.T) {
+	database, err := Open(context.Background(), t.TempDir()+"/sandbox.db")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+
+	for _, table := range []string{"service_accounts", "promoted_guest_images", "release_evidence", "tunnel_capabilities"} {
+		var name string
+		if err := database.QueryRowContext(context.Background(), `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name); err != nil {
+			t.Fatalf("expected table %s to exist: %v", table, err)
 		}
 	}
 }

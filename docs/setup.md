@@ -6,6 +6,14 @@ If you are brand new to the project, use the **Docker runtime selection** first.
 
 If you are deploying for production, stop after the local setup walkthrough and switch to the operator docs in [Production Deployment](operations/production-deployment.md).
 
+The supported bootstrap shortcut for production is now:
+
+```bash
+export SANDBOX_DEPLOYMENT_PROFILE=production-qemu-core
+go run ./cmd/sandboxctl config-lint
+go run ./cmd/sandboxctl doctor --production-qemu
+```
+
 ## What you need
 
 ### Required for the easy path
@@ -156,6 +164,13 @@ go run ./cmd/sandboxctl create --image alpine:3.20 --runtime containerd-kata-pro
 
 Use `go run ./cmd/sandboxctl doctor` to confirm the host prerequisites before
 turning on Kata or QEMU.
+
+For production, prefer:
+
+```bash
+go run ./cmd/sandboxctl config-lint
+go run ./cmd/sandboxctl doctor --production-qemu
+```
 
 ## Common setup problems
 

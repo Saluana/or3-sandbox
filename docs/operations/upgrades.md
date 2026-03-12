@@ -33,6 +33,7 @@ Operationally:
 
 - keep the snapshot root and export bundles together with the database backup
 - avoid changing runtime backend, host architecture, or guest image family mid-upgrade without testing snapshot restore first
+- the supported conservative restore window is the current release plus the immediately previous release line, provided the guest image contract remains compatible and the image is still promoted
 
 ## Guest image compatibility
 

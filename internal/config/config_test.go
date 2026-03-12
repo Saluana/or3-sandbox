@@ -587,6 +587,97 @@ func TestProductionModeRejectsNonVMClass(t *testing.T) {
 	}
 }
 
+func TestLoadAppliesProductionDeploymentProfileDefaults(t *testing.T) {
+	root := t.TempDir()
+	secret := filepath.Join(root, "jwt.secret")
+	image := filepath.Join(root, "base.qcow2")
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(image, []byte("qcow2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SANDBOX_DEPLOYMENT_PROFILE", "production-qemu-browser")
+	t.Setenv("SANDBOX_AUTH_MODE", "jwt-hs256")
+	t.Setenv("SANDBOX_AUTH_JWT_ISSUER", "issuer.example")
+	t.Setenv("SANDBOX_AUTH_JWT_AUDIENCE", "sandbox-api")
+	t.Setenv("SANDBOX_AUTH_JWT_SECRET_PATHS", secret)
+	t.Setenv("SANDBOX_TRUST_PROXY_HEADERS", "true")
+	t.Setenv("SANDBOX_OPERATOR_HOST", "https://sandbox.example")
+	t.Setenv("SANDBOX_QEMU_BINARY", "/bin/true")
+	t.Setenv("SANDBOX_QEMU_BASE_IMAGE_PATH", image)
+	t.Setenv("SANDBOX_QEMU_ACCEL", "tcg")
+
+	cfg, err := Load(nil)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.DefaultRuntimeSelection != model.RuntimeSelectionQEMUProfessional {
+		t.Fatalf("default runtime selection = %q", cfg.DefaultRuntimeSelection)
+	}
+	if !cfg.IsAllowedGuestProfile("qemu", model.GuestProfileBrowser) {
+		t.Fatal("expected browser profile to be enabled by production-qemu-browser")
+	}
+	if cfg.IsAllowedGuestProfile("qemu", model.GuestProfileContainer) {
+		t.Fatal("expected dangerous container profile to remain blocked")
+	}
+}
+
+func TestValidateProductionTransportModes(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "jwt.secret")
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := Config{
+		DeploymentMode:           "production",
+		ListenAddress:            ":8080",
+		DatabasePath:             filepath.Join(t.TempDir(), "sandbox.db"),
+		StorageRoot:              t.TempDir(),
+		SnapshotRoot:             t.TempDir(),
+		RuntimeBackend:           "qemu",
+		EnabledRuntimeSelections: []model.RuntimeSelection{model.RuntimeSelectionQEMUProfessional},
+		DefaultRuntimeSelection:  model.RuntimeSelectionQEMUProfessional,
+		BaseImageRef:             "guest-base.qcow2",
+		AuthMode:                 "jwt-hs256",
+		AuthJWTIssuer:            "issuer.example",
+		AuthJWTAudience:          "sandbox-api",
+		AuthJWTSecretPaths:       []string{secret},
+		DefaultCPULimit:          model.CPUCores(1),
+		DefaultQuota:             model.TenantQuota{MaxCPUCores: model.CPUCores(4)},
+		DefaultNetworkMode:       model.NetworkModeInternetEnabled,
+		QEMUBinary:               "qemu-system-x86_64",
+		QEMUAccel:                "tcg",
+		QEMUBaseImagePath:        "/images/base.qcow2",
+		QEMUAllowedProfiles:      []model.GuestProfile{model.GuestProfileCore},
+		QEMUControlMode:          model.GuestControlModeAgent,
+		QEMUBootTimeout:          time.Minute,
+	}
+	probe := runtimeValidationProbe{
+		goos:          "linux",
+		commandExists: func(string) error { return nil },
+		fileReadable:  func(string) error { return nil },
+		kvmAvailable:  func() error { return nil },
+		hvfAvailable:  func() error { return nil },
+	}
+	if err := validateRuntimeConfig(base, probe); err != nil {
+		t.Fatalf("validate runtime config: %v", err)
+	}
+
+	direct := base
+	direct.ProductionTransportMode = "direct-tls"
+	if err := direct.Validate(); err == nil || !strings.Contains(err.Error(), "direct-tls") {
+		t.Fatalf("expected direct-tls validation error, got %v", err)
+	}
+
+	proxy := base
+	proxy.ProductionTransportMode = "terminated-proxy"
+	proxy.TrustedProxyHeaders = true
+	proxy.OperatorHost = "https://sandbox.example"
+	if err := validateTransportConfig(proxy, func(string) error { return nil }); err != nil {
+		t.Fatalf("expected terminated-proxy transport validation to pass, got %v", err)
+	}
+}
+
 func TestRuntimeClassMethodDerivesFromBackend(t *testing.T) {
 	tests := []struct {
 		backend string
