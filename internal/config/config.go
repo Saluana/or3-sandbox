@@ -535,6 +535,9 @@ func validateDockerConfig(c Config, probe runtimeValidationProbe) error {
 }
 
 func validateKataConfig(c Config, probe runtimeValidationProbe) error {
+	if probe.goos != "linux" {
+		return fmt.Errorf("kata runtime requires linux (host OS is %q)", probe.goos)
+	}
 	if err := probe.commandExists(c.KataBinary); err != nil {
 		return fmt.Errorf("kata runtime requires a working client binary: %w", err)
 	}

@@ -21,6 +21,8 @@ export SANDBOX_TOKEN=dev-token
 
 The CLI supports these top-level commands:
 
+- `doctor`
+- `config-lint`
 - `create`
 - `list`
 - `inspect`
@@ -46,6 +48,9 @@ The CLI supports these top-level commands:
 - `preset list`
 - `preset inspect`
 - `preset run`
+- `image promote`
+- `image list`
+- `release-gate`
 
 ## 1. Create a sandbox
 
@@ -109,6 +114,13 @@ docker build -t or3-sandbox/base:runtime images/base
 export SANDBOX_BASE_IMAGE=or3-sandbox/base:runtime
 ```
 
+Kata-specific note:
+
+- use normal container images such as `alpine:3.20` or your own OCI image refs
+- expect the same CLI flow as Docker for create/exec/files/tunnels/snapshots
+- do not expect `suspend` or `resume` to work on Kata, because this backend returns unsupported for those actions
+- treat `disk-mb` as advisory request metadata on Kata rather than a hard create-time filesystem size guarantee
+
 ## 2. List sandboxes
 
 ```bash
@@ -150,6 +162,15 @@ Delete:
 ```bash
 go run ./cmd/sandboxctl delete <sandbox-id>
 ```
+
+Kata limitation reminder:
+
+```bash
+go run ./cmd/sandboxctl suspend <sandbox-id>
+go run ./cmd/sandboxctl resume <sandbox-id>
+```
+
+are not supported for `containerd-kata-professional` sandboxes in the current implementation.
 
 ## 5. Run a command inside a sandbox
 
@@ -250,16 +271,22 @@ Runtime health:
 
 ```bash
 go run ./cmd/sandboxctl runtime-health
-go run ./cmd/sandboxctl doctor
+go run ./cmd/sandboxctl config-lint
+go run ./cmd/sandboxctl doctor --production-qemu
 ```
 
 These are good first commands when something seems wrong.
 
-`doctor` is especially useful after enabling Kata or QEMU because it reports:
+`runtime-health` is the day-to-day runtime view.
+
+`config-lint` validates the daemon configuration without starting `sandboxd`.
+
+`doctor --production-qemu` is the shipped production-host check. It is especially useful for Linux/KVM QEMU hosts because it reports:
 
 - enabled runtime selections
 - the default runtime selection
-- host prerequisite failures per runtime
+- auth and transport posture
+- host and guest-image prerequisite failures, including enabled Kata prerequisites when they are part of the configured runtime mix
 
 ## 10. Work with snapshots
 

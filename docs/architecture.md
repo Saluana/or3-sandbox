@@ -201,8 +201,8 @@ It:
 - creates a writable root disk
 - creates a separate workspace disk
 - boots a guest image
-- waits for SSH and a readiness marker
-- runs commands over SSH
+- waits for the guest agent on agent-first images, or SSH only for explicit `ssh-compat` images, plus a readiness marker
+- runs commands and PTY sessions through the guest boundary, using the guest agent by default and SSH only for explicit compatibility images
 - copies files over the guest boundary
 - stores VM artifacts in a predictable layout on disk
 

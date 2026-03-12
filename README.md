@@ -25,17 +25,18 @@ The repository ships:
 - `sandboxd`: Go HTTP daemon with SQLite metadata, static-token or JWT tenancy, quotas, lifecycle orchestration, file APIs, exec streaming, PTY attach, tunnels, snapshots, and restart reconciliation
 - `sandboxctl`: CLI for lifecycle, exec, TTY, file transfer, and tunnel management
 - Docker-backed runtime implementation for durable per-sandbox environments with isolated networks and persistent workspace mounts in trusted or development mode
+- Kata-backed runtime implementation for Linux hosts that have containerd plus Kata Containers available, exposed through the `containerd-kata-professional` runtime selection
 - QEMU-backed runtime implementation with booting, suspended, degraded, and failed guest visibility, plus opt-in host-prepared guest verification
 - integration tests that exercise the main control-plane flows, with opt-in host-prepared QEMU verification for the real guest path
 
 See also:
 
-- `planning/whats_left.md`
-- `planning/tasks2.md`
-- `planning/onwards/requirements.md`
-- `planning/onwards/design.md`
-- `planning/onwards/tasks.md`
-- `planning/onwards/status_matrix.md`
+- `planning/qemu-production-readiness/requirements.md`
+- `planning/qemu-production-readiness/design.md`
+- `planning/qemu-production-readiness/tasks.md`
+- `planning/runtime-proof/requirements.md`
+- `planning/runtime-proof/design.md`
+- `planning/runtime-proof/tasks.md`
 - `docs/README.md`
 - `docs/operations/README.md`
 
@@ -47,6 +48,7 @@ For a beginner-friendly walkthrough of the project, see:
 - `docs/setup.md`
 - `docs/usage.md`
 - `docs/tutorials/first-sandbox.md`
+- `docs/tutorials/kata-runtime.md`
 
 ## Quick Start
 
@@ -58,6 +60,7 @@ Requirements for the shipped trusted Docker path:
 Run the daemon:
 
 ```bash
+SANDBOX_DEPLOYMENT_PROFILE=dev-trusted-docker \
 go run ./cmd/sandboxd \
   -listen :8080 \
   -db ./data/sandbox.db \

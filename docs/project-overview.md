@@ -34,7 +34,7 @@ It:
 - listens for HTTP requests
 - checks auth tokens
 - loads and saves sandbox data in SQLite
-- talks to the selected runtime (`docker` or `qemu`)
+- talks to the selected runtime (`docker`, `kata`, or `qemu`)
 - keeps runtime state in sync with saved state
 
 ### `sandboxctl`
@@ -89,7 +89,7 @@ That is why the code stores both **control-plane state** and **runtime state**.
 
 ## Security model in plain language
 
-The project supports two runtime backends, each with a **runtime class** that expresses its isolation posture:
+The project supports three runtime backends, each with a **runtime class** that expresses its isolation posture:
 
 ### Docker runtime (`trusted-docker` class)
 
@@ -100,6 +100,13 @@ The project supports two runtime backends, each with a **runtime class** that ex
 - `SANDBOX_MODE=production` rejects it at startup because it is not VM-backed
 - now uses a lightweight default `core` image posture instead of shipping browser tooling in every sandbox
 - keeps heavier `browser`, `container`, and `debug` profiles explicit so operators can allowlist or block them separately
+
+### Kata runtime (`vm` class)
+
+- Linux-only runtime built on containerd + Kata Containers
+- VM-backed isolation with container-image ergonomics
+- production-eligible because it resolves to the `vm` runtime class
+- a supported runtime selection in code, but the shipped production verification flow in this repo is still QEMU-focused
 
 ### QEMU runtime (`vm` class)
 

@@ -1,4 +1,4 @@
-# Tutorial 3: Trying the QEMU Runtime
+# Tutorial 4: Trying the QEMU Runtime
 
 This tutorial is for people who already understand the Docker path.
 
@@ -20,7 +20,7 @@ That means:
 
 - setup is less beginner-friendly
 - you need a prepared guest image
-- you need SSH access set up correctly
+- you need a guest image whose control mode matches your daemon config (`agent` by default, `ssh-compat` only when explicitly enabled)
 - you should still expect a little more operational roughness than the Docker path
 
 ## Step 1: Prepare a guest image
@@ -40,16 +40,13 @@ The guest is expected to support:
 
 ## Step 2: Set QEMU environment variables
 
-Example for macOS on Apple Silicon:
+Example for macOS on Apple Silicon using the default agent-first control mode:
 
 ```bash
 export SANDBOX_RUNTIME=qemu
 export SANDBOX_QEMU_BINARY=qemu-system-aarch64
 export SANDBOX_QEMU_ACCEL=hvf
 export SANDBOX_QEMU_BASE_IMAGE_PATH=$PWD/images/guest/base.qcow2
-export SANDBOX_QEMU_SSH_USER=or3
-export SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH=$HOME/.ssh/or3-sandbox
-export SANDBOX_QEMU_SSH_HOST_KEY_PATH=$PWD/images/guest/base.qcow2.ssh-host-key.pub
 ```
 
 Example for Linux may use:
@@ -59,6 +56,15 @@ export SANDBOX_QEMU_ACCEL=kvm
 ```
 
 Use values that match your host and image.
+
+If you intentionally use an `ssh-compat` image, also set:
+
+```bash
+export SANDBOX_QEMU_CONTROL_MODE=ssh-compat
+export SANDBOX_QEMU_SSH_USER=or3
+export SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH=$HOME/.ssh/or3-sandbox
+export SANDBOX_QEMU_SSH_HOST_KEY_PATH=$PWD/images/guest/base.qcow2.ssh-host-key.pub
+```
 
 ## Step 3: Start the daemon
 
@@ -97,7 +103,7 @@ The daemon will:
 
 - create sandbox disk files
 - boot the guest
-- wait for SSH
+- wait for the guest agent on agent-first images, or SSH only in explicit `ssh-compat` mode
 - wait for readiness
 - then mark the sandbox as running
 

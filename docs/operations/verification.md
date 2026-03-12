@@ -193,7 +193,7 @@ Create a disposable sandbox with the intended contract, record the contract fiel
 sandbox_json="$(go run ./cmd/sandboxctl create --image "$SANDBOX_QEMU_BASE_IMAGE_PATH" --profile core --cpu 1 --memory-mb 1024 --disk-mb 2048 --network internet-disabled --allow-tunnels=false --start=true)"
 sandbox_id="$(printf '%s' "$sandbox_json" | jq -r '.id')"
 go run ./cmd/sandboxctl inspect "$sandbox_id" | jq '{id, profile, control_mode, control_protocol_version, workspace_contract_version}'
-go run ./cmd/sandboxctl exec "$sandbox_id" -- sh -lc 'printf verification-ok'
+go run ./cmd/sandboxctl exec "$sandbox_id" sh -lc 'printf verification-ok'
 go run ./cmd/sandboxctl delete "$sandbox_id"
 ```
 

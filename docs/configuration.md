@@ -59,8 +59,8 @@ These settings answer the question:
 
 | Setting | Default | What it means |
 | --- | --- | --- |
-| `SANDBOX_ENABLED_RUNTIME_SELECTIONS` | derived from `SANDBOX_RUNTIME` when unset | comma-separated enabled runtime selections |
-| `SANDBOX_DEFAULT_RUNTIME_SELECTION` | derived from `SANDBOX_RUNTIME` when unset | default runtime selection for create requests that omit `runtime_selection` |
+| `SANDBOX_ENABLED_RUNTIMES` | derived from `SANDBOX_RUNTIME` when unset | comma-separated enabled runtime selections |
+| `SANDBOX_DEFAULT_RUNTIME` | derived from `SANDBOX_RUNTIME` when unset | default runtime selection for create requests that omit `runtime_selection` |
 | `SANDBOX_RUNTIME` | `docker` | legacy compatibility setting; maps `docker` → `docker-dev`, `qemu` → `qemu-professional` |
 | `SANDBOX_TRUSTED_DOCKER_RUNTIME` | `false` | must be `true` when using Docker |
 | `SANDBOX_KATA_BINARY` | `ctr` | Kata/containerd client binary |
@@ -82,16 +82,16 @@ Supported v1 runtime selections:
 Example local Docker setup:
 
 ```bash
-SANDBOX_ENABLED_RUNTIME_SELECTIONS=docker-dev
-SANDBOX_DEFAULT_RUNTIME_SELECTION=docker-dev
+SANDBOX_ENABLED_RUNTIMES=docker-dev
+SANDBOX_DEFAULT_RUNTIME=docker-dev
 SANDBOX_TRUSTED_DOCKER_RUNTIME=true
 ```
 
 Example mixed Docker + Kata setup:
 
 ```bash
-SANDBOX_ENABLED_RUNTIME_SELECTIONS=docker-dev,containerd-kata-professional
-SANDBOX_DEFAULT_RUNTIME_SELECTION=containerd-kata-professional
+SANDBOX_ENABLED_RUNTIMES=docker-dev,containerd-kata-professional
+SANDBOX_DEFAULT_RUNTIME=containerd-kata-professional
 SANDBOX_TRUSTED_DOCKER_RUNTIME=true
 SANDBOX_KATA_BINARY=ctr
 SANDBOX_KATA_RUNTIME_CLASS=io.containerd.kata.v2
@@ -266,7 +266,7 @@ These settings help fail closed when a restore bundle or a tenant workload creat
 
 ## QEMU-specific settings
 
-Only use these when `SANDBOX_RUNTIME=qemu`.
+Only use these when the resolved backend is `qemu` (for example via `SANDBOX_RUNTIME=qemu` or `SANDBOX_DEFAULT_RUNTIME=qemu-professional`).
 
 | Setting | Default | Meaning |
 | --- | --- | --- |

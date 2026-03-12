@@ -61,8 +61,8 @@ The Docker path is treated as a **trusted** mode, so you must say that on purpos
 Run:
 
 ```bash
-SANDBOX_ENABLED_RUNTIME_SELECTIONS=docker-dev \
-SANDBOX_DEFAULT_RUNTIME_SELECTION=docker-dev \
+SANDBOX_ENABLED_RUNTIMES=docker-dev \
+SANDBOX_DEFAULT_RUNTIME=docker-dev \
 SANDBOX_TRUSTED_DOCKER_RUNTIME=true \
 go run ./cmd/sandboxd \
   -listen :8080 \
@@ -85,7 +85,7 @@ Legacy compatibility note:
 SANDBOX_RUNTIME=docker
 ```
 
-still works, but new docs and examples use explicit runtime selections.
+still works, but the current explicit runtime-selection variables are `SANDBOX_ENABLED_RUNTIMES` and `SANDBOX_DEFAULT_RUNTIME`.
 
 ## Step 4: Set client environment variables
 
@@ -146,8 +146,8 @@ On a Linux host with containerd and Kata installed, you can enable both the
 trusted Docker path and the professional Kata path in one daemon:
 
 ```bash
-SANDBOX_ENABLED_RUNTIME_SELECTIONS=docker-dev,containerd-kata-professional \
-SANDBOX_DEFAULT_RUNTIME_SELECTION=containerd-kata-professional \
+SANDBOX_ENABLED_RUNTIMES=docker-dev,containerd-kata-professional \
+SANDBOX_DEFAULT_RUNTIME=containerd-kata-professional \
 SANDBOX_TRUSTED_DOCKER_RUNTIME=true \
 SANDBOX_KATA_BINARY=ctr \
 SANDBOX_KATA_RUNTIME_CLASS=io.containerd.kata.v2 \
@@ -162,7 +162,7 @@ go run ./cmd/sandboxctl create --image alpine:3.20 --runtime docker-dev --start
 go run ./cmd/sandboxctl create --image alpine:3.20 --runtime containerd-kata-professional --start
 ```
 
-Use `go run ./cmd/sandboxctl doctor` to confirm the host prerequisites before
+Use `go run ./cmd/sandboxctl config-lint` to confirm the daemon config before
 turning on Kata or QEMU.
 
 For production, prefer:
@@ -171,6 +171,38 @@ For production, prefer:
 go run ./cmd/sandboxctl config-lint
 go run ./cmd/sandboxctl doctor --production-qemu
 ```
+
+## Optional: Start with Kata only
+
+If you are on a Linux host with containerd and Kata installed, and you want a
+VM-backed runtime without switching all the way to QEMU guest images yet, you
+can start `sandboxd` with Kata as the only enabled runtime selection:
+
+```bash
+SANDBOX_ENABLED_RUNTIMES=containerd-kata-professional \
+SANDBOX_DEFAULT_RUNTIME=containerd-kata-professional \
+SANDBOX_KATA_BINARY=ctr \
+SANDBOX_KATA_RUNTIME_CLASS=io.containerd.kata.v2 \
+SANDBOX_KATA_CONTAINERD_SOCKET=/run/containerd/containerd.sock \
+go run ./cmd/sandboxd \
+  -listen :8080 \
+  -db ./data/sandbox.db \
+  -storage-root ./data/storage \
+  -snapshot-root ./data/snapshots
+```
+
+Then create a sandbox with a container image as usual:
+
+```bash
+go run ./cmd/sandboxctl create --image alpine:3.20 --runtime containerd-kata-professional --start
+```
+
+Important Kata behavior to know up front:
+
+- Kata is Linux-only in this codebase
+- `suspend` and `resume` are not supported on Kata
+- `disk-mb` is accepted in the API, but Kata does not enforce that limit at create time
+- snapshots archive the workspace and preserve the base image reference, similar to Docker
 
 ## Common setup problems
 
@@ -195,8 +227,8 @@ Cause:
 Fix:
 
 ```bash
-export SANDBOX_ENABLED_RUNTIME_SELECTIONS=docker-dev
-export SANDBOX_DEFAULT_RUNTIME_SELECTION=docker-dev
+export SANDBOX_ENABLED_RUNTIMES=docker-dev
+export SANDBOX_DEFAULT_RUNTIME=docker-dev
 export SANDBOX_TRUSTED_DOCKER_RUNTIME=true
 ```
 
@@ -209,8 +241,10 @@ Cause:
 Fix:
 
 ```bash
-go run ./cmd/sandboxctl doctor
+go run ./cmd/sandboxctl config-lint
 ```
+
+On non-Linux hosts such as macOS, `config-lint` now fails early for Kata instead of letting the daemon reach a later create-time error.
 
 Then verify:
 

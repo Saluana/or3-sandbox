@@ -17,8 +17,7 @@ In terminal 1:
 ```bash
 cd /Users/brendon/Documents/or3-sandbox
 
-SANDBOX_RUNTIME=docker \
-SANDBOX_TRUSTED_DOCKER_RUNTIME=true \
+SANDBOX_DEPLOYMENT_PROFILE=dev-trusted-docker \
 go run ./cmd/sandboxd \
   -listen :8080 \
   -db ./data/sandbox.db \

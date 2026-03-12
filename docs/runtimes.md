@@ -18,7 +18,7 @@ Operators choose which runtimes to enable using **runtime selections**:
 | `containerd-kata-professional` | `kata` | `vm` | Yes – microVM isolation |
 | `qemu-professional` | `qemu` | `vm` | Yes – full VM isolation |
 
-Multiple runtime selections can be enabled simultaneously. The operator sets `SANDBOX_ENABLED_RUNTIME_SELECTIONS` and `SANDBOX_DEFAULT_RUNTIME_SELECTION` in the daemon config. Callers can request a specific runtime selection at sandbox creation time.
+Multiple runtime selections can be enabled simultaneously. The operator sets `SANDBOX_ENABLED_RUNTIMES` and `SANDBOX_DEFAULT_RUNTIME` in the daemon config. Callers can request a specific runtime selection at sandbox creation time.
 
 ## Runtime classes
 
@@ -141,7 +141,7 @@ Those overrides are intended for trusted operator workflows only and are audit-v
 
 ### Why it exists
 
-The Kata runtime is the primary professional hosted runtime for v1.
+The Kata runtime is a supported VM-backed runtime selection for Linux hosts that already use containerd + Kata Containers.
 
 It uses containerd with Kata Containers to run each sandbox inside a lightweight microVM, giving VM-class isolation with container-like ergonomics.
 
@@ -187,7 +187,7 @@ Kata snapshots use the same model as Docker:
 - The containerd socket must be accessible to the daemon
 - `ctr` CLI must be available
 
-Use `sandboxctl doctor --production-qemu` to check Kata prerequisites. The doctor reports whether `ctr` and the containerd socket are reachable.
+There is no Kata-only doctor subcommand today. Use `sandboxctl config-lint` for daemon config validation, and use `sandboxctl doctor --production-qemu` when you want the full production-host report; it also surfaces enabled Kata prerequisite failures such as missing `ctr` or an unreachable containerd socket.
 
 ### Configuration
 

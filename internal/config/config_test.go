@@ -125,6 +125,27 @@ func TestValidateRuntimeConfigQEMUMissingPrerequisites(t *testing.T) {
 	}
 }
 
+func TestValidateRuntimeConfigKataRejectsNonLinuxHost(t *testing.T) {
+	cfg := Config{
+		EnabledRuntimeSelections: []model.RuntimeSelection{model.RuntimeSelectionContainerdKataProfessional},
+		DefaultRuntimeSelection:  model.RuntimeSelectionContainerdKataProfessional,
+		KataBinary:               "ctr",
+		KataRuntimeClass:         "io.containerd.kata.v2",
+		KataContainerdSocket:     "/run/containerd/containerd.sock",
+	}
+	probe := runtimeValidationProbe{
+		goos:          "darwin",
+		commandExists: func(string) error { return nil },
+		fileReadable:  func(string) error { return nil },
+		kvmAvailable:  func() error { return nil },
+		hvfAvailable:  func() error { return nil },
+	}
+	err := validateRuntimeConfig(cfg, probe)
+	if err == nil || !strings.Contains(err.Error(), "kata runtime requires linux") || !strings.Contains(err.Error(), "darwin") {
+		t.Fatalf("expected non-linux kata validation error, got %v", err)
+	}
+}
+
 func TestValidateRuntimeConfigRejectsUnsupportedBackend(t *testing.T) {
 	cfg := Config{
 		RuntimeBackend:           "podman",

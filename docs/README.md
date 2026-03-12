@@ -11,7 +11,9 @@ This project is a **single-node sandbox control plane**. In simple words, it is 
 - `sandboxd`: the server (daemon) that creates and manages sandboxes
 - `sandboxctl`: the command-line tool (CLI) you use to talk to the server
 
-Right now, the simplest path is the **Docker runtime**. It is meant for **trusted** or **development** use. The project also includes a **QEMU guest runtime** for the higher-isolation path, but you still need to validate it on your own hosts before calling a deployment production-ready.
+Right now, the simplest path is the **Docker runtime**. It is meant for **trusted** or **development** use. The project also includes a **Kata runtime** for Linux hosts with containerd + Kata available, plus a **QEMU guest runtime** for the higher-isolation path that the production docs focus on.
+
+If you want the middle ground between trusted Docker and full guest-image QEMU, Kata is that path: container images in, VM-backed microVM isolation underneath, Linux host required.
 
 ## Honest project status
 
@@ -19,7 +21,8 @@ This part matters:
 
 - **Docker is the shipped and easiest path today**
 - **Docker is not treated as a hostile multi-tenant security boundary**
-- **QEMU is the intended higher-isolation path, not a free pass to skip host verification**
+- **Kata and QEMU are both VM-backed runtime selections, but the shipped production-readiness workflow in this repo is centered on QEMU**
+- **QEMU is the intended higher-isolation path in the operator docs, not a free pass to skip host verification**
 - **Docker is the lower-cost option; QEMU is the higher-isolation option**
 - Some advanced features are still being improved, especially around guest images, recovery drills, and broader production testing
 
@@ -34,6 +37,8 @@ If you are learning the project or trying it on your own computer, start with Do
 5. [Usage Guide](usage.md) — how to create, run, and manage sandboxes
 6. [Runtimes](runtimes.md) — Docker vs. QEMU, and when to use each one
 7. [API Reference](api-reference.md) — the main HTTP endpoints and quick examples
+
+If you specifically want the Kata path after setup, continue with [Tutorial 3: Trying the Kata Runtime](tutorials/kata-runtime.md).
 
 ## Operations
 
@@ -50,7 +55,8 @@ For production and operator workflows, continue with:
 
 - [Tutorial 1: Your First Sandbox](tutorials/first-sandbox.md)
 - [Tutorial 2: Files, Commands, and Tunnels](tutorials/files-and-tunnels.md)
-- [Tutorial 3: Trying the QEMU Runtime](tutorials/qemu-runtime.md)
+- [Tutorial 3: Trying the Kata Runtime](tutorials/kata-runtime.md)
+- [Tutorial 4: Trying the QEMU Runtime](tutorials/qemu-runtime.md)
 
 ## Quick summary
 

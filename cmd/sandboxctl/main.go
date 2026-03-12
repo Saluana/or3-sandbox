@@ -523,7 +523,7 @@ func printJSON(value any) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: sandboxctl <doctor|create|list|inspect|start|stop|suspend|resume|delete|exec|tty|upload|download|mkdir|tunnel-create|tunnel-list|tunnel-revoke|quota|runtime-health|snapshot-create|snapshot-list|snapshot-inspect|snapshot-restore|preset>")
+	fmt.Fprintln(os.Stderr, "usage: sandboxctl <doctor|config-lint|create|list|inspect|start|stop|suspend|resume|delete|exec|tty|upload|download|mkdir|tunnel-create|tunnel-list|tunnel-revoke|quota|runtime-health|snapshot-create|snapshot-list|snapshot-inspect|snapshot-restore|preset|image|release-gate>")
 }
 
 func env(key, fallback string) string {
