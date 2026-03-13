@@ -8,6 +8,12 @@ All JSON fields use `snake_case`. Protected endpoints require:
 Authorization: Bearer <token>
 ```
 
+Boundary notes:
+
+- `sandboxd` is the raw tenant-scoped provider API. Fields such as `tenant_id` are part of the daemon's internal/operator contract.
+- When a higher-level service such as `or3-net` fronts this API, that adapter is responsible for mapping upstream `workspace_id` context into sandbox auth and for preventing raw `tenant_id` from becoming a public UI contract.
+- Service-account callers should use stored minimal scopes for the specific workflow. Routine workspace automation should not rely on operator-only scopes such as `admin.inspect`.
+
 ## Error format
 
 All non-streaming `4xx` and `5xx` API responses use the same JSON envelope:
@@ -154,6 +160,7 @@ Notes:
 - If `runtime_selection` is omitted, the daemon default is used.
 - Fractional CPU values are accepted only on backends that support them.
 - `allow_tunnels` defaults from server policy if omitted.
+- The returned `tenant_id` is a raw provider ownership field. Upstream adapters should normalize ownership to their public workspace contract instead of forwarding `tenant_id` directly to UI clients.
 
 ### `GET /v1/sandboxes`
 
@@ -434,6 +441,7 @@ Example response:
 Notes:
 
 - `access_token` is returned on create and should be treated as a secret capability.
+- `access_token` is intended for control-plane or trusted service use. Browser-facing clients should use the signed browser launch flow instead of receiving raw tunnel tokens.
 - Revoked tunnels return `410 Gone` when accessed later.
 
 ### `GET /v1/sandboxes/{id}/tunnels`
@@ -472,6 +480,7 @@ Signed browser launch contract:
 - `path` must begin with `/` and is capability-scoped, including query string when present.
 - Visiting the signed URL sets a narrow bootstrap cookie scoped to that tunnel proxy path and then returns an HTML bootstrap page that redirects into the proxied app.
 - The bootstrap page is the supported browser-launch mechanism for dashboard-style apps.
+- One-time launch capabilities return `capability_id` and are consumed on first successful bootstrap.
 - This browser capability is distinct from tunnel-token auth:
   - tunnel token auth is a direct request capability for HTTP/WebSocket clients
   - signed browser launch auth is a browser-friendly bootstrap flow that installs a scoped cookie
@@ -489,6 +498,8 @@ Auth options:
 - public visibility, if enabled by policy
 
 The proxy strips control-plane auth headers and the tunnel auth cookie/token before forwarding upstream.
+
+For higher-level browser clients, signed browser launch is the supported capability surface. Avoid forwarding raw tunnel tokens or other control-plane credentials into user-visible pages.
 
 ## Snapshots
 

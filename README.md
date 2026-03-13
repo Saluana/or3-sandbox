@@ -127,6 +127,34 @@ export SANDBOX_TUNNEL_SIGNING_KEY_PATH=/run/secrets/or3-tunnel-signing-key
 
 For browser-facing tunnel flows behind rolling restarts or multiple replicas, configure a shared tunnel signing secret so signed URLs and bootstrap cookies validate consistently across instances.
 
+## Platform Boundary Notes
+
+`sandboxd` is a raw tenant-scoped control-plane API. Its persisted resources and direct API responses may include `tenant_id` because `tenant_id` is the daemon's canonical internal ownership key.
+
+When `sandboxd` sits behind `or3-net`, the boundary contract is:
+
+- `or3-net` maps upstream `workspace_id` context into sandbox tenant auth before calling `sandboxd`
+- `tenant_id` stays internal to the sandbox/provider boundary and must not become a UI-facing identifier
+- browser and app clients should rely on upstream `workspace_id` contracts, not raw `tenant_id` fields from `sandboxd`
+
+Service-account guidance for `or3-net` callers:
+
+- use the smallest stored scope set needed for the workflow: typically `sandbox.read`, `sandbox.lifecycle`, `exec.run`, `files.read`, `files.write`, `tunnels.read`, `tunnels.write`, `snapshots.read`, and `snapshots.write`
+- reserve `admin.inspect` for explicit operator tooling, not routine workspace flows
+- treat service-account credentials and tunnel access tokens as control-plane secrets
+
+Browser launch guidance:
+
+- tunnel create responses may contain `access_token`; treat it as a control-plane capability that must not be relayed to browser clients
+- browser clients should use `POST /v1/tunnels/{id}/signed-url`, which returns a short-lived, path-scoped launch capability and bootstrap cookie flow instead of a reusable admin credential
+
+## Config alignment
+
+- Native sandbox runtime variables remain `SANDBOX_*`; cross-repo deployment tooling should reserve `OR3_SANDBOX_*` and translate those values into the daemon's native env or secret-file inputs before startup.
+- Secret precedence should be launch-time env or mounted secret paths → instance-local config/profile material → checked-in defaults.
+- Shared-key mapping for sandbox auth material and tunnel-signing keys is documented in [../or3-net/planning/platform-standardization/config-alignment.md](../or3-net/planning/platform-standardization/config-alignment.md).
+- Frozen sandbox fixture coverage is enforced via [.github/workflows/contracts.yml](.github/workflows/contracts.yml).
+
 ## Runtime Notes
 
 - Each sandbox maps to a durable Docker container with a persistent `/workspace` mount.

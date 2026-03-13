@@ -1,0 +1,32 @@
+name: Contract Tests
+
+on:
+  push:
+    paths:
+      - '.github/workflows/contracts.yml'
+      - 'go.mod'
+      - 'go.sum'
+      - 'internal/model/**'
+      - 'tests/contracts/**'
+      - 'docs/api-reference.md'
+      - 'README.md'
+  pull_request:
+    paths:
+      - '.github/workflows/contracts.yml'
+      - 'go.mod'
+      - 'go.sum'
+      - 'internal/model/**'
+      - 'tests/contracts/**'
+      - 'docs/api-reference.md'
+      - 'README.md'
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run sandbox contract fixtures
+        run: go test ./tests/contracts

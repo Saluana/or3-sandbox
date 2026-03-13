@@ -1,0 +1,17 @@
+{
+  "id": "exec-123",
+  "sandbox_id": "sbx-123",
+  "tenant_id": "tenant-a",
+  "command": "sh -lc echo hello",
+  "cwd": "/workspace",
+  "timeout_seconds": 5,
+  "status": "succeeded",
+  "exit_code": 0,
+  "stdout_preview": "hello\n",
+  "stderr_preview": "",
+  "stdout_truncated": false,
+  "stderr_truncated": false,
+  "started_at": "2025-01-01T00:00:00Z",
+  "completed_at": "2025-01-01T00:00:01Z",
+  "duration_ms": 1000
+}

@@ -176,6 +176,13 @@ Useful role examples:
 - `operator`: full access including admin inspection
 - `service-account`: automation-friendly access bounded by stored scopes and revocation state
 
+Service-account scope guidance:
+
+- stored scopes are the hard upper bound; JWT `scope` claims may only narrow that set further
+- routine `or3-net` workspace automation should prefer the minimal tenant-scoped set needed for the action, such as `sandbox.read`, `sandbox.lifecycle`, `exec.run`, `files.read`, `files.write`, `tunnels.read`, `tunnels.write`, `snapshots.read`, and `snapshots.write`
+- avoid `admin.inspect` for normal workspace traffic; keep it for explicit operator or break-glass tooling
+- treat service-account credentials as control-plane secrets, not browser-session credentials
+
 ## Transport security
 
 | Setting | Default | Meaning |
