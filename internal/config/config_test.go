@@ -230,6 +230,31 @@ func TestValidateRejectsWorkspaceFileTransferLimitAboveCeiling(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsExplicitZeroWorkspaceFileTransferLimit(t *testing.T) {
+	cfg := Config{
+		ListenAddress:               ":8080",
+		DatabasePath:                filepath.Join(t.TempDir(), "sandbox.db"),
+		StorageRoot:                 t.TempDir(),
+		SnapshotRoot:                t.TempDir(),
+		BaseImageRef:                "alpine:3.20",
+		RuntimeBackend:              "docker",
+		EnabledRuntimeSelections:    []model.RuntimeSelection{model.RuntimeSelectionDockerDev},
+		DefaultRuntimeSelection:     model.RuntimeSelectionDockerDev,
+		TrustedDockerRuntime:        true,
+		DockerUser:                  "10001:10001",
+		DockerTmpfsSizeMB:           64,
+		DefaultCPULimit:             model.CPUCores(1),
+		DefaultQuota:                model.TenantQuota{MaxCPUCores: model.CPUCores(4)},
+		DefaultNetworkMode:          model.NetworkModeInternetEnabled,
+		workspaceFileTransferMaxSet: true,
+		Tenants:                     []TenantConfig{{ID: "tenant-a", Name: "Tenant A", Token: "token-a"}},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "workspace file transfer max bytes") {
+		t.Fatalf("expected explicit zero workspace transfer error, got %v", err)
+	}
+}
+
 func TestValidateAuthConfigJWTAcceptsReadableSecrets(t *testing.T) {
 	secret := filepath.Join(t.TempDir(), "jwt.secret")
 	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
@@ -281,6 +306,18 @@ func TestLoadParsesFractionalCPUDefaultsAndQuota(t *testing.T) {
 	}
 	if cfg.BaseImageRef != "alpine:3.20" {
 		t.Fatalf("expected lightweight default base image, got %q", cfg.BaseImageRef)
+	}
+}
+
+func TestLoadRejectsExplicitZeroWorkspaceFileTransferLimit(t *testing.T) {
+	t.Setenv("SANDBOX_RUNTIME", "docker")
+	t.Setenv("SANDBOX_TRUSTED_DOCKER_RUNTIME", "true")
+	t.Setenv("SANDBOX_TOKENS", "token-a=tenant-a")
+	t.Setenv("SANDBOX_WORKSPACE_FILE_TRANSFER_MAX_MB", "0")
+
+	_, err := Load(nil)
+	if err == nil || !strings.Contains(err.Error(), "workspace file transfer max bytes") {
+		t.Fatalf("expected explicit zero workspace transfer load error, got %v", err)
 	}
 }
 

@@ -162,7 +162,7 @@ func (r *Runtime) agentWriteWorkspaceFileBytes(ctx context.Context, layout sandb
 		return err
 	}
 	if int64(len(content)) > maxBytes {
-		return fmt.Errorf("file write exceeds transfer limit of %d bytes", maxBytes)
+		return model.FileTransferTooLargeError(maxBytes)
 	}
 	if len(content) == 0 {
 		return r.agentRoundTrip(ctx, layout.agentSocketPath, agentproto.OpFileWrite, agentproto.FileWriteRequest{

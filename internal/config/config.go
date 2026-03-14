@@ -57,6 +57,7 @@ type Config struct {
 	AdmissionMaxTenantHeavyOps      int
 	StorageWarningFileCount         int
 	WorkspaceFileTransferMaxBytes   int64
+	workspaceFileTransferMaxSet     bool
 	SnapshotMaxBytes                int64
 	SnapshotMaxFiles                int
 	SnapshotMaxExpansionRatio       int
@@ -203,9 +204,16 @@ func Load(args []string) (Config, error) {
 	fs.StringVar(&cfg.TunnelSigningKeyPath, "tunnel-signing-key-path", env("SANDBOX_TUNNEL_SIGNING_KEY_PATH", ""), "path to shared secret for tunnel signed URLs and browser bootstrap cookies")
 	networkMode := env("SANDBOX_DEFAULT_NETWORK_MODE", string(model.NetworkModeInternetEnabled))
 	allowTunnels := env("SANDBOX_DEFAULT_ALLOW_TUNNELS", "true")
+	_, workspaceFileTransferEnvSet := os.LookupEnv("SANDBOX_WORKSPACE_FILE_TRANSFER_MAX_MB")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
+	workspaceFileTransferFlagSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "workspace-file-transfer-max-mb" {
+			workspaceFileTransferFlagSet = true
+		}
+	})
 	defaultCPULimit, err := model.ParseCPUQuantity(defaultCPU)
 	if err != nil {
 		return Config{}, fmt.Errorf("parse default cpu: %w", err)
@@ -223,6 +231,7 @@ func Load(args []string) (Config, error) {
 	}
 	cfg.DefaultNetworkMode = model.NetworkMode(networkMode)
 	cfg.WorkspaceFileTransferMaxBytes = int64(workspaceFileTransferMaxMB) * 1024 * 1024
+	cfg.workspaceFileTransferMaxSet = workspaceFileTransferEnvSet || workspaceFileTransferFlagSet
 	cfg.SnapshotMaxBytes = int64(snapshotMaxMB) * 1024 * 1024
 	cfg.DefaultAllowTunnels = strings.EqualFold(allowTunnels, "true")
 	cfg.TrustedDockerRuntime = strings.EqualFold(trustedDockerRuntime, "true")
@@ -271,7 +280,11 @@ func (c Config) Validate() error {
 		c.StorageWarningFileCount = 10000
 	}
 	if c.WorkspaceFileTransferMaxBytes == 0 {
-		c.WorkspaceFileTransferMaxBytes = model.DefaultWorkspaceFileTransferMaxBytes
+		if c.workspaceFileTransferMaxSet {
+			problems = append(problems, "workspace file transfer max bytes must be positive")
+		} else {
+			c.WorkspaceFileTransferMaxBytes = model.DefaultWorkspaceFileTransferMaxBytes
+		}
 	}
 	if c.SnapshotMaxBytes == 0 {
 		c.SnapshotMaxBytes = 1024 * 1024 * 1024
@@ -330,7 +343,7 @@ func (c Config) Validate() error {
 	if c.StorageWarningFileCount < 0 {
 		problems = append(problems, "storage warning file count must be zero or positive")
 	}
-	if c.WorkspaceFileTransferMaxBytes <= 0 {
+	if c.WorkspaceFileTransferMaxBytes < 0 {
 		problems = append(problems, "workspace file transfer max bytes must be positive")
 	}
 	if c.WorkspaceFileTransferMaxBytes > model.MaxWorkspaceFileTransferCeilingBytes {

@@ -348,8 +348,32 @@ func TestAgentWriteWorkspaceFileBytesRejectsOversizePayload(t *testing.T) {
 	r := &Runtime{workspaceFileTransferMaxBytes: model.DefaultWorkspaceFileTransferMaxBytes}
 	content := []byte(strings.Repeat("x", int(model.DefaultWorkspaceFileTransferMaxBytes)+1))
 	err := r.agentWriteWorkspaceFileBytes(context.Background(), sandboxLayout{agentSocketPath: socketPath}, "large.bin", content)
-	if err == nil || !strings.Contains(err.Error(), "transfer limit") {
+	if err == nil || !strings.Contains(err.Error(), "maximum transfer size") {
 		t.Fatalf("expected oversize write rejection, got %v", err)
+	}
+	if !errors.Is(err, model.ErrFileTransferTooLarge) {
+		t.Fatalf("expected typed oversize write error, got %v", err)
+	}
+}
+
+func TestAgentWriteWorkspaceFileBytesUsesGuestTransferLimit(t *testing.T) {
+	socketPath := startTestAgentSocket(t, func(conn net.Conn) {
+		defer conn.Close()
+		request, _ := agentproto.ReadMessage(conn)
+		result, _ := json.Marshal(agentproto.HelloResult{
+			ProtocolVersion:          agentproto.ProtocolVersion,
+			WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
+			MaxFileTransferBytes:     1,
+		})
+		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+	})
+	r := &Runtime{workspaceFileTransferMaxBytes: 2}
+	err := r.agentWriteWorkspaceFileBytes(context.Background(), sandboxLayout{agentSocketPath: socketPath}, "small.bin", []byte("ok"))
+	if !errors.Is(err, model.ErrFileTransferTooLarge) {
+		t.Fatalf("expected guest limit enforcement, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "1 bytes") {
+		t.Fatalf("expected error to mention guest transfer limit, got %v", err)
 	}
 }
 
