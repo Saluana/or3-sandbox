@@ -22,6 +22,7 @@ type guestHandshake struct {
 	ProtocolVersion          string
 	WorkspaceContractVersion string
 	Capabilities             []string
+	MaxFileTransferBytes     int64
 }
 
 var agentRequestCounter atomic.Uint64
@@ -38,6 +39,7 @@ func (r *Runtime) agentHandshake(ctx context.Context, layout sandboxLayout) (gue
 		ProtocolVersion:          result.ProtocolVersion,
 		WorkspaceContractVersion: result.WorkspaceContractVersion,
 		Capabilities:             model.NormalizeCapabilities(result.Capabilities),
+		MaxFileTransferBytes:     defaultGuestFileTransferMaxBytes(result.MaxFileTransferBytes),
 	}, nil
 }
 
@@ -114,6 +116,10 @@ func (r *Runtime) agentReadWorkspaceFileBytes(ctx context.Context, layout sandbo
 	if err != nil {
 		return nil, err
 	}
+	maxBytes, err := r.effectiveWorkspaceFileTransferMaxBytes(ctx, layout)
+	if err != nil {
+		return nil, err
+	}
 	var output []byte
 	var offset int64
 	for {
@@ -128,15 +134,15 @@ func (r *Runtime) agentReadWorkspaceFileBytes(ctx context.Context, layout sandbo
 		if result.Offset != offset {
 			return nil, fmt.Errorf("guest agent returned unexpected file offset: host=%d guest=%d", offset, result.Offset)
 		}
-		if result.Size > model.MaxWorkspaceFileTransferBytes {
-			return nil, model.FileTransferTooLargeError(model.MaxWorkspaceFileTransferBytes)
+		if result.Size > maxBytes {
+			return nil, model.FileTransferTooLargeError(maxBytes)
 		}
 		chunk, err := agentproto.DecodeBytes(result.Content)
 		if err != nil {
 			return nil, err
 		}
-		if int64(len(output)+len(chunk)) > model.MaxWorkspaceFileTransferBytes {
-			return nil, model.FileTransferTooLargeError(model.MaxWorkspaceFileTransferBytes)
+		if int64(len(output)+len(chunk)) > maxBytes {
+			return nil, model.FileTransferTooLargeError(maxBytes)
 		}
 		output = append(output, chunk...)
 		offset += int64(len(chunk))
@@ -151,8 +157,12 @@ func (r *Runtime) agentWriteWorkspaceFileBytes(ctx context.Context, layout sandb
 	if err != nil {
 		return err
 	}
-	if len(content) > agentproto.MaxFileTransferSize {
-		return fmt.Errorf("file write exceeds transfer limit of %d bytes", agentproto.MaxFileTransferSize)
+	maxBytes, err := r.effectiveWorkspaceFileTransferMaxBytes(ctx, layout)
+	if err != nil {
+		return err
+	}
+	if int64(len(content)) > maxBytes {
+		return fmt.Errorf("file write exceeds transfer limit of %d bytes", maxBytes)
 	}
 	if len(content) == 0 {
 		return r.agentRoundTrip(ctx, layout.agentSocketPath, agentproto.OpFileWrite, agentproto.FileWriteRequest{
@@ -181,6 +191,26 @@ func (r *Runtime) agentWriteWorkspaceFileBytes(ctx context.Context, layout sandb
 		}
 	}
 	return nil
+}
+
+func (r *Runtime) effectiveWorkspaceFileTransferMaxBytes(ctx context.Context, layout sandboxLayout) (int64, error) {
+	limit := workspaceFileTransferLimit(r.workspaceFileTransferMaxBytes)
+	handshake, err := r.agentHandshake(ctx, layout)
+	if err != nil {
+		return 0, err
+	}
+	guestLimit := defaultGuestFileTransferMaxBytes(handshake.MaxFileTransferBytes)
+	if guestLimit < limit {
+		return guestLimit, nil
+	}
+	return limit, nil
+}
+
+func defaultGuestFileTransferMaxBytes(value int64) int64 {
+	if value <= 0 {
+		return model.DefaultWorkspaceFileTransferMaxBytes
+	}
+	return value
 }
 
 func (r *Runtime) agentDeleteWorkspacePath(ctx context.Context, layout sandboxLayout, relativePath string) error {

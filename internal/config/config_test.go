@@ -205,6 +205,31 @@ func TestValidateProductionModeRejectsUnsafeSettings(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsWorkspaceFileTransferLimitAboveCeiling(t *testing.T) {
+	cfg := Config{
+		ListenAddress:                 ":8080",
+		DatabasePath:                  filepath.Join(t.TempDir(), "sandbox.db"),
+		StorageRoot:                   t.TempDir(),
+		SnapshotRoot:                  t.TempDir(),
+		BaseImageRef:                  "alpine:3.20",
+		RuntimeBackend:                "docker",
+		EnabledRuntimeSelections:      []model.RuntimeSelection{model.RuntimeSelectionDockerDev},
+		DefaultRuntimeSelection:       model.RuntimeSelectionDockerDev,
+		TrustedDockerRuntime:          true,
+		DockerUser:                    "10001:10001",
+		DockerTmpfsSizeMB:             64,
+		DefaultCPULimit:               model.CPUCores(1),
+		DefaultQuota:                  model.TenantQuota{MaxCPUCores: model.CPUCores(4)},
+		DefaultNetworkMode:            model.NetworkModeInternetEnabled,
+		WorkspaceFileTransferMaxBytes: model.MaxWorkspaceFileTransferCeilingBytes + 1,
+		Tenants:                       []TenantConfig{{ID: "tenant-a", Name: "Tenant A", Token: "token-a"}},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "workspace file transfer max bytes") {
+		t.Fatalf("expected workspace transfer ceiling error, got %v", err)
+	}
+}
+
 func TestValidateAuthConfigJWTAcceptsReadableSecrets(t *testing.T) {
 	secret := filepath.Join(t.TempDir(), "jwt.secret")
 	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {

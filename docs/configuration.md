@@ -31,6 +31,7 @@ There are four big groups:
 | `SANDBOX_SNAPSHOT_ROOT` | `./data/snapshots` | snapshot files |
 | `SANDBOX_OPERATOR_HOST` | `http://127.0.0.1:8080` | public host used in generated endpoints |
 | `SANDBOX_STORAGE_WARNING_FILE_COUNT` | `10000` | warning threshold for total stored files across workspace, cache, scratch, and snapshots |
+| `SANDBOX_WORKSPACE_FILE_TRANSFER_MAX_MB` | `64` | max file size for workspace file read/write APIs |
 | `SANDBOX_SNAPSHOT_MAX_MB` | `1024` | max extracted snapshot bundle size |
 | `SANDBOX_SNAPSHOT_MAX_FILES` | `8192` | max files allowed while restoring a snapshot bundle |
 | `SANDBOX_SNAPSHOT_MAX_EXPANSION_RATIO` | `32` | max extracted-to-compressed expansion ratio for snapshot restore |
@@ -268,8 +269,15 @@ The reconcile loop also helps clean up orphaned exec records and incomplete snap
 These settings help fail closed when a restore bundle or a tenant workload creates too much pressure:
 
 - `SANDBOX_STORAGE_WARNING_FILE_COUNT` raises audit and metrics pressure signals when file counts grow too large
+- `SANDBOX_WORKSPACE_FILE_TRANSFER_MAX_MB` bounds single-file read/write API transfers and defaults to 64 MiB
 - `SANDBOX_SNAPSHOT_MAX_MB`, `SANDBOX_SNAPSHOT_MAX_FILES`, and `SANDBOX_SNAPSHOT_MAX_EXPANSION_RATIO` bound snapshot restore extraction
 - restore validation rejects unsupported special files and normalizes restored file permissions
+
+Notes:
+
+- the daemon validates `SANDBOX_WORKSPACE_FILE_TRANSFER_MAX_MB` against a global 1 GiB ceiling
+- larger workspace moves should still prefer archive or snapshot-style flows over very large JSON/base64 file API calls
+- QEMU nodes can honor values above 64 MiB only when they boot guest images built from a guest-agent version that advertises the higher ceiling; older images stay on the legacy 64 MiB behavior
 
 ## QEMU-specific settings
 

@@ -31,12 +31,13 @@ import (
 )
 
 type Router struct {
-	log              *slog.Logger
-	service          *service.Service
-	operatorHost     string
-	tunnelSigningKey []byte
-	deploymentMode   string
-	upgrader         websocket.Upgrader
+	log                          *slog.Logger
+	service                      *service.Service
+	operatorHost                 string
+	tunnelSigningKey             []byte
+	deploymentMode               string
+	workspaceFileUploadBodyBytes int64
+	upgrader                     websocket.Upgrader
 }
 
 const (
@@ -47,17 +48,21 @@ const (
 	tunnelSignedURLSigKey        = "or3_sig"
 	tunnelSignedURLCapabilityKey = "or3_cap"
 	tunnelAuthCookieName         = "or3_tunnel_auth"
-	fileUploadBodyBytes          = ((model.MaxWorkspaceFileTransferBytes + 2) / 3 * 4) + 64*1024
 )
 
 func New(log *slog.Logger, svc *service.Service, cfg config.Config) http.Handler {
+	workspaceFileTransferMaxBytes := cfg.WorkspaceFileTransferMaxBytes
+	if workspaceFileTransferMaxBytes <= 0 {
+		workspaceFileTransferMaxBytes = model.DefaultWorkspaceFileTransferMaxBytes
+	}
 	router := &Router{
-		log:              log,
-		service:          svc,
-		operatorHost:     strings.TrimRight(cfg.OperatorHost, "/"),
-		tunnelSigningKey: newTunnelSigningKey(cfg),
-		deploymentMode:   cfg.DeploymentMode,
-		upgrader:         websocket.Upgrader{},
+		log:                          log,
+		service:                      svc,
+		operatorHost:                 strings.TrimRight(cfg.OperatorHost, "/"),
+		tunnelSigningKey:             newTunnelSigningKey(cfg),
+		deploymentMode:               cfg.DeploymentMode,
+		workspaceFileUploadBodyBytes: workspaceFileUploadBodyBytes(workspaceFileTransferMaxBytes),
+		upgrader:                     websocket.Upgrader{},
 	}
 	router.upgrader.CheckOrigin = router.checkWebSocketOrigin
 	mux := http.NewServeMux()
@@ -577,10 +582,10 @@ func (rt *Router) handleFiles(w http.ResponseWriter, r *http.Request, tenantID, 
 		writeJSON(w, http.StatusOK, content)
 	case http.MethodPut:
 		var req model.FileWriteRequest
-		if err := decodeJSONLimited(w, r, fileUploadBodyBytes, &req); err != nil {
+		if err := decodeJSONLimited(w, r, rt.workspaceFileUploadBodyBytes, &req); err != nil {
 			var maxBytesErr *http.MaxBytesError
 			if errors.As(err, &maxBytesErr) {
-				writeError(w, http.StatusRequestEntityTooLarge, errorCodeForStatus(http.StatusRequestEntityTooLarge), fmt.Sprintf("file upload body exceeds maximum size of %d bytes", fileUploadBodyBytes))
+				writeError(w, http.StatusRequestEntityTooLarge, errorCodeForStatus(http.StatusRequestEntityTooLarge), fmt.Sprintf("file upload body exceeds maximum size of %d bytes", rt.workspaceFileUploadBodyBytes))
 				return
 			}
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -1414,6 +1419,13 @@ func decodeJSON(r *http.Request, out any) error {
 func decodeJSONLimited(w http.ResponseWriter, r *http.Request, maxBytes int64, out any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	return decodeJSON(r, out)
+}
+
+func workspaceFileUploadBodyBytes(maxDecodedBytes int64) int64 {
+	if maxDecodedBytes <= 0 {
+		maxDecodedBytes = model.DefaultWorkspaceFileTransferMaxBytes
+	}
+	return ((maxDecodedBytes + 2) / 3 * 4) + 64*1024
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

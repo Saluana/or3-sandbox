@@ -19,7 +19,7 @@ const ProtocolVersion = "2"
 const (
 	MaxMessageSize      = 16 * 1024 * 1024
 	MaxRequestIDLength  = 128
-	MaxFileTransferSize = model.MaxWorkspaceFileTransferBytes
+	MaxFileTransferSize = model.MaxWorkspaceFileTransferCeilingBytes
 	MaxFileChunkSize    = 256 * 1024
 	MaxBridgeChunkSize  = 32 * 1024
 )
@@ -55,6 +55,7 @@ type HelloResult struct {
 	ProtocolVersion          string   `json:"protocol_version"`
 	WorkspaceContractVersion string   `json:"workspace_contract_version"`
 	Capabilities             []string `json:"capabilities,omitempty"`
+	MaxFileTransferBytes     int64    `json:"max_file_transfer_bytes,omitempty"`
 	Ready                    bool     `json:"ready"`
 }
 

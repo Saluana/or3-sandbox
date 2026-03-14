@@ -56,6 +56,7 @@ type Config struct {
 	AdmissionMaxTenantStarts        int
 	AdmissionMaxTenantHeavyOps      int
 	StorageWarningFileCount         int
+	WorkspaceFileTransferMaxBytes   int64
 	SnapshotMaxBytes                int64
 	SnapshotMaxFiles                int
 	SnapshotMaxExpansionRatio       int
@@ -141,6 +142,8 @@ func Load(args []string) (Config, error) {
 	fs.IntVar(&cfg.AdmissionMaxTenantStarts, "admission-max-tenant-starts", envInt("SANDBOX_ADMISSION_MAX_TENANT_STARTS", 0), "maximum concurrent create/start/boot operations per tenant; 0 disables")
 	fs.IntVar(&cfg.AdmissionMaxTenantHeavyOps, "admission-max-tenant-heavy-ops", envInt("SANDBOX_ADMISSION_MAX_TENANT_HEAVY_OPS", 0), "maximum concurrent heavy lifecycle operations per tenant; 0 disables")
 	fs.IntVar(&cfg.StorageWarningFileCount, "storage-warning-file-count", envInt("SANDBOX_STORAGE_WARNING_FILE_COUNT", 10000), "warn when a sandbox exceeds this many stored files across workspace, cache, scratch, and snapshots")
+	workspaceFileTransferMaxMB := envInt("SANDBOX_WORKSPACE_FILE_TRANSFER_MAX_MB", int(model.DefaultWorkspaceFileTransferMaxBytes/(1024*1024)))
+	fs.IntVar(&workspaceFileTransferMaxMB, "workspace-file-transfer-max-mb", workspaceFileTransferMaxMB, "maximum workspace file transfer size for file read/write APIs in megabytes")
 	snapshotMaxMB := envInt("SANDBOX_SNAPSHOT_MAX_MB", 1024)
 	fs.IntVar(&snapshotMaxMB, "snapshot-max-mb", snapshotMaxMB, "maximum extracted snapshot bundle size in megabytes")
 	fs.IntVar(&cfg.SnapshotMaxFiles, "snapshot-max-files", envInt("SANDBOX_SNAPSHOT_MAX_FILES", 8192), "maximum files allowed in a restored snapshot archive")
@@ -219,6 +222,7 @@ func Load(args []string) (Config, error) {
 		return Config{}, fmt.Errorf("parse max cpu quota: %w", err)
 	}
 	cfg.DefaultNetworkMode = model.NetworkMode(networkMode)
+	cfg.WorkspaceFileTransferMaxBytes = int64(workspaceFileTransferMaxMB) * 1024 * 1024
 	cfg.SnapshotMaxBytes = int64(snapshotMaxMB) * 1024 * 1024
 	cfg.DefaultAllowTunnels = strings.EqualFold(allowTunnels, "true")
 	cfg.TrustedDockerRuntime = strings.EqualFold(trustedDockerRuntime, "true")
@@ -265,6 +269,9 @@ func (c Config) Validate() error {
 	var problems []string
 	if c.StorageWarningFileCount == 0 {
 		c.StorageWarningFileCount = 10000
+	}
+	if c.WorkspaceFileTransferMaxBytes == 0 {
+		c.WorkspaceFileTransferMaxBytes = model.DefaultWorkspaceFileTransferMaxBytes
 	}
 	if c.SnapshotMaxBytes == 0 {
 		c.SnapshotMaxBytes = 1024 * 1024 * 1024
@@ -322,6 +329,12 @@ func (c Config) Validate() error {
 	}
 	if c.StorageWarningFileCount < 0 {
 		problems = append(problems, "storage warning file count must be zero or positive")
+	}
+	if c.WorkspaceFileTransferMaxBytes <= 0 {
+		problems = append(problems, "workspace file transfer max bytes must be positive")
+	}
+	if c.WorkspaceFileTransferMaxBytes > model.MaxWorkspaceFileTransferCeilingBytes {
+		problems = append(problems, fmt.Sprintf("workspace file transfer max bytes must not exceed %d", model.MaxWorkspaceFileTransferCeilingBytes))
 	}
 	if c.SnapshotMaxBytes <= 0 {
 		problems = append(problems, "snapshot max bytes must be positive")

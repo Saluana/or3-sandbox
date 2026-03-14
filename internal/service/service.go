@@ -35,11 +35,12 @@ const (
 )
 
 type Service struct {
-	cfg         config.Config
-	store       *repository.Store
-	runtime     model.RuntimeManager
-	log         *slog.Logger
-	admissionMu sync.Mutex
+	cfg                           config.Config
+	store                         *repository.Store
+	runtime                       model.RuntimeManager
+	log                           *slog.Logger
+	workspaceFileTransferMaxBytes int64
+	admissionMu                   sync.Mutex
 }
 
 type workspaceFileRuntime interface {
@@ -63,7 +64,17 @@ func New(cfg config.Config, store *repository.Store, runtime model.RuntimeManage
 	if len(logs) > 0 && logs[0] != nil {
 		log = logs[0]
 	}
-	return &Service{cfg: cfg, store: store, runtime: runtime, log: log}
+	workspaceFileTransferMaxBytes := cfg.WorkspaceFileTransferMaxBytes
+	if workspaceFileTransferMaxBytes <= 0 {
+		workspaceFileTransferMaxBytes = model.DefaultWorkspaceFileTransferMaxBytes
+	}
+	return &Service{
+		cfg:                           cfg,
+		store:                         store,
+		runtime:                       runtime,
+		log:                           log,
+		workspaceFileTransferMaxBytes: workspaceFileTransferMaxBytes,
+	}
 }
 
 func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota model.TenantQuota, req model.CreateSandboxRequest) (model.Sandbox, error) {
@@ -622,6 +633,9 @@ func (s *Service) ReadFile(ctx context.Context, tenantID, sandboxID, path, encod
 	if runtime, ok := s.runtime.(workspaceFileRuntime); ok {
 		file, err := runtime.ReadWorkspaceFile(ctx, sandbox, relativePath)
 		if err == nil {
+			if err := ensureWorkspaceTransferSize(workspaceFileResponseSize(file), s.workspaceFileTransferMaxBytes); err != nil {
+				return model.FileReadResponse{}, err
+			}
 			_ = s.touchSandboxActivity(ctx, sandbox)
 		}
 		return file, err
@@ -630,7 +644,7 @@ func (s *Service) ReadFile(ctx context.Context, tenantID, sandboxID, path, encod
 	if err != nil {
 		return model.FileReadResponse{}, err
 	}
-	data, err := readWorkspaceFileBytes(target)
+	data, err := readWorkspaceFileBytes(target, s.workspaceFileTransferMaxBytes)
 	if err != nil {
 		return model.FileReadResponse{}, err
 	}
@@ -647,8 +661,8 @@ func (s *Service) WriteFileBytes(ctx context.Context, tenantID, sandboxID, path 
 	if err != nil {
 		return err
 	}
-	if int64(len(content)) > model.MaxWorkspaceFileTransferBytes {
-		return model.FileTransferTooLargeError(model.MaxWorkspaceFileTransferBytes)
+	if err := ensureWorkspaceTransferSize(int64(len(content)), s.workspaceFileTransferMaxBytes); err != nil {
+		return err
 	}
 	relativePath, err := cleanWorkspaceRelativePath(path)
 	if err != nil {
@@ -684,11 +698,21 @@ func (s *Service) WriteFileBytes(ctx context.Context, tenantID, sandboxID, path 
 
 func (s *Service) readWorkspaceBytes(ctx context.Context, sandbox model.Sandbox, relativePath string) ([]byte, error) {
 	if runtime, ok := s.runtime.(workspaceBinaryFileRuntime); ok {
-		return runtime.ReadWorkspaceFileBytes(ctx, sandbox, relativePath)
+		data, err := runtime.ReadWorkspaceFileBytes(ctx, sandbox, relativePath)
+		if err != nil {
+			return nil, err
+		}
+		if err := ensureWorkspaceTransferSize(int64(len(data)), s.workspaceFileTransferMaxBytes); err != nil {
+			return nil, err
+		}
+		return data, nil
 	}
 	if runtime, ok := s.runtime.(workspaceFileRuntime); ok {
 		file, err := runtime.ReadWorkspaceFile(ctx, sandbox, relativePath)
 		if err != nil {
+			return nil, err
+		}
+		if err := ensureWorkspaceTransferSize(workspaceFileResponseSize(file), s.workspaceFileTransferMaxBytes); err != nil {
 			return nil, err
 		}
 		if strings.EqualFold(file.Encoding, "base64") && strings.TrimSpace(file.ContentBase64) != "" {
@@ -700,7 +724,21 @@ func (s *Service) readWorkspaceBytes(ctx context.Context, sandbox model.Sandbox,
 	if err != nil {
 		return nil, err
 	}
-	return readWorkspaceFileBytes(target)
+	return readWorkspaceFileBytes(target, s.workspaceFileTransferMaxBytes)
+}
+
+func workspaceFileResponseSize(file model.FileReadResponse) int64 {
+	sizeBytes := file.Size
+	if int64(len(file.Content)) > sizeBytes {
+		sizeBytes = int64(len(file.Content))
+	}
+	if trimmed := strings.TrimSpace(file.ContentBase64); trimmed != "" {
+		decodedBytes := int64(base64.StdEncoding.DecodedLen(len(trimmed)))
+		if decodedBytes > sizeBytes {
+			sizeBytes = decodedBytes
+		}
+	}
+	return sizeBytes
 }
 
 func (s *Service) DeleteFile(ctx context.Context, tenantID, sandboxID, path string) error {

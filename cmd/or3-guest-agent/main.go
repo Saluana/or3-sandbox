@@ -228,6 +228,7 @@ func (a *guestAgent) handle(ctx context.Context, message agentproto.Message) (ag
 			WorkspaceContractVersion: a.workspaceContract,
 			Ready:                    isReady(),
 			Capabilities:             append([]string(nil), a.capabilities...),
+			MaxFileTransferBytes:     agentproto.MaxFileTransferSize,
 		})
 		return agentproto.Message{ID: message.ID, Op: message.Op, OK: true, Result: result}, err
 	case agentproto.OpReady:

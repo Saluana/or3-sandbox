@@ -289,9 +289,18 @@ func TestAgentWriteWorkspaceFileBytesChunksLargeFiles(t *testing.T) {
 		Data      []byte
 	}
 	chunksCh := make(chan writeChunk, expectedChunks)
-	socketPath := startTestAgentSocketLoop(t, expectedChunks, func(conn net.Conn) {
+	socketPath := startTestAgentSocketLoop(t, expectedChunks+1, func(conn net.Conn) {
 		defer conn.Close()
 		request, _ := agentproto.ReadMessage(conn)
+		if request.Op == agentproto.OpHello {
+			result, _ := json.Marshal(agentproto.HelloResult{
+				ProtocolVersion:          agentproto.ProtocolVersion,
+				WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
+				MaxFileTransferBytes:     agentproto.MaxFileTransferSize,
+			})
+			_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+			return
+		}
 		var payload agentproto.FileWriteRequest
 		if err := json.Unmarshal(request.Result, &payload); err != nil {
 			t.Errorf("unmarshal file write request: %v", err)
@@ -305,7 +314,7 @@ func TestAgentWriteWorkspaceFileBytesChunksLargeFiles(t *testing.T) {
 		chunksCh <- writeChunk{Offset: payload.Offset, TotalSize: payload.TotalSize, Truncate: payload.Truncate, EOF: payload.EOF, Data: data}
 		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true})
 	})
-	r := &Runtime{}
+	r := &Runtime{workspaceFileTransferMaxBytes: model.DefaultWorkspaceFileTransferMaxBytes}
 	if err := r.agentWriteWorkspaceFileBytes(context.Background(), sandboxLayout{agentSocketPath: socketPath}, "nested/file.txt", content); err != nil {
 		t.Fatalf("write workspace file bytes: %v", err)
 	}
@@ -326,9 +335,19 @@ func TestAgentWriteWorkspaceFileBytesChunksLargeFiles(t *testing.T) {
 }
 
 func TestAgentWriteWorkspaceFileBytesRejectsOversizePayload(t *testing.T) {
-	r := &Runtime{}
-	content := []byte(strings.Repeat("x", agentproto.MaxFileTransferSize+1))
-	err := r.agentWriteWorkspaceFileBytes(context.Background(), sandboxLayout{agentSocketPath: filepath.Join(t.TempDir(), "unused.sock")}, "large.bin", content)
+	socketPath := startTestAgentSocket(t, func(conn net.Conn) {
+		defer conn.Close()
+		request, _ := agentproto.ReadMessage(conn)
+		result, _ := json.Marshal(agentproto.HelloResult{
+			ProtocolVersion:          agentproto.ProtocolVersion,
+			WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
+			MaxFileTransferBytes:     agentproto.MaxFileTransferSize,
+		})
+		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+	})
+	r := &Runtime{workspaceFileTransferMaxBytes: model.DefaultWorkspaceFileTransferMaxBytes}
+	content := []byte(strings.Repeat("x", int(model.DefaultWorkspaceFileTransferMaxBytes)+1))
+	err := r.agentWriteWorkspaceFileBytes(context.Background(), sandboxLayout{agentSocketPath: socketPath}, "large.bin", content)
 	if err == nil || !strings.Contains(err.Error(), "transfer limit") {
 		t.Fatalf("expected oversize write rejection, got %v", err)
 	}
@@ -337,9 +356,18 @@ func TestAgentWriteWorkspaceFileBytesRejectsOversizePayload(t *testing.T) {
 func TestAgentReadWorkspaceFileBytesAssemblesChunks(t *testing.T) {
 	content := []byte(strings.Repeat("chunk-", agentproto.MaxFileChunkSize/6+3))
 	expectedChunks := (len(content) + agentproto.MaxFileChunkSize - 1) / agentproto.MaxFileChunkSize
-	socketPath := startTestAgentSocketLoop(t, expectedChunks, func(conn net.Conn) {
+	socketPath := startTestAgentSocketLoop(t, expectedChunks+1, func(conn net.Conn) {
 		defer conn.Close()
 		request, _ := agentproto.ReadMessage(conn)
+		if request.Op == agentproto.OpHello {
+			result, _ := json.Marshal(agentproto.HelloResult{
+				ProtocolVersion:          agentproto.ProtocolVersion,
+				WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
+				MaxFileTransferBytes:     agentproto.MaxFileTransferSize,
+			})
+			_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+			return
+		}
 		var payload agentproto.FileReadRequest
 		if err := json.Unmarshal(request.Result, &payload); err != nil {
 			t.Errorf("unmarshal file read request: %v", err)
@@ -358,7 +386,7 @@ func TestAgentReadWorkspaceFileBytesAssemblesChunks(t *testing.T) {
 		})
 		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
 	})
-	r := &Runtime{}
+	r := &Runtime{workspaceFileTransferMaxBytes: model.DefaultWorkspaceFileTransferMaxBytes}
 	data, err := r.agentReadWorkspaceFileBytes(context.Background(), sandboxLayout{agentSocketPath: socketPath}, "nested/file.txt")
 	if err != nil {
 		t.Fatalf("read workspace file bytes: %v", err)
@@ -369,19 +397,28 @@ func TestAgentReadWorkspaceFileBytesAssemblesChunks(t *testing.T) {
 }
 
 func TestAgentReadWorkspaceFileBytesRejectsOversizePayload(t *testing.T) {
-	socketPath := startTestAgentSocket(t, func(conn net.Conn) {
+	socketPath := startTestAgentSocketLoop(t, 2, func(conn net.Conn) {
 		defer conn.Close()
 		request, _ := agentproto.ReadMessage(conn)
+		if request.Op == agentproto.OpHello {
+			result, _ := json.Marshal(agentproto.HelloResult{
+				ProtocolVersion:          agentproto.ProtocolVersion,
+				WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
+				MaxFileTransferBytes:     agentproto.MaxFileTransferSize,
+			})
+			_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+			return
+		}
 		result, _ := json.Marshal(agentproto.FileReadResult{
 			Path:    "/workspace/large.bin",
 			Content: agentproto.EncodeBytes([]byte("ok")),
 			Offset:  0,
-			Size:    model.MaxWorkspaceFileTransferBytes + 1,
+			Size:    model.DefaultWorkspaceFileTransferMaxBytes + 1,
 			EOF:     true,
 		})
 		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
 	})
-	r := &Runtime{}
+	r := &Runtime{workspaceFileTransferMaxBytes: model.DefaultWorkspaceFileTransferMaxBytes}
 	_, err := r.agentReadWorkspaceFileBytes(context.Background(), sandboxLayout{agentSocketPath: socketPath}, "large.bin")
 	if !errors.Is(err, model.ErrFileTransferTooLarge) {
 		t.Fatalf("expected oversize read rejection, got %v", err)

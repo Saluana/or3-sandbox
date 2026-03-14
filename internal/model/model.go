@@ -6,7 +6,11 @@ import (
 	"time"
 )
 
-const MaxWorkspaceFileTransferBytes = 64 * 1024 * 1024
+const (
+	DefaultWorkspaceFileTransferMaxBytes = 64 * 1024 * 1024
+	MaxWorkspaceFileTransferBytes        = DefaultWorkspaceFileTransferMaxBytes
+	MaxWorkspaceFileTransferCeilingBytes = 1024 * 1024 * 1024
+)
 
 var ErrFileTransferTooLarge = errors.New("workspace file transfer too large")
 

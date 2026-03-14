@@ -220,7 +220,7 @@ func TestLocalFileReadsRejectOversizeTransfers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create oversize file: %v", err)
 	}
-	if err := file.Truncate(model.MaxWorkspaceFileTransferBytes + 1); err != nil {
+	if err := file.Truncate(model.DefaultWorkspaceFileTransferMaxBytes + 1); err != nil {
 		file.Close()
 		t.Fatalf("truncate oversize file: %v", err)
 	}

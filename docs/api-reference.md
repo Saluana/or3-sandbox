@@ -333,7 +333,8 @@ Read a workspace file.
 Limits and safety:
 
 - Paths stay inside the workspace root; traversal and symlink escapes are rejected.
-- The daemon returns `413 payload_too_large` when the requested file exceeds 64 MiB.
+- The daemon returns `413 payload_too_large` when the requested file exceeds the configured workspace file transfer limit.
+- The daemon limit defaults to 64 MiB and can be changed with `SANDBOX_WORKSPACE_FILE_TRANSFER_MAX_MB`.
 
 Text response example:
 
@@ -366,7 +367,8 @@ Write a file.
 Limits and safety:
 
 - Paths stay inside the workspace root; traversal and symlink escapes are rejected.
-- File writes are capped at 64 MiB of decoded content.
+- File writes are capped at the configured workspace file transfer limit.
+- The daemon limit defaults to 64 MiB and can be changed with `SANDBOX_WORKSPACE_FILE_TRANSFER_MAX_MB`.
 - Oversized upload bodies fail with `413 payload_too_large`.
 
 Text upload:

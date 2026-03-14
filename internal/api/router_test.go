@@ -32,7 +32,7 @@ func TestDecodeJSONRejectsTrailingPayload(t *testing.T) {
 }
 
 func TestClassifyErrorMapsOversizeFileTransfer(t *testing.T) {
-	status, code, message := classifyError(model.FileTransferTooLargeError(model.MaxWorkspaceFileTransferBytes))
+	status, code, message := classifyError(model.FileTransferTooLargeError(model.DefaultWorkspaceFileTransferMaxBytes))
 	if status != http.StatusRequestEntityTooLarge {
 		t.Fatalf("unexpected status %d", status)
 	}
@@ -41,5 +41,12 @@ func TestClassifyErrorMapsOversizeFileTransfer(t *testing.T) {
 	}
 	if !strings.Contains(message, "maximum transfer size") {
 		t.Fatalf("unexpected message %q", message)
+	}
+}
+
+func TestWorkspaceFileUploadBodyBytesTracksDecodedLimit(t *testing.T) {
+	got := workspaceFileUploadBodyBytes(64 * 1024 * 1024)
+	if got <= 64*1024*1024 {
+		t.Fatalf("expected upload body cap to exceed decoded payload, got %d", got)
 	}
 }

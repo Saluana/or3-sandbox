@@ -226,8 +226,10 @@ The QEMU backend:
 - waits for the guest agent to report readiness on agent-first images
 - checks for a readiness marker at `/var/lib/or3/bootstrap.ready`
 - runs commands and PTY sessions through the guest agent as the unprivileged `sandbox` workload user by default
-- manages guest files through the guest boundary with bounded 64 MiB transfer limits
+- manages guest files through the guest boundary with a daemon-configured transfer limit that defaults to 64 MiB
 - rejects unpromoted production images until `sandboxctl image promote --image <path>` records a verified promotion in SQLite
+
+If a QEMU node raises the daemon transfer limit above 64 MiB, guest images built with the older agent keep the legacy 64 MiB ceiling until they are rebuilt and promoted again.
 
 SSH still exists, but only as the explicit compatibility/debug path for `ssh-compat` images.
 

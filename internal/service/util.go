@@ -145,7 +145,10 @@ func copyFile(dst, src string) error {
 	return out.Close()
 }
 
-func readWorkspaceFileBytes(path string) ([]byte, error) {
+func readWorkspaceFileBytes(path string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = model.DefaultWorkspaceFileTransferMaxBytes
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -158,17 +161,27 @@ func readWorkspaceFileBytes(path string) ([]byte, error) {
 	if info.IsDir() {
 		return nil, fmt.Errorf("path is a directory")
 	}
-	if info.Size() > model.MaxWorkspaceFileTransferBytes {
-		return nil, model.FileTransferTooLargeError(model.MaxWorkspaceFileTransferBytes)
+	if info.Size() > maxBytes {
+		return nil, model.FileTransferTooLargeError(maxBytes)
 	}
-	data, err := io.ReadAll(io.LimitReader(file, model.MaxWorkspaceFileTransferBytes+1))
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(data)) > model.MaxWorkspaceFileTransferBytes {
-		return nil, model.FileTransferTooLargeError(model.MaxWorkspaceFileTransferBytes)
+	if int64(len(data)) > maxBytes {
+		return nil, model.FileTransferTooLargeError(maxBytes)
 	}
 	return data, nil
+}
+
+func ensureWorkspaceTransferSize(sizeBytes, maxBytes int64) error {
+	if maxBytes <= 0 {
+		maxBytes = model.DefaultWorkspaceFileTransferMaxBytes
+	}
+	if sizeBytes > maxBytes {
+		return model.FileTransferTooLargeError(maxBytes)
+	}
+	return nil
 }
 
 func isReadableFile(path string) bool {

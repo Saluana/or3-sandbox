@@ -76,6 +76,9 @@ func TestGuestAgentHelloUsesManifestCapabilities(t *testing.T) {
 	if result.WorkspaceContractVersion != "9" {
 		t.Fatalf("unexpected workspace contract version %q", result.WorkspaceContractVersion)
 	}
+	if result.MaxFileTransferBytes != agentproto.MaxFileTransferSize {
+		t.Fatalf("unexpected hello max file transfer bytes %d", result.MaxFileTransferBytes)
+	}
 }
 
 func TestGuestAgentRejectsDisallowedOperation(t *testing.T) {

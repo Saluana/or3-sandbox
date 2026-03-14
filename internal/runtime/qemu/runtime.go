@@ -52,32 +52,34 @@ type sshProbe func(ctx context.Context, target sshTarget) error
 type processArgsReader func(pid int) (string, error)
 
 type Options struct {
-	Binary         string
-	Accel          string
-	BaseImagePath  string
-	ControlMode    model.GuestControlMode
-	SSHUser        string
-	SSHKeyPath     string
-	SSHHostKeyPath string
-	BootTimeout    time.Duration
-	SSHBinary      string
-	SCPBinary      string
+	Binary                        string
+	Accel                         string
+	BaseImagePath                 string
+	ControlMode                   model.GuestControlMode
+	SSHUser                       string
+	SSHKeyPath                    string
+	SSHHostKeyPath                string
+	BootTimeout                   time.Duration
+	SSHBinary                     string
+	SCPBinary                     string
+	WorkspaceFileTransferMaxBytes int64
 }
 
 type Runtime struct {
-	qemuBinary     string
-	qemuImgBinary  string
-	sshBinary      string
-	scpBinary      string
-	accelerator    string
-	baseImagePath  string
-	controlMode    model.GuestControlMode
-	agentTransport string
-	sshUser        string
-	sshKeyPath     string
-	sshHostKeyPath string
-	bootTimeout    time.Duration
-	pollInterval   time.Duration
+	qemuBinary                    string
+	qemuImgBinary                 string
+	sshBinary                     string
+	scpBinary                     string
+	accelerator                   string
+	baseImagePath                 string
+	controlMode                   model.GuestControlMode
+	agentTransport                string
+	sshUser                       string
+	sshKeyPath                    string
+	sshHostKeyPath                string
+	bootTimeout                   time.Duration
+	pollInterval                  time.Duration
+	workspaceFileTransferMaxBytes int64
 
 	runCommand  commandRunner
 	sshReady    sshProbe
@@ -134,24 +136,35 @@ func New(opts Options) (*Runtime, error) {
 		return nil, err
 	}
 	runtime := &Runtime{
-		qemuBinary:     opts.Binary,
-		qemuImgBinary:  qemuImgBinary,
-		sshBinary:      opts.SSHBinary,
-		scpBinary:      opts.SCPBinary,
-		accelerator:    accel,
-		baseImagePath:  opts.BaseImagePath,
-		controlMode:    opts.ControlMode,
-		agentTransport: defaultAgentTransport,
-		sshUser:        opts.SSHUser,
-		sshKeyPath:     opts.SSHKeyPath,
-		sshHostKeyPath: opts.SSHHostKeyPath,
-		bootTimeout:    opts.BootTimeout,
-		pollInterval:   defaultPollInterval,
+		qemuBinary:                    opts.Binary,
+		qemuImgBinary:                 qemuImgBinary,
+		sshBinary:                     opts.SSHBinary,
+		scpBinary:                     opts.SCPBinary,
+		accelerator:                   accel,
+		baseImagePath:                 opts.BaseImagePath,
+		controlMode:                   opts.ControlMode,
+		agentTransport:                defaultAgentTransport,
+		sshUser:                       opts.SSHUser,
+		sshKeyPath:                    opts.SSHKeyPath,
+		sshHostKeyPath:                opts.SSHHostKeyPath,
+		bootTimeout:                   opts.BootTimeout,
+		pollInterval:                  defaultPollInterval,
+		workspaceFileTransferMaxBytes: workspaceFileTransferLimit(opts.WorkspaceFileTransferMaxBytes),
 	}
 	runtime.runCommand = runtime.defaultRunCommand
 	runtime.sshReady = runtime.defaultSSHProbe
 	runtime.processArgs = defaultProcessArgsReader
 	return runtime, nil
+}
+
+func workspaceFileTransferLimit(limit int64) int64 {
+	if limit <= 0 {
+		return model.DefaultWorkspaceFileTransferMaxBytes
+	}
+	if limit > model.MaxWorkspaceFileTransferCeilingBytes {
+		return model.MaxWorkspaceFileTransferCeilingBytes
+	}
+	return limit
 }
 
 func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.RuntimeState, error) {

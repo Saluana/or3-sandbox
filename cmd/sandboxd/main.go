@@ -105,14 +105,15 @@ func buildRuntime(cfg config.Config) (model.RuntimeManager, error) {
 			})
 		case model.RuntimeSelectionQEMUProfessional:
 			rt, err := runtimeqemu.New(runtimeqemu.Options{
-				Binary:         cfg.QEMUBinary,
-				Accel:          cfg.QEMUAccel,
-				BaseImagePath:  cfg.QEMUBaseImagePath,
-				ControlMode:    cfg.QEMUControlMode,
-				SSHUser:        cfg.QEMUSSHUser,
-				SSHKeyPath:     cfg.QEMUSSHPrivateKeyPath,
-				SSHHostKeyPath: cfg.QEMUSSHHostKeyPath,
-				BootTimeout:    cfg.QEMUBootTimeout,
+				Binary:                        cfg.QEMUBinary,
+				Accel:                         cfg.QEMUAccel,
+				BaseImagePath:                 cfg.QEMUBaseImagePath,
+				ControlMode:                   cfg.QEMUControlMode,
+				SSHUser:                       cfg.QEMUSSHUser,
+				SSHKeyPath:                    cfg.QEMUSSHPrivateKeyPath,
+				SSHHostKeyPath:                cfg.QEMUSSHHostKeyPath,
+				BootTimeout:                   cfg.QEMUBootTimeout,
+				WorkspaceFileTransferMaxBytes: cfg.WorkspaceFileTransferMaxBytes,
 			})
 			if err != nil {
 				return nil, err
