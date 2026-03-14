@@ -40,6 +40,7 @@ cmd/
     main.go
   sandboxctl/
     doctor.go
+    hardening.go
     main.go
     preset.go
   sandboxd/
@@ -121,6 +122,8 @@ internal/
     service.go
     tunnel_tcp.go
     util.go
+  testutil/
+    docker.go
 scripts/
   docker-resource-abuse.sh
   production-smoke.sh
@@ -128,6 +131,14 @@ scripts/
   qemu-production-smoke.sh
   qemu-recovery-drill.sh
   qemu-resource-abuse.sh
+tests/
+  contracts/
+    fixtures/
+      sandbox-create-request.json
+      sandbox-create-response.json
+      sandbox-error-response.json
+      sandbox-exec-response.json
+      sandbox-exec-stream-events.jsonl
 .gitignore
 go.mod
 README.md
@@ -135,6 +146,235 @@ repomix-command.md
 ```
 
 # Files
+
+## File: cmd/sandboxctl/hardening.go
+````go
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+
+	"or3-sandbox/internal/config"
+	"or3-sandbox/internal/db"
+	"or3-sandbox/internal/guestimage"
+	"or3-sandbox/internal/model"
+	"or3-sandbox/internal/repository"
+)
+
+func runConfigLint(args []string) error {
+	fs := flag.NewFlagSet("config-lint", flag.ContinueOnError)
+	jsonOutput := fs.Bool("json", false, "print result as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(nil)
+	if err != nil {
+		return err
+	}
+	result := map[string]any{
+		"ok":                         true,
+		"deployment_mode":            cfg.DeploymentMode,
+		"deployment_profile":         cfg.DeploymentProfile,
+		"production_transport_mode":  cfg.ProductionTransportMode,
+		"default_runtime_selection":  cfg.DefaultRuntimeSelection,
+		"enabled_runtime_selections": cfg.EnabledRuntimeSelections,
+	}
+	if *jsonOutput {
+		return printJSON(result)
+	}
+	fmt.Fprintf(os.Stdout, "config lint ok: mode=%s profile=%s transport=%s default_runtime=%s\n", cfg.DeploymentMode, cfg.DeploymentProfile, cfg.ProductionTransportMode, cfg.DefaultRuntimeSelection)
+	return nil
+}
+
+func runImage(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: sandboxctl image <promote|list>")
+	}
+	switch args[0] {
+	case "promote":
+		return runImagePromote(args[1:])
+	case "list":
+		return runImageList(args[1:])
+	default:
+		return errors.New("usage: sandboxctl image <promote|list>")
+	}
+}
+
+func runImagePromote(args []string) error {
+	fs := flag.NewFlagSet("image promote", flag.ContinueOnError)
+	imagePath := fs.String("image", "", "guest image path")
+	promotedBy := fs.String("promoted-by", "sandboxctl", "promotion actor")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*imagePath) == "" {
+		return errors.New("usage: sandboxctl image promote --image <path> [--promoted-by <actor>]")
+	}
+	cfg, store, cleanup, err := loadConfigStore()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	resolved := config.NormalizeQEMUBaseImagePath(*imagePath)
+	contract, err := guestimage.Load(resolved)
+	if err != nil {
+		return err
+	}
+	if err := guestimage.Validate(resolved, contract); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	provenanceJSON, _ := json.Marshal(contract.Provenance)
+	record := model.PromotedGuestImage{
+		ImageRef:               resolved,
+		ImageSHA256:            contract.ImageSHA256,
+		Profile:                contract.Profile,
+		ControlMode:            contract.Control.Mode,
+		ControlProtocolVersion: contract.Control.ProtocolVersion,
+		ContractVersion:        contract.ContractVersion,
+		ProvenanceJSON:         string(provenanceJSON),
+		VerificationStatus:     "verified",
+		PromotionStatus:        "promoted",
+		PromotedAt:             &now,
+		PromotedBy:             *promotedBy,
+	}
+	if err := store.UpsertPromotedGuestImage(context.Background(), record); err != nil {
+		return err
+	}
+	return printJSON(map[string]any{
+		"ok":        true,
+		"image_ref": record.ImageRef,
+		"profile":   record.Profile,
+		"sha256":    record.ImageSHA256,
+		"mode":      cfg.DeploymentMode,
+	})
+}
+
+func runImageList(args []string) error {
+	if len(args) != 0 {
+		return errors.New("usage: sandboxctl image list")
+	}
+	_, store, cleanup, err := loadConfigStore()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	images, err := store.ListPromotedGuestImages(context.Background())
+	if err != nil {
+		return err
+	}
+	return printJSON(images)
+}
+
+func runReleaseGate(args []string) error {
+	fs := flag.NewFlagSet("release-gate", flag.ContinueOnError)
+	artifactDir := fs.String("artifact-dir", "", "directory to store release gate logs")
+	gateName := fs.String("name", "production-qemu", "gate name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, store, cleanup, err := loadConfigStore()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	root, err := locateRepoRoot()
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(*artifactDir) == "" {
+		*artifactDir = filepath.Join(root, "data", "release-evidence")
+	}
+	if err := os.MkdirAll(*artifactDir, 0o755); err != nil {
+		return err
+	}
+	scripts := []string{
+		filepath.Join(root, "scripts", "production-smoke.sh"),
+		filepath.Join(root, "scripts", "qemu-host-verification.sh"),
+		filepath.Join(root, "scripts", "qemu-production-smoke.sh"),
+		filepath.Join(root, "scripts", "qemu-recovery-drill.sh"),
+	}
+	for _, script := range scripts {
+		startedAt := time.Now().UTC()
+		logPath := filepath.Join(*artifactDir, filepath.Base(script)+".log")
+		cmd := exec.Command(script)
+		output, err := cmd.CombinedOutput()
+		if writeErr := os.WriteFile(logPath, output, 0o644); writeErr != nil {
+			return writeErr
+		}
+		outcome := "ok"
+		if err != nil {
+			outcome = "failed"
+		}
+		completedAt := time.Now().UTC()
+		if createErr := store.CreateReleaseEvidence(context.Background(), model.ReleaseEvidence{
+			ID:               fmt.Sprintf("gate-%d", startedAt.UnixNano()),
+			GateName:         *gateName,
+			HostFingerprint:  hostFingerprint(),
+			RuntimeSelection: cfg.DefaultRuntimeSelection,
+			Outcome:          outcome,
+			ArtifactPath:     logPath,
+			StartedAt:        startedAt,
+			CompletedAt:      &completedAt,
+		}); createErr != nil {
+			return createErr
+		}
+		if err != nil {
+			return fmt.Errorf("%s failed: %w", filepath.Base(script), err)
+		}
+	}
+	evidence, err := store.ListReleaseEvidence(context.Background(), *gateName)
+	if err != nil {
+		return err
+	}
+	return printJSON(evidence)
+}
+
+func loadConfigStore() (config.Config, *repository.Store, func(), error) {
+	cfg, err := config.Load(nil)
+	if err != nil {
+		return config.Config{}, nil, nil, err
+	}
+	sqlDB, err := db.Open(context.Background(), cfg.DatabasePath)
+	if err != nil {
+		return config.Config{}, nil, nil, err
+	}
+	return cfg, repository.New(sqlDB), func() { _ = sqlDB.Close() }, nil
+}
+
+func locateRepoRoot() (string, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	current := wd
+	for {
+		if _, err := os.Stat(filepath.Join(current, "scripts", "production-smoke.sh")); err == nil {
+			return current, nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", errors.New("could not locate repository root")
+		}
+		current = parent
+	}
+}
+
+func hostFingerprint() string {
+	hostname, _ := os.Hostname()
+	return fmt.Sprintf("%s/%s:%s", runtime.GOOS, runtime.GOARCH, hostname)
+}
+````
 
 ## File: images/guest/cloud-init/meta-data.tpl
 ````
@@ -447,123 +687,6 @@ func ExtractTarGz(source, destination string, limits Limits) (Stats, error) {
 		if err := os.Chmod(target, mode); err != nil {
 			return Stats{}, err
 		}
-	}
-}
-````
-
-## File: internal/auth/identity.go
-````go
-package auth
-
-import (
-	"context"
-	"errors"
-	"strings"
-
-	"or3-sandbox/internal/model"
-)
-
-var ErrForbidden = errors.New("forbidden")
-
-type tenantContextKey struct{}
-
-type Identity struct {
-	Subject    string
-	TenantID   string
-	Roles      []string
-	IsService  bool
-	AuthMethod string
-}
-
-type TenantContext struct {
-	Tenant   model.Tenant
-	Quota    model.TenantQuota
-	Identity Identity
-}
-
-const (
-	PermissionSandboxRead      = "sandbox.read"
-	PermissionSandboxLifecycle = "sandbox.lifecycle"
-	PermissionExecRun          = "exec.run"
-	PermissionTTYAttach        = "tty.attach"
-	PermissionFilesRead        = "files.read"
-	PermissionFilesWrite       = "files.write"
-	PermissionSnapshotsRead    = "snapshots.read"
-	PermissionSnapshotsWrite   = "snapshots.write"
-	PermissionTunnelsRead      = "tunnels.read"
-	PermissionTunnelsWrite     = "tunnels.write"
-	PermissionAdminInspect     = "admin.inspect"
-)
-
-func FromContext(ctx context.Context) (TenantContext, bool) {
-	value, ok := ctx.Value(tenantContextKey{}).(TenantContext)
-	return value, ok
-}
-
-func Require(ctx context.Context, permissions ...string) error {
-	tenantCtx, ok := FromContext(ctx)
-	if !ok {
-		return errors.New("unauthorized")
-	}
-	for _, permission := range permissions {
-		if tenantCtx.HasPermission(permission) {
-			return nil
-		}
-	}
-	return ErrForbidden
-}
-
-func (t TenantContext) HasPermission(permission string) bool {
-	for _, role := range t.Identity.Roles {
-		for _, granted := range rolePermissions(strings.ToLower(strings.TrimSpace(role))) {
-			if granted == "*" || granted == permission {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func rolePermissions(role string) []string {
-	switch role {
-	case "admin", "operator":
-		return []string{"*"}
-	case "developer":
-		return []string{
-			PermissionSandboxRead,
-			PermissionSandboxLifecycle,
-			PermissionExecRun,
-			PermissionTTYAttach,
-			PermissionFilesRead,
-			PermissionFilesWrite,
-			PermissionSnapshotsRead,
-			PermissionSnapshotsWrite,
-			PermissionTunnelsRead,
-			PermissionTunnelsWrite,
-		}
-	case "viewer":
-		return []string{
-			PermissionSandboxRead,
-			PermissionFilesRead,
-			PermissionSnapshotsRead,
-			PermissionTunnelsRead,
-		}
-	case "service":
-		return []string{
-			PermissionSandboxRead,
-			PermissionSandboxLifecycle,
-			PermissionExecRun,
-			PermissionTTYAttach,
-			PermissionFilesRead,
-			PermissionFilesWrite,
-			PermissionSnapshotsRead,
-			PermissionSnapshotsWrite,
-			PermissionTunnelsRead,
-			PermissionTunnelsWrite,
-			PermissionAdminInspect,
-		}
-	default:
-		return nil
 	}
 }
 ````
@@ -2417,6 +2540,37 @@ func minAvailableBytes(paths ...string) (int64, error) {
 }
 ````
 
+## File: internal/testutil/docker.go
+````go
+package testutil
+
+import (
+	"context"
+	"fmt"
+	"os/exec"
+	"strings"
+)
+
+// DockerAvailable verifies that the Docker CLI is installed and can talk to a
+// live daemon. Tests can use this to skip Docker-backed suites on hosts where
+// a socket path exists but the engine is not actually reachable.
+func DockerAvailable(ctx context.Context) error {
+	path, err := exec.LookPath("docker")
+	if err != nil {
+		return fmt.Errorf("docker CLI not available: %w", err)
+	}
+	output, err := exec.CommandContext(ctx, path, "info", "--format", "{{.ServerVersion}}").CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			return fmt.Errorf("docker daemon unavailable: %w", err)
+		}
+		return fmt.Errorf("docker daemon unavailable: %s", message)
+	}
+	return nil
+}
+````
+
 ## File: scripts/docker-resource-abuse.sh
 ````bash
 #!/usr/bin/env bash
@@ -2564,6 +2718,81 @@ fi
 test_regex='TestHost(CoreSubstrateAndAgentProtocol|DiskFullAndWorkspacePersistence|IsolationBoundaries|RestartRecoveryAndProfileWorkloads|SandboxLocalBridge)$'
 cd "$ROOT_DIR"
 exec "$GO_BIN" test ./internal/runtime/qemu -run "$test_regex"
+````
+
+## File: tests/contracts/fixtures/sandbox-create-request.json
+````json
+{
+  "base_image_ref": "alpine:3.20",
+  "cpu_limit": 1,
+  "memory_limit_mb": 512,
+  "pids_limit": 128,
+  "disk_limit_mb": 2048,
+  "network_mode": "internet-enabled",
+  "allow_tunnels": true,
+  "start": true
+}
+````
+
+## File: tests/contracts/fixtures/sandbox-create-response.json
+````json
+{
+  "id": "sbx-123",
+  "tenant_id": "tenant-a",
+  "status": "running",
+  "runtime_selection": "docker-dev",
+  "runtime_backend": "docker",
+  "runtime_class": "trusted-docker",
+  "base_image_ref": "alpine:3.20",
+  "cpu_limit": 1,
+  "memory_limit_mb": 512,
+  "pids_limit": 128,
+  "disk_limit_mb": 2048,
+  "network_mode": "internet-enabled",
+  "allow_tunnels": true,
+  "runtime_id": "sbx-123",
+  "runtime_status": "running",
+  "created_at": "2025-01-01T00:00:00Z",
+  "updated_at": "2025-01-01T00:00:00Z",
+  "last_active_at": "2025-01-01T00:00:00Z"
+}
+````
+
+## File: tests/contracts/fixtures/sandbox-error-response.json
+````json
+{
+  "error": "not found",
+  "code": "not_found",
+  "status": 404
+}
+````
+
+## File: tests/contracts/fixtures/sandbox-exec-response.json
+````json
+{
+  "id": "exec-123",
+  "sandbox_id": "sbx-123",
+  "tenant_id": "tenant-a",
+  "command": "sh -lc echo hello",
+  "cwd": "/workspace",
+  "timeout_seconds": 5,
+  "status": "succeeded",
+  "exit_code": 0,
+  "stdout_preview": "hello\n",
+  "stderr_preview": "",
+  "stdout_truncated": false,
+  "stderr_truncated": false,
+  "started_at": "2025-01-01T00:00:00Z",
+  "completed_at": "2025-01-01T00:00:01Z",
+  "duration_ms": 1000
+}
+````
+
+## File: tests/contracts/fixtures/sandbox-exec-stream-events.jsonl
+````
+{"event":"stdout","data":"stream-success"}
+{"event":"stderr","data":"stream-warning"}
+{"event":"result","data":{"id":"exec-123","sandbox_id":"sbx-123","tenant_id":"tenant-a","command":"sh -lc echo hello","cwd":"/workspace","timeout_seconds":5,"status":"succeeded","exit_code":0,"stdout_preview":"stream-success","stderr_preview":"stream-warning","stdout_truncated":false,"stderr_truncated":false,"started_at":"2025-01-01T00:00:00Z","completed_at":"2025-01-01T00:00:01Z","duration_ms":1000}}
 ````
 
 ## File: repomix-command.md
@@ -2856,151 +3085,163 @@ fi
 exit 1
 ````
 
-## File: internal/auth/authenticator.go
+## File: internal/auth/identity.go
 ````go
 package auth
 
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
 	"strings"
 
-	jwt "github.com/golang-jwt/jwt/v5"
-
-	"or3-sandbox/internal/config"
 	"or3-sandbox/internal/model"
-	"or3-sandbox/internal/repository"
 )
 
-type Authenticator interface {
-	Authenticate(ctx context.Context, token string) (Identity, model.Tenant, model.TenantQuota, error)
+var ErrForbidden = errors.New("forbidden")
+
+type tenantContextKey struct{}
+
+type Identity struct {
+	Subject          string
+	TenantID         string
+	Roles            []string
+	Scopes           []string
+	ServiceAccountID string
+	IsService        bool
+	AuthMethod       string
 }
 
-type staticAuthenticator struct {
-	store *repository.Store
+type TenantContext struct {
+	Tenant   model.Tenant
+	Quota    model.TenantQuota
+	Identity Identity
 }
 
-type jwtAuthenticator struct {
-	store        *repository.Store
-	issuer       string
-	audience     string
-	secrets      []string
-	loadErr      error
-	defaultQuota model.TenantQuota
+const (
+	PermissionSandboxRead      = "sandbox.read"
+	PermissionSandboxLifecycle = "sandbox.lifecycle"
+	PermissionExecRun          = "exec.run"
+	PermissionTTYAttach        = "tty.attach"
+	PermissionFilesRead        = "files.read"
+	PermissionFilesWrite       = "files.write"
+	PermissionSnapshotsRead    = "snapshots.read"
+	PermissionSnapshotsWrite   = "snapshots.write"
+	PermissionTunnelsRead      = "tunnels.read"
+	PermissionTunnelsWrite     = "tunnels.write"
+	PermissionAdminInspect     = "admin.inspect"
+)
+
+func FromContext(ctx context.Context) (TenantContext, bool) {
+	value, ok := ctx.Value(tenantContextKey{}).(TenantContext)
+	return value, ok
 }
 
-type jwtClaims struct {
-	TenantID string   `json:"tenant_id"`
-	Roles    []string `json:"roles"`
-	Service  bool     `json:"service"`
-	jwt.RegisteredClaims
+func Require(ctx context.Context, permissions ...string) error {
+	tenantCtx, ok := FromContext(ctx)
+	if !ok {
+		return errors.New("unauthorized")
+	}
+	for _, permission := range permissions {
+		if tenantCtx.HasPermission(permission) {
+			return nil
+		}
+	}
+	return ErrForbidden
 }
 
-func newAuthenticator(store *repository.Store, cfg config.Config) Authenticator {
-	switch cfg.AuthMode {
-	case "jwt-hs256":
-		secrets, err := loadSecretValues(cfg.AuthJWTSecretPaths)
-		return &jwtAuthenticator{
-			store:        store,
-			issuer:       cfg.AuthJWTIssuer,
-			audience:     cfg.AuthJWTAudience,
-			secrets:      secrets,
-			loadErr:      err,
-			defaultQuota: cfg.DefaultQuota,
+func (t TenantContext) HasPermission(permission string) bool {
+	if t.Identity.IsService && len(t.Identity.Scopes) > 0 && !containsPermission(t.Identity.Scopes, permission) {
+		return false
+	}
+	for _, role := range t.Identity.Roles {
+		for _, granted := range rolePermissions(strings.ToLower(strings.TrimSpace(role))) {
+			if granted == permission {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func AllPermissions() []string {
+	return []string{
+		PermissionSandboxRead,
+		PermissionSandboxLifecycle,
+		PermissionExecRun,
+		PermissionTTYAttach,
+		PermissionFilesRead,
+		PermissionFilesWrite,
+		PermissionSnapshotsRead,
+		PermissionSnapshotsWrite,
+		PermissionTunnelsRead,
+		PermissionTunnelsWrite,
+		PermissionAdminInspect,
+	}
+}
+
+func rolePermissions(role string) []string {
+	switch role {
+	case "operator":
+		return AllPermissions()
+	case "tenant-admin", "admin":
+		return []string{
+			PermissionSandboxRead,
+			PermissionSandboxLifecycle,
+			PermissionExecRun,
+			PermissionTTYAttach,
+			PermissionFilesRead,
+			PermissionFilesWrite,
+			PermissionSnapshotsRead,
+			PermissionSnapshotsWrite,
+			PermissionTunnelsRead,
+			PermissionTunnelsWrite,
+		}
+	case "tenant-developer", "developer":
+		return []string{
+			PermissionSandboxRead,
+			PermissionSandboxLifecycle,
+			PermissionExecRun,
+			PermissionTTYAttach,
+			PermissionFilesRead,
+			PermissionFilesWrite,
+			PermissionSnapshotsRead,
+			PermissionSnapshotsWrite,
+			PermissionTunnelsRead,
+			PermissionTunnelsWrite,
+		}
+	case "tenant-viewer", "viewer":
+		return []string{
+			PermissionSandboxRead,
+			PermissionFilesRead,
+			PermissionSnapshotsRead,
+			PermissionTunnelsRead,
+		}
+	case "service-account", "service":
+		return []string{
+			PermissionSandboxRead,
+			PermissionSandboxLifecycle,
+			PermissionExecRun,
+			PermissionTTYAttach,
+			PermissionFilesRead,
+			PermissionFilesWrite,
+			PermissionSnapshotsRead,
+			PermissionSnapshotsWrite,
+			PermissionTunnelsRead,
+			PermissionTunnelsWrite,
+			PermissionAdminInspect,
 		}
 	default:
-		return &staticAuthenticator{store: store}
+		return nil
 	}
 }
 
-func (a *staticAuthenticator) Authenticate(ctx context.Context, token string) (Identity, model.Tenant, model.TenantQuota, error) {
-	tenant, quota, err := a.store.AuthenticateTenant(ctx, config.HashToken(token))
-	if err != nil {
-		return Identity{}, model.Tenant{}, model.TenantQuota{}, err
-	}
-	return Identity{
-		Subject:    tenant.ID,
-		TenantID:   tenant.ID,
-		Roles:      []string{"admin"},
-		AuthMethod: "static",
-	}, tenant, quota, nil
-}
-
-func (a *jwtAuthenticator) Authenticate(ctx context.Context, token string) (Identity, model.Tenant, model.TenantQuota, error) {
-	if a.loadErr != nil {
-		return Identity{}, model.Tenant{}, model.TenantQuota{}, a.loadErr
-	}
-	var err error
-	secrets := a.secrets
-	if len(secrets) == 0 {
-		return Identity{}, model.Tenant{}, model.TenantQuota{}, fmt.Errorf("no jwt secrets loaded")
-	}
-	var claims jwtClaims
-	var parseErr error
-	for _, secret := range secrets {
-		claims = jwtClaims{}
-		_, parseErr = jwt.ParseWithClaims(token, &claims, func(parsed *jwt.Token) (any, error) {
-			if parsed.Method.Alg() != jwt.SigningMethodHS256.Alg() {
-				return nil, fmt.Errorf("unexpected signing method %s", parsed.Method.Alg())
-			}
-			return []byte(secret), nil
-		}, jwt.WithIssuer(a.issuer), jwt.WithAudience(a.audience))
-		if parseErr == nil {
-			break
+func containsPermission(granted []string, permission string) bool {
+	for _, value := range granted {
+		if strings.EqualFold(strings.TrimSpace(value), permission) {
+			return true
 		}
 	}
-	if parseErr != nil {
-		return Identity{}, model.Tenant{}, model.TenantQuota{}, parseErr
-	}
-	if strings.TrimSpace(claims.TenantID) == "" {
-		return Identity{}, model.Tenant{}, model.TenantQuota{}, fmt.Errorf("jwt claim tenant_id is required")
-	}
-	if claims.RegisteredClaims.Subject == "" {
-		claims.RegisteredClaims.Subject = claims.TenantID
-	}
-	roles := append([]string(nil), claims.Roles...)
-	if claims.Service && len(roles) == 0 {
-		roles = []string{"service"}
-	}
-	tenant := model.Tenant{ID: claims.TenantID, Name: claims.TenantID}
-	quota, err := a.store.GetQuota(ctx, claims.TenantID)
-	if errors.Is(err, repository.ErrNotFound) {
-		if err := a.store.EnsureTenantQuota(ctx, tenant, a.defaultQuota, config.HashToken("jwt:"+claims.TenantID)); err != nil {
-			return Identity{}, model.Tenant{}, model.TenantQuota{}, err
-		}
-		quota, err = a.store.GetQuota(ctx, claims.TenantID)
-	}
-	if err != nil {
-		return Identity{}, model.Tenant{}, model.TenantQuota{}, err
-	}
-	return Identity{
-		Subject:    claims.RegisteredClaims.Subject,
-		TenantID:   claims.TenantID,
-		Roles:      roles,
-		IsService:  claims.Service,
-		AuthMethod: "jwt-hs256",
-	}, tenant, quota, nil
-}
-
-func loadSecretValues(paths []string) ([]string, error) {
-	values := make([]string, 0, len(paths))
-	for _, path := range paths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, err
-		}
-		secret := strings.TrimSpace(string(data))
-		if secret == "" {
-			return nil, fmt.Errorf("secret file %s is empty", path)
-		}
-		values = append(values, secret)
-	}
-	if len(values) == 0 {
-		return nil, fmt.Errorf("no jwt secrets loaded")
-	}
-	return values, nil
+	return false
 }
 ````
 
@@ -3588,6 +3829,194 @@ WORKDIR /workspace
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["sleep", "infinity"]
+````
+
+## File: internal/auth/authenticator.go
+````go
+package auth
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	jwt "github.com/golang-jwt/jwt/v5"
+
+	"or3-sandbox/internal/config"
+	"or3-sandbox/internal/model"
+	"or3-sandbox/internal/repository"
+)
+
+type Authenticator interface {
+	Authenticate(ctx context.Context, token string) (Identity, model.Tenant, model.TenantQuota, error)
+}
+
+type staticAuthenticator struct {
+	store *repository.Store
+}
+
+type jwtAuthenticator struct {
+	store        *repository.Store
+	issuer       string
+	audience     string
+	secrets      []string
+	loadErr      error
+	defaultQuota model.TenantQuota
+}
+
+type jwtClaims struct {
+	TenantID         string   `json:"tenant_id"`
+	Roles            []string `json:"roles"`
+	ServiceAccountID string   `json:"service_account_id,omitempty"`
+	Scope            []string `json:"scope,omitempty"`
+	Service          bool     `json:"service"`
+	jwt.RegisteredClaims
+}
+
+func newAuthenticator(store *repository.Store, cfg config.Config) Authenticator {
+	switch cfg.AuthMode {
+	case "jwt-hs256":
+		secrets, err := loadSecretValues(cfg.AuthJWTSecretPaths)
+		return &jwtAuthenticator{
+			store:        store,
+			issuer:       cfg.AuthJWTIssuer,
+			audience:     cfg.AuthJWTAudience,
+			secrets:      secrets,
+			loadErr:      err,
+			defaultQuota: cfg.DefaultQuota,
+		}
+	default:
+		return &staticAuthenticator{store: store}
+	}
+}
+
+func (a *staticAuthenticator) Authenticate(ctx context.Context, token string) (Identity, model.Tenant, model.TenantQuota, error) {
+	tenant, quota, err := a.store.AuthenticateTenant(ctx, config.HashToken(token))
+	if err != nil {
+		return Identity{}, model.Tenant{}, model.TenantQuota{}, err
+	}
+	return Identity{
+		Subject:    tenant.ID,
+		TenantID:   tenant.ID,
+		Roles:      []string{"operator"},
+		AuthMethod: "static",
+	}, tenant, quota, nil
+}
+
+func (a *jwtAuthenticator) Authenticate(ctx context.Context, token string) (Identity, model.Tenant, model.TenantQuota, error) {
+	if a.loadErr != nil {
+		return Identity{}, model.Tenant{}, model.TenantQuota{}, a.loadErr
+	}
+	var err error
+	secrets := a.secrets
+	if len(secrets) == 0 {
+		return Identity{}, model.Tenant{}, model.TenantQuota{}, fmt.Errorf("no jwt secrets loaded")
+	}
+	var claims jwtClaims
+	var parseErr error
+	for _, secret := range secrets {
+		claims = jwtClaims{}
+		_, parseErr = jwt.ParseWithClaims(token, &claims, func(parsed *jwt.Token) (any, error) {
+			if parsed.Method.Alg() != jwt.SigningMethodHS256.Alg() {
+				return nil, fmt.Errorf("unexpected signing method %s", parsed.Method.Alg())
+			}
+			return []byte(secret), nil
+		}, jwt.WithIssuer(a.issuer), jwt.WithAudience(a.audience))
+		if parseErr == nil {
+			break
+		}
+	}
+	if parseErr != nil {
+		return Identity{}, model.Tenant{}, model.TenantQuota{}, parseErr
+	}
+	if strings.TrimSpace(claims.TenantID) == "" {
+		return Identity{}, model.Tenant{}, model.TenantQuota{}, fmt.Errorf("jwt claim tenant_id is required")
+	}
+	if claims.RegisteredClaims.Subject == "" {
+		claims.RegisteredClaims.Subject = claims.TenantID
+	}
+	roles := append([]string(nil), claims.Roles...)
+	if (claims.Service || claims.ServiceAccountID != "") && len(roles) == 0 {
+		roles = []string{"service-account"}
+	}
+	tenant := model.Tenant{ID: claims.TenantID, Name: claims.TenantID}
+	quota, err := a.store.GetQuota(ctx, claims.TenantID)
+	if errors.Is(err, repository.ErrNotFound) {
+		if err := a.store.EnsureTenantQuota(ctx, tenant, a.defaultQuota, config.HashToken("jwt:"+claims.TenantID)); err != nil {
+			return Identity{}, model.Tenant{}, model.TenantQuota{}, err
+		}
+		quota, err = a.store.GetQuota(ctx, claims.TenantID)
+	}
+	if err != nil {
+		return Identity{}, model.Tenant{}, model.TenantQuota{}, err
+	}
+	scope := append([]string(nil), claims.Scope...)
+	serviceAccountID := strings.TrimSpace(claims.ServiceAccountID)
+	if serviceAccountID != "" {
+		account, err := a.store.GetServiceAccount(ctx, serviceAccountID)
+		if err != nil {
+			return Identity{}, model.Tenant{}, model.TenantQuota{}, err
+		}
+		if account.TenantID != claims.TenantID {
+			return Identity{}, model.Tenant{}, model.TenantQuota{}, fmt.Errorf("service account tenant mismatch")
+		}
+		if account.Disabled || account.RevokedAt != nil {
+			return Identity{}, model.Tenant{}, model.TenantQuota{}, fmt.Errorf("service account revoked")
+		}
+		if account.ExpiresAt != nil && time.Now().UTC().After(account.ExpiresAt.UTC()) {
+			return Identity{}, model.Tenant{}, model.TenantQuota{}, fmt.Errorf("service account expired")
+		}
+		if len(scope) == 0 {
+			scope = append(scope, account.Scopes...)
+		} else if !scopesSubset(scope, account.Scopes) {
+			return Identity{}, model.Tenant{}, model.TenantQuota{}, fmt.Errorf("service account scope exceeds registered scope")
+		}
+	}
+	return Identity{
+		Subject:          claims.RegisteredClaims.Subject,
+		TenantID:         claims.TenantID,
+		Roles:            roles,
+		Scopes:           scope,
+		ServiceAccountID: serviceAccountID,
+		IsService:        claims.Service || serviceAccountID != "",
+		AuthMethod:       "jwt-hs256",
+	}, tenant, quota, nil
+}
+
+func loadSecretValues(paths []string) ([]string, error) {
+	values := make([]string, 0, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		secret := strings.TrimSpace(string(data))
+		if secret == "" {
+			return nil, fmt.Errorf("secret file %s is empty", path)
+		}
+		values = append(values, secret)
+	}
+	if len(values) == 0 {
+		return nil, fmt.Errorf("no jwt secrets loaded")
+	}
+	return values, nil
+}
+
+func scopesSubset(requested, allowed []string) bool {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, value := range allowed {
+		allowedSet[strings.TrimSpace(value)] = struct{}{}
+	}
+	for _, value := range requested {
+		if _, ok := allowedSet[strings.TrimSpace(value)]; !ok {
+			return false
+		}
+	}
+	return true
+}
 ````
 
 ## File: internal/guestimage/contract.go
@@ -6075,465 +6504,6 @@ func (b *limitedBuffer) String() string {
 }
 ````
 
-## File: cmd/sandboxctl/doctor.go
-````go
-package main
-
-import (
-	"encoding/json"
-	"errors"
-	"flag"
-	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	goruntime "runtime"
-	"sort"
-	"strings"
-	"syscall"
-	"time"
-
-	"or3-sandbox/internal/config"
-	"or3-sandbox/internal/guestimage"
-	"or3-sandbox/internal/model"
-)
-
-var (
-	doctorConfigLoader = config.Load
-	doctorHostOS       = goruntime.GOOS
-	doctorLookPath     = exec.LookPath
-	doctorStat         = os.Stat
-	doctorReadFile     = os.ReadFile
-	doctorStatFS       = statDoctorFS
-)
-
-const (
-	doctorWarnFreeBytes = 5 << 30
-	doctorFailFreeBytes = 1 << 30
-)
-
-type doctorFSInfo struct {
-	AvailableBytes uint64
-}
-
-type doctorCheck struct {
-	Level  string `json:"level"`
-	Name   string `json:"name"`
-	Detail string `json:"detail"`
-}
-
-type doctorSummary struct {
-	Mode      string        `json:"mode"`
-	CheckedAt time.Time     `json:"checked_at"`
-	Checks    []doctorCheck `json:"checks"`
-}
-
-func runDoctor(args []string) error {
-	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	productionQEMU := fs.Bool("production-qemu", false, "validate the production QEMU host and image profile posture")
-	jsonOutput := fs.Bool("json", false, "print doctor results as JSON")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if !*productionQEMU {
-		return errors.New("usage: sandboxctl doctor --production-qemu [--json]")
-	}
-	summary := runProductionQEMUDoctor()
-	if *jsonOutput {
-		encoder := json.NewEncoder(os.Stdout)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(summary)
-	}
-	blocking := 0
-	warnings := 0
-	for _, check := range summary.Checks {
-		switch check.Level {
-		case "fail":
-			blocking++
-		case "warn":
-			warnings++
-		}
-		fmt.Fprintf(os.Stdout, "[%s] %s: %s\n", strings.ToUpper(check.Level), check.Name, check.Detail)
-	}
-	fmt.Fprintf(os.Stdout, "summary: %d blocking, %d warnings\n", blocking, warnings)
-	if blocking > 0 {
-		return fmt.Errorf("production qemu doctor found blocking failures")
-	}
-	return nil
-}
-
-func runProductionQEMUDoctor() doctorSummary {
-	summary := doctorSummary{Mode: "production-qemu", CheckedAt: time.Now().UTC()}
-	add := func(level, name, detail string) {
-		summary.Checks = append(summary.Checks, doctorCheck{Level: level, Name: name, Detail: detail})
-	}
-	cfg, err := doctorConfigLoader(nil)
-	if err != nil {
-		add("fail", "config", err.Error())
-		cfg = doctorConfigFromEnv()
-	}
-	reportRuntimeSelections(add, cfg)
-	if cfg.RuntimeBackend != "qemu" {
-		add("fail", "runtime", "SANDBOX_RUNTIME must be qemu for production-qemu validation")
-	} else {
-		add("pass", "runtime", "runtime backend is qemu")
-	}
-	runtimeClass := model.BackendToRuntimeClass(cfg.RuntimeBackend)
-	if !runtimeClass.IsVMBacked() {
-		add("fail", "runtime-class", fmt.Sprintf("runtime backend %q resolves to class %q which is not VM-backed; production requires a VM-backed class", cfg.RuntimeBackend, runtimeClass))
-	} else {
-		add("pass", "runtime-class", fmt.Sprintf("runtime backend %q resolves to VM-backed class %q", cfg.RuntimeBackend, runtimeClass))
-	}
-	if cfg.AuthMode != "jwt-hs256" {
-		add("fail", "auth", "production qemu requires SANDBOX_AUTH_MODE=jwt-hs256")
-	} else {
-		add("pass", "auth", "jwt auth is enabled")
-	}
-	if doctorHostOS != "linux" {
-		add("fail", "host-os", fmt.Sprintf("host OS %s is not the supported hostile-production target; production-qemu requires Linux with KVM", doctorHostOS))
-	} else {
-		add("pass", "host-os", "linux host detected")
-	}
-	reportDockerDoctor(add, cfg)
-	reportKataDoctor(add, cfg)
-	reportQEMUDoctor(add, cfg)
-	if doctorHostOS == "linux" {
-		if _, err := doctorStat("/dev/kvm"); err != nil {
-			add("fail", "kvm", "/dev/kvm is not available")
-		} else {
-			add("pass", "kvm", "/dev/kvm is available")
-		}
-		checkDoctorCgroupPosture(add)
-	}
-	for _, root := range []string{cfg.StorageRoot, cfg.SnapshotRoot, filepath.Dir(cfg.DatabasePath)} {
-		if root == "" {
-			continue
-		}
-		info, err := doctorStat(root)
-		if err != nil {
-			add("fail", "path", fmt.Sprintf("required path %q is not accessible: %v", root, err))
-			continue
-		}
-		if !info.IsDir() {
-			add("fail", "path", fmt.Sprintf("required path %q is not a directory", root))
-			continue
-		}
-		add("pass", "path", fmt.Sprintf("path %q is accessible", root))
-	}
-	for _, target := range []struct {
-		name string
-		path string
-	}{
-		{name: "database", path: filepath.Dir(cfg.DatabasePath)},
-		{name: "storage", path: cfg.StorageRoot},
-		{name: "snapshot", path: cfg.SnapshotRoot},
-	} {
-		checkDoctorFreeSpace(add, target.name, target.path)
-	}
-	for _, secret := range cfg.AuthJWTSecretPaths {
-		if info, err := doctorStat(secret); err != nil {
-			add("fail", "secret", fmt.Sprintf("jwt secret %q is not readable: %v", secret, err))
-		} else if info.Mode().Perm()&0o077 != 0 {
-			add("warn", "secret", fmt.Sprintf("jwt secret %q permissions are broader than 0600", secret))
-		} else {
-			add("pass", "secret", fmt.Sprintf("jwt secret %q is readable with restrictive permissions", secret))
-		}
-	}
-	checkDoctorTunnelSigningKey(add, cfg)
-	for _, root := range []struct {
-		name string
-		path string
-	}{
-		{name: "storage-root", path: cfg.StorageRoot},
-		{name: "snapshot-root", path: cfg.SnapshotRoot},
-		{name: "database-root", path: filepath.Dir(cfg.DatabasePath)},
-	} {
-		checkDoctorDirectoryPosture(add, root.name, root.path)
-	}
-	allowed := cfg.EffectiveQEMUAllowedBaseImagePaths()
-	sort.Strings(allowed)
-	if len(allowed) == 0 {
-		add("fail", "images", "no approved qemu guest images are configured")
-	}
-	for _, imagePath := range allowed {
-		if _, err := doctorStat(imagePath); err != nil {
-			add("fail", "image", fmt.Sprintf("guest image %q is not readable: %v", imagePath, err))
-			continue
-		}
-		contract, err := guestimage.Load(imagePath)
-		if err != nil {
-			add("fail", "image-contract", err.Error())
-			continue
-		}
-		if err := guestimage.Validate(imagePath, contract); err != nil {
-			add("fail", "image-contract", err.Error())
-			continue
-		}
-		if contract.Control.Mode == model.GuestControlModeSSHCompat && !cfg.QEMUAllowSSHCompat {
-			add("fail", "image-policy", fmt.Sprintf("image %q is ssh-compat and blocked without SANDBOX_QEMU_ALLOW_SSH_COMPAT=true", imagePath))
-			continue
-		}
-		if contract.Profile == model.GuestProfileDebug && !cfg.QEMUAllowDangerousProfiles {
-			add("fail", "image-policy", fmt.Sprintf("image %q uses debug profile and is production-ineligible by default policy", imagePath))
-			continue
-		}
-		if cfg.IsDangerousQEMUProfile(contract.Profile) && !cfg.QEMUAllowDangerousProfiles {
-			add("warn", "image-policy", fmt.Sprintf("image %q uses dangerous profile %q and is blocked until explicitly allowed", imagePath, contract.Profile))
-		}
-		add("pass", "image-contract", fmt.Sprintf("image %q profile=%s control=%s protocol=%s", imagePath, contract.Profile, contract.Control.Mode, contract.Control.ProtocolVersion))
-	}
-	return summary
-}
-
-func reportRuntimeSelections(add func(string, string, string), cfg config.Config) {
-	if cfg.DefaultRuntimeSelection == "" {
-		add("fail", "runtime-selection", "default runtime selection is not configured")
-	} else {
-		add("pass", "runtime-selection", fmt.Sprintf("default runtime selection is %q", cfg.DefaultRuntimeSelection))
-	}
-	if len(cfg.EnabledRuntimeSelections) == 0 {
-		add("fail", "runtime-selection", "no enabled runtime selections are configured")
-		return
-	}
-	enabled := make([]string, 0, len(cfg.EnabledRuntimeSelections))
-	for _, selection := range cfg.EnabledRuntimeSelections {
-		enabled = append(enabled, string(selection))
-	}
-	sort.Strings(enabled)
-	add("pass", "runtime-selection", "enabled runtime selections: "+strings.Join(enabled, ", "))
-}
-
-func reportDockerDoctor(add func(string, string, string), cfg config.Config) {
-	if !cfg.IsRuntimeSelectionEnabled(model.RuntimeSelectionDockerDev) {
-		return
-	}
-	if !cfg.TrustedDockerRuntime {
-		add("fail", "docker", "docker-dev is enabled but SANDBOX_TRUSTED_DOCKER_RUNTIME=true is required")
-		return
-	}
-	if _, err := doctorLookPath("docker"); err != nil {
-		add("fail", "docker", "docker CLI is not available")
-		return
-	}
-	add("pass", "docker", "docker-dev prerequisites are present")
-}
-
-func reportKataDoctor(add func(string, string, string), cfg config.Config) {
-	if !cfg.IsRuntimeSelectionEnabled(model.RuntimeSelectionContainerdKataProfessional) {
-		return
-	}
-	if doctorHostOS != "linux" {
-		add("fail", "kata", fmt.Sprintf("host OS %s is not supported for containerd+Kata", doctorHostOS))
-		return
-	}
-	if strings.TrimSpace(cfg.KataBinary) == "" {
-		add("fail", "kata", "SANDBOX_KATA_BINARY must be set")
-		return
-	}
-	if _, err := doctorLookPath(cfg.KataBinary); err != nil {
-		add("fail", "kata", fmt.Sprintf("kata client binary %q is not available", cfg.KataBinary))
-		return
-	}
-	if strings.TrimSpace(cfg.KataRuntimeClass) == "" {
-		add("fail", "kata", "SANDBOX_KATA_RUNTIME_CLASS must be set")
-		return
-	}
-	if strings.TrimSpace(cfg.KataContainerdSocket) == "" {
-		add("fail", "kata", "SANDBOX_KATA_CONTAINERD_SOCKET must be set")
-		return
-	}
-	if _, err := doctorStat(cfg.KataContainerdSocket); err != nil {
-		add("fail", "kata", fmt.Sprintf("containerd socket %q is not accessible: %v", cfg.KataContainerdSocket, err))
-		return
-	}
-	add("pass", "kata", fmt.Sprintf("kata runtime class %q and containerd socket %q are configured", cfg.KataRuntimeClass, cfg.KataContainerdSocket))
-}
-
-func reportQEMUDoctor(add func(string, string, string), cfg config.Config) {
-	if !cfg.IsRuntimeSelectionEnabled(model.RuntimeSelectionQEMUProfessional) {
-		return
-	}
-	for _, command := range []string{cfg.QEMUBinary, "qemu-img"} {
-		if strings.TrimSpace(command) == "" {
-			add("fail", "command", "SANDBOX_QEMU_BINARY must be set for production-qemu validation")
-			continue
-		}
-		if _, err := doctorLookPath(command); err != nil {
-			add("fail", "command", fmt.Sprintf("required command %q is not available", command))
-		} else {
-			add("pass", "command", fmt.Sprintf("found %q", command))
-		}
-	}
-}
-
-func doctorConfigFromEnv() config.Config {
-	return config.Config{
-		RuntimeBackend:             env("SANDBOX_RUNTIME", ""),
-		AuthMode:                   env("SANDBOX_AUTH_MODE", ""),
-		AuthJWTSecretPaths:         splitCommaSeparated(env("SANDBOX_AUTH_JWT_SECRET_PATHS", "")),
-		DatabasePath:               env("SANDBOX_DB_PATH", ""),
-		StorageRoot:                env("SANDBOX_STORAGE_ROOT", ""),
-		SnapshotRoot:               env("SANDBOX_SNAPSHOT_ROOT", ""),
-		TunnelSigningKey:           env("SANDBOX_TUNNEL_SIGNING_KEY", ""),
-		TunnelSigningKeyPath:       env("SANDBOX_TUNNEL_SIGNING_KEY_PATH", ""),
-		QEMUBinary:                 env("SANDBOX_QEMU_BINARY", ""),
-		QEMUBaseImagePath:          env("SANDBOX_QEMU_BASE_IMAGE_PATH", ""),
-		QEMUAllowedBaseImagePaths:  splitCommaSeparated(env("SANDBOX_QEMU_ALLOWED_BASE_IMAGE_PATHS", "")),
-		QEMUDangerousProfiles:      parseDoctorGuestProfiles(env("SANDBOX_QEMU_DANGEROUS_PROFILES", "container,debug")),
-		QEMUAllowDangerousProfiles: strings.EqualFold(env("SANDBOX_QEMU_ALLOW_DANGEROUS_PROFILES", "false"), "true"),
-		QEMUAllowSSHCompat:         strings.EqualFold(env("SANDBOX_QEMU_ALLOW_SSH_COMPAT", "false"), "true"),
-	}
-}
-
-func statDoctorFS(path string) (doctorFSInfo, error) {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(path, &stat); err != nil {
-		return doctorFSInfo{}, err
-	}
-	return doctorFSInfo{AvailableBytes: stat.Bavail * uint64(stat.Bsize)}, nil
-}
-
-func checkDoctorFreeSpace(add func(string, string, string), name, path string) {
-	if strings.TrimSpace(path) == "" {
-		return
-	}
-	info, err := doctorStatFS(path)
-	if err != nil {
-		add("warn", "free-space", fmt.Sprintf("%s filesystem %q could not be measured: %v", name, path, err))
-		return
-	}
-	switch {
-	case info.AvailableBytes < doctorFailFreeBytes:
-		add("fail", "free-space", fmt.Sprintf("%s filesystem %q has only %s free; keep at least %s free for supported production operation", name, path, humanBytes(info.AvailableBytes), humanBytes(doctorFailFreeBytes)))
-	case info.AvailableBytes < doctorWarnFreeBytes:
-		add("warn", "free-space", fmt.Sprintf("%s filesystem %q has %s free; production operators should keep at least %s free", name, path, humanBytes(info.AvailableBytes), humanBytes(doctorWarnFreeBytes)))
-	default:
-		add("pass", "free-space", fmt.Sprintf("%s filesystem %q has %s free", name, path, humanBytes(info.AvailableBytes)))
-	}
-}
-
-func checkDoctorTunnelSigningKey(add func(string, string, string), cfg config.Config) {
-	switch {
-	case strings.TrimSpace(cfg.TunnelSigningKeyPath) != "":
-		info, err := doctorStat(cfg.TunnelSigningKeyPath)
-		if err != nil {
-			add("fail", "tunnel-signing-key", fmt.Sprintf("tunnel signing key path %q is not readable: %v", cfg.TunnelSigningKeyPath, err))
-			return
-		}
-		if info.Mode().Perm()&0o077 != 0 {
-			add("warn", "tunnel-signing-key", fmt.Sprintf("tunnel signing key %q permissions are broader than 0600", cfg.TunnelSigningKeyPath))
-		} else {
-			add("pass", "tunnel-signing-key", fmt.Sprintf("tunnel signing key %q is readable with restrictive permissions", cfg.TunnelSigningKeyPath))
-		}
-		checkDoctorDirectoryPosture(add, "tunnel-signing-key-parent", filepath.Dir(cfg.TunnelSigningKeyPath))
-	case strings.TrimSpace(cfg.TunnelSigningKey) != "":
-		add("warn", "tunnel-signing-key", "inline tunnel signing key is configured; prefer SANDBOX_TUNNEL_SIGNING_KEY_PATH for read-only production posture")
-	default:
-		add("warn", "tunnel-signing-key", "no tunnel signing key is configured; signed tunnel URLs and browser bootstrap cookies will not survive process restarts")
-	}
-}
-
-func checkDoctorDirectoryPosture(add func(string, string, string), name, path string) {
-	if strings.TrimSpace(path) == "" {
-		return
-	}
-	info, err := doctorStat(path)
-	if err != nil {
-		add("warn", "path-posture", fmt.Sprintf("%s %q is not accessible for posture checks: %v", name, path, err))
-		return
-	}
-	if !info.IsDir() {
-		add("warn", "path-posture", fmt.Sprintf("%s %q is not a directory", name, path))
-		return
-	}
-	if info.Mode().Perm()&0o022 != 0 {
-		add("warn", "path-posture", fmt.Sprintf("%s %q is group/world writable; tighten parent-directory permissions", name, path))
-		return
-	}
-	add("pass", "path-posture", fmt.Sprintf("%s %q is not group/world writable", name, path))
-}
-
-func checkDoctorCgroupPosture(add func(string, string, string)) {
-	root := "/sys/fs/cgroup"
-	if _, err := doctorStat(root); err != nil {
-		add("warn", "cgroup", fmt.Sprintf("%s is not accessible: %v", root, err))
-		return
-	}
-	data, err := doctorReadFile(filepath.Join(root, "cgroup.controllers"))
-	if err != nil {
-		add("warn", "cgroup", fmt.Sprintf("cgroup v2 controller list is not readable: %v", err))
-		return
-	}
-	controllers := strings.Fields(string(data))
-	if len(controllers) == 0 {
-		add("warn", "cgroup", "cgroup v2 controller list is empty")
-		return
-	}
-	required := []string{"cpu", "memory", "pids"}
-	missing := make([]string, 0, len(required))
-	for _, controller := range required {
-		if !containsString(controllers, controller) {
-			missing = append(missing, controller)
-		}
-	}
-	if len(missing) > 0 {
-		add("warn", "cgroup", fmt.Sprintf("cgroup v2 is present but missing controllers: %s", strings.Join(missing, ", ")))
-		return
-	}
-	add("pass", "cgroup", fmt.Sprintf("cgroup v2 controllers available: %s", strings.Join(required, ", ")))
-}
-
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if strings.EqualFold(strings.TrimSpace(value), target) {
-			return true
-		}
-	}
-	return false
-}
-
-func humanBytes(value uint64) string {
-	const unit = 1024
-	if value < unit {
-		return fmt.Sprintf("%d B", value)
-	}
-	div, exp := uint64(unit), 0
-	for n := value / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(value)/float64(div), "KMGTPE"[exp])
-}
-
-func splitCommaSeparated(raw string) []string {
-	if strings.TrimSpace(raw) == "" {
-		return nil
-	}
-	parts := strings.Split(raw, ",")
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		result = append(result, part)
-	}
-	return result
-}
-
-func parseDoctorGuestProfiles(raw string) []model.GuestProfile {
-	values := splitCommaSeparated(raw)
-	profiles := make([]model.GuestProfile, 0, len(values))
-	for _, value := range values {
-		profile := model.GuestProfile(strings.ToLower(strings.TrimSpace(value)))
-		if profile.IsValid() {
-			profiles = append(profiles, profile)
-		}
-	}
-	return profiles
-}
-````
-
 ## File: images/guest/build-base-image.sh
 ````bash
 #!/usr/bin/env bash
@@ -7697,6 +7667,496 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+````
+
+## File: cmd/sandboxctl/doctor.go
+````go
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	goruntime "runtime"
+	"sort"
+	"strings"
+	"syscall"
+	"time"
+
+	"or3-sandbox/internal/config"
+	"or3-sandbox/internal/guestimage"
+	"or3-sandbox/internal/model"
+)
+
+var (
+	doctorConfigLoader = config.Load
+	doctorHostOS       = goruntime.GOOS
+	doctorLookPath     = exec.LookPath
+	doctorStat         = os.Stat
+	doctorReadFile     = os.ReadFile
+	doctorStatFS       = statDoctorFS
+)
+
+const (
+	doctorWarnFreeBytes = 5 << 30
+	doctorFailFreeBytes = 1 << 30
+)
+
+type doctorFSInfo struct {
+	AvailableBytes uint64
+}
+
+type doctorCheck struct {
+	Level  string `json:"level"`
+	Name   string `json:"name"`
+	Detail string `json:"detail"`
+}
+
+type doctorSummary struct {
+	Mode      string        `json:"mode"`
+	CheckedAt time.Time     `json:"checked_at"`
+	Checks    []doctorCheck `json:"checks"`
+}
+
+func runDoctor(args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	productionQEMU := fs.Bool("production-qemu", false, "validate the production QEMU host and image profile posture")
+	jsonOutput := fs.Bool("json", false, "print doctor results as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if !*productionQEMU {
+		return errors.New("usage: sandboxctl doctor --production-qemu [--json]")
+	}
+	summary := runProductionQEMUDoctor()
+	if *jsonOutput {
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(summary)
+	}
+	blocking := 0
+	warnings := 0
+	for _, check := range summary.Checks {
+		switch check.Level {
+		case "fail":
+			blocking++
+		case "warn":
+			warnings++
+		}
+		fmt.Fprintf(os.Stdout, "[%s] %s: %s\n", strings.ToUpper(check.Level), check.Name, check.Detail)
+	}
+	fmt.Fprintf(os.Stdout, "summary: %d blocking, %d warnings\n", blocking, warnings)
+	if blocking > 0 {
+		return fmt.Errorf("production qemu doctor found blocking failures")
+	}
+	return nil
+}
+
+func runProductionQEMUDoctor() doctorSummary {
+	summary := doctorSummary{Mode: "production-qemu", CheckedAt: time.Now().UTC()}
+	add := func(level, name, detail string) {
+		summary.Checks = append(summary.Checks, doctorCheck{Level: level, Name: name, Detail: detail})
+	}
+	cfg, err := doctorConfigLoader(nil)
+	if err != nil {
+		add("fail", "config", err.Error())
+		cfg = doctorConfigFromEnv()
+	}
+	reportRuntimeSelections(add, cfg)
+	if cfg.RuntimeBackend != "qemu" {
+		add("fail", "runtime", "SANDBOX_RUNTIME must be qemu for production-qemu validation")
+	} else {
+		add("pass", "runtime", "runtime backend is qemu")
+	}
+	runtimeClass := model.BackendToRuntimeClass(cfg.RuntimeBackend)
+	if !runtimeClass.IsVMBacked() {
+		add("fail", "runtime-class", fmt.Sprintf("runtime backend %q resolves to class %q which is not VM-backed; production requires a VM-backed class", cfg.RuntimeBackend, runtimeClass))
+	} else {
+		add("pass", "runtime-class", fmt.Sprintf("runtime backend %q resolves to VM-backed class %q", cfg.RuntimeBackend, runtimeClass))
+	}
+	if cfg.AuthMode != "jwt-hs256" {
+		add("fail", "auth", "production qemu requires SANDBOX_AUTH_MODE=jwt-hs256")
+	} else {
+		add("pass", "auth", "jwt auth is enabled")
+	}
+	switch cfg.ProductionTransportMode {
+	case "", "auto":
+		if cfg.TLSCertPath != "" && cfg.TLSKeyPath != "" {
+			add("pass", "transport", "direct TLS material is configured")
+		} else if cfg.TrustedProxyHeaders && strings.HasPrefix(strings.ToLower(cfg.OperatorHost), "https://") {
+			add("pass", "transport", "trusted terminated-proxy transport is configured")
+		} else {
+			add("fail", "transport", "production transport requires direct TLS material or trusted terminated-proxy posture")
+		}
+	case "direct-tls":
+		if cfg.TLSCertPath == "" || cfg.TLSKeyPath == "" {
+			add("fail", "transport", "production direct-tls mode requires SANDBOX_TLS_CERT_PATH and SANDBOX_TLS_KEY_PATH")
+		} else {
+			add("pass", "transport", "production direct-tls mode is configured")
+		}
+	case "terminated-proxy":
+		if !cfg.TrustedProxyHeaders || !strings.HasPrefix(strings.ToLower(cfg.OperatorHost), "https://") {
+			add("fail", "transport", "production terminated-proxy mode requires SANDBOX_TRUST_PROXY_HEADERS=true and an https operator host")
+		} else {
+			add("pass", "transport", "production terminated-proxy mode is configured")
+		}
+	default:
+		add("fail", "transport", fmt.Sprintf("unsupported production transport mode %q", cfg.ProductionTransportMode))
+	}
+	if doctorHostOS != "linux" {
+		add("fail", "host-os", fmt.Sprintf("host OS %s is not the supported hostile-production target; production-qemu requires Linux with KVM", doctorHostOS))
+	} else {
+		add("pass", "host-os", "linux host detected")
+	}
+	reportDockerDoctor(add, cfg)
+	reportKataDoctor(add, cfg)
+	reportQEMUDoctor(add, cfg)
+	if doctorHostOS == "linux" {
+		if _, err := doctorStat("/dev/kvm"); err != nil {
+			add("fail", "kvm", "/dev/kvm is not available")
+		} else {
+			add("pass", "kvm", "/dev/kvm is available")
+		}
+		checkDoctorCgroupPosture(add)
+	}
+	for _, root := range []string{cfg.StorageRoot, cfg.SnapshotRoot, filepath.Dir(cfg.DatabasePath)} {
+		if root == "" {
+			continue
+		}
+		info, err := doctorStat(root)
+		if err != nil {
+			add("fail", "path", fmt.Sprintf("required path %q is not accessible: %v", root, err))
+			continue
+		}
+		if !info.IsDir() {
+			add("fail", "path", fmt.Sprintf("required path %q is not a directory", root))
+			continue
+		}
+		add("pass", "path", fmt.Sprintf("path %q is accessible", root))
+	}
+	for _, target := range []struct {
+		name string
+		path string
+	}{
+		{name: "database", path: filepath.Dir(cfg.DatabasePath)},
+		{name: "storage", path: cfg.StorageRoot},
+		{name: "snapshot", path: cfg.SnapshotRoot},
+	} {
+		checkDoctorFreeSpace(add, target.name, target.path)
+	}
+	for _, secret := range cfg.AuthJWTSecretPaths {
+		if info, err := doctorStat(secret); err != nil {
+			add("fail", "secret", fmt.Sprintf("jwt secret %q is not readable: %v", secret, err))
+		} else if info.Mode().Perm()&0o077 != 0 {
+			add("warn", "secret", fmt.Sprintf("jwt secret %q permissions are broader than 0600", secret))
+		} else {
+			add("pass", "secret", fmt.Sprintf("jwt secret %q is readable with restrictive permissions", secret))
+		}
+	}
+	checkDoctorTunnelSigningKey(add, cfg)
+	for _, root := range []struct {
+		name string
+		path string
+	}{
+		{name: "storage-root", path: cfg.StorageRoot},
+		{name: "snapshot-root", path: cfg.SnapshotRoot},
+		{name: "database-root", path: filepath.Dir(cfg.DatabasePath)},
+	} {
+		checkDoctorDirectoryPosture(add, root.name, root.path)
+	}
+	allowed := cfg.EffectiveQEMUAllowedBaseImagePaths()
+	sort.Strings(allowed)
+	if len(allowed) == 0 {
+		add("fail", "images", "no approved qemu guest images are configured")
+	}
+	for _, imagePath := range allowed {
+		if _, err := doctorStat(imagePath); err != nil {
+			add("fail", "image", fmt.Sprintf("guest image %q is not readable: %v", imagePath, err))
+			continue
+		}
+		contract, err := guestimage.Load(imagePath)
+		if err != nil {
+			add("fail", "image-contract", err.Error())
+			continue
+		}
+		if err := guestimage.Validate(imagePath, contract); err != nil {
+			add("fail", "image-contract", err.Error())
+			continue
+		}
+		if contract.Control.Mode == model.GuestControlModeSSHCompat && !cfg.QEMUAllowSSHCompat {
+			add("fail", "image-policy", fmt.Sprintf("image %q is ssh-compat and blocked without SANDBOX_QEMU_ALLOW_SSH_COMPAT=true", imagePath))
+			continue
+		}
+		if contract.Profile == model.GuestProfileDebug && !cfg.QEMUAllowDangerousProfiles {
+			add("fail", "image-policy", fmt.Sprintf("image %q uses debug profile and is production-ineligible by default policy", imagePath))
+			continue
+		}
+		if cfg.IsDangerousQEMUProfile(contract.Profile) && !cfg.QEMUAllowDangerousProfiles {
+			add("warn", "image-policy", fmt.Sprintf("image %q uses dangerous profile %q and is blocked until explicitly allowed", imagePath, contract.Profile))
+		}
+		add("pass", "image-contract", fmt.Sprintf("image %q profile=%s control=%s protocol=%s", imagePath, contract.Profile, contract.Control.Mode, contract.Control.ProtocolVersion))
+	}
+	return summary
+}
+
+func reportRuntimeSelections(add func(string, string, string), cfg config.Config) {
+	if cfg.DefaultRuntimeSelection == "" {
+		add("fail", "runtime-selection", "default runtime selection is not configured")
+	} else {
+		add("pass", "runtime-selection", fmt.Sprintf("default runtime selection is %q", cfg.DefaultRuntimeSelection))
+	}
+	if len(cfg.EnabledRuntimeSelections) == 0 {
+		add("fail", "runtime-selection", "no enabled runtime selections are configured")
+		return
+	}
+	enabled := make([]string, 0, len(cfg.EnabledRuntimeSelections))
+	for _, selection := range cfg.EnabledRuntimeSelections {
+		enabled = append(enabled, string(selection))
+	}
+	sort.Strings(enabled)
+	add("pass", "runtime-selection", "enabled runtime selections: "+strings.Join(enabled, ", "))
+}
+
+func reportDockerDoctor(add func(string, string, string), cfg config.Config) {
+	if !cfg.IsRuntimeSelectionEnabled(model.RuntimeSelectionDockerDev) {
+		return
+	}
+	if !cfg.TrustedDockerRuntime {
+		add("fail", "docker", "docker-dev is enabled but SANDBOX_TRUSTED_DOCKER_RUNTIME=true is required")
+		return
+	}
+	if _, err := doctorLookPath("docker"); err != nil {
+		add("fail", "docker", "docker CLI is not available")
+		return
+	}
+	add("pass", "docker", "docker-dev prerequisites are present")
+}
+
+func reportKataDoctor(add func(string, string, string), cfg config.Config) {
+	if !cfg.IsRuntimeSelectionEnabled(model.RuntimeSelectionContainerdKataProfessional) {
+		return
+	}
+	if doctorHostOS != "linux" {
+		add("fail", "kata", fmt.Sprintf("host OS %s is not supported for containerd+Kata", doctorHostOS))
+		return
+	}
+	if strings.TrimSpace(cfg.KataBinary) == "" {
+		add("fail", "kata", "SANDBOX_KATA_BINARY must be set")
+		return
+	}
+	if _, err := doctorLookPath(cfg.KataBinary); err != nil {
+		add("fail", "kata", fmt.Sprintf("kata client binary %q is not available", cfg.KataBinary))
+		return
+	}
+	if strings.TrimSpace(cfg.KataRuntimeClass) == "" {
+		add("fail", "kata", "SANDBOX_KATA_RUNTIME_CLASS must be set")
+		return
+	}
+	if strings.TrimSpace(cfg.KataContainerdSocket) == "" {
+		add("fail", "kata", "SANDBOX_KATA_CONTAINERD_SOCKET must be set")
+		return
+	}
+	if _, err := doctorStat(cfg.KataContainerdSocket); err != nil {
+		add("fail", "kata", fmt.Sprintf("containerd socket %q is not accessible: %v", cfg.KataContainerdSocket, err))
+		return
+	}
+	add("pass", "kata", fmt.Sprintf("kata runtime class %q and containerd socket %q are configured", cfg.KataRuntimeClass, cfg.KataContainerdSocket))
+}
+
+func reportQEMUDoctor(add func(string, string, string), cfg config.Config) {
+	if !cfg.IsRuntimeSelectionEnabled(model.RuntimeSelectionQEMUProfessional) {
+		return
+	}
+	for _, command := range []string{cfg.QEMUBinary, "qemu-img"} {
+		if strings.TrimSpace(command) == "" {
+			add("fail", "command", "SANDBOX_QEMU_BINARY must be set for production-qemu validation")
+			continue
+		}
+		if _, err := doctorLookPath(command); err != nil {
+			add("fail", "command", fmt.Sprintf("required command %q is not available", command))
+		} else {
+			add("pass", "command", fmt.Sprintf("found %q", command))
+		}
+	}
+}
+
+func doctorConfigFromEnv() config.Config {
+	return config.Config{
+		RuntimeBackend:             env("SANDBOX_RUNTIME", ""),
+		DeploymentMode:             env("SANDBOX_MODE", ""),
+		DeploymentProfile:          env("SANDBOX_DEPLOYMENT_PROFILE", ""),
+		ProductionTransportMode:    env("SANDBOX_PRODUCTION_TRANSPORT", ""),
+		TLSCertPath:                env("SANDBOX_TLS_CERT_PATH", ""),
+		TLSKeyPath:                 env("SANDBOX_TLS_KEY_PATH", ""),
+		TrustedProxyHeaders:        strings.EqualFold(env("SANDBOX_TRUST_PROXY_HEADERS", "false"), "true"),
+		OperatorHost:               env("SANDBOX_OPERATOR_HOST", ""),
+		AuthMode:                   env("SANDBOX_AUTH_MODE", ""),
+		AuthJWTSecretPaths:         splitCommaSeparated(env("SANDBOX_AUTH_JWT_SECRET_PATHS", "")),
+		DatabasePath:               env("SANDBOX_DB_PATH", ""),
+		StorageRoot:                env("SANDBOX_STORAGE_ROOT", ""),
+		SnapshotRoot:               env("SANDBOX_SNAPSHOT_ROOT", ""),
+		TunnelSigningKey:           env("SANDBOX_TUNNEL_SIGNING_KEY", ""),
+		TunnelSigningKeyPath:       env("SANDBOX_TUNNEL_SIGNING_KEY_PATH", ""),
+		QEMUBinary:                 env("SANDBOX_QEMU_BINARY", ""),
+		QEMUBaseImagePath:          env("SANDBOX_QEMU_BASE_IMAGE_PATH", ""),
+		QEMUAllowedBaseImagePaths:  splitCommaSeparated(env("SANDBOX_QEMU_ALLOWED_BASE_IMAGE_PATHS", "")),
+		QEMUDangerousProfiles:      parseDoctorGuestProfiles(env("SANDBOX_QEMU_DANGEROUS_PROFILES", "container,debug")),
+		QEMUAllowDangerousProfiles: strings.EqualFold(env("SANDBOX_QEMU_ALLOW_DANGEROUS_PROFILES", "false"), "true"),
+		QEMUAllowSSHCompat:         strings.EqualFold(env("SANDBOX_QEMU_ALLOW_SSH_COMPAT", "false"), "true"),
+	}
+}
+
+func statDoctorFS(path string) (doctorFSInfo, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return doctorFSInfo{}, err
+	}
+	return doctorFSInfo{AvailableBytes: stat.Bavail * uint64(stat.Bsize)}, nil
+}
+
+func checkDoctorFreeSpace(add func(string, string, string), name, path string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	info, err := doctorStatFS(path)
+	if err != nil {
+		add("warn", "free-space", fmt.Sprintf("%s filesystem %q could not be measured: %v", name, path, err))
+		return
+	}
+	switch {
+	case info.AvailableBytes < doctorFailFreeBytes:
+		add("fail", "free-space", fmt.Sprintf("%s filesystem %q has only %s free; keep at least %s free for supported production operation", name, path, humanBytes(info.AvailableBytes), humanBytes(doctorFailFreeBytes)))
+	case info.AvailableBytes < doctorWarnFreeBytes:
+		add("warn", "free-space", fmt.Sprintf("%s filesystem %q has %s free; production operators should keep at least %s free", name, path, humanBytes(info.AvailableBytes), humanBytes(doctorWarnFreeBytes)))
+	default:
+		add("pass", "free-space", fmt.Sprintf("%s filesystem %q has %s free", name, path, humanBytes(info.AvailableBytes)))
+	}
+}
+
+func checkDoctorTunnelSigningKey(add func(string, string, string), cfg config.Config) {
+	switch {
+	case strings.TrimSpace(cfg.TunnelSigningKeyPath) != "":
+		info, err := doctorStat(cfg.TunnelSigningKeyPath)
+		if err != nil {
+			add("fail", "tunnel-signing-key", fmt.Sprintf("tunnel signing key path %q is not readable: %v", cfg.TunnelSigningKeyPath, err))
+			return
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			add("warn", "tunnel-signing-key", fmt.Sprintf("tunnel signing key %q permissions are broader than 0600", cfg.TunnelSigningKeyPath))
+		} else {
+			add("pass", "tunnel-signing-key", fmt.Sprintf("tunnel signing key %q is readable with restrictive permissions", cfg.TunnelSigningKeyPath))
+		}
+		checkDoctorDirectoryPosture(add, "tunnel-signing-key-parent", filepath.Dir(cfg.TunnelSigningKeyPath))
+	case strings.TrimSpace(cfg.TunnelSigningKey) != "":
+		add("warn", "tunnel-signing-key", "inline tunnel signing key is configured; prefer SANDBOX_TUNNEL_SIGNING_KEY_PATH for read-only production posture")
+	default:
+		add("warn", "tunnel-signing-key", "no tunnel signing key is configured; signed tunnel URLs and browser bootstrap cookies will not survive process restarts")
+	}
+}
+
+func checkDoctorDirectoryPosture(add func(string, string, string), name, path string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	info, err := doctorStat(path)
+	if err != nil {
+		add("warn", "path-posture", fmt.Sprintf("%s %q is not accessible for posture checks: %v", name, path, err))
+		return
+	}
+	if !info.IsDir() {
+		add("warn", "path-posture", fmt.Sprintf("%s %q is not a directory", name, path))
+		return
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		add("warn", "path-posture", fmt.Sprintf("%s %q is group/world writable; tighten parent-directory permissions", name, path))
+		return
+	}
+	add("pass", "path-posture", fmt.Sprintf("%s %q is not group/world writable", name, path))
+}
+
+func checkDoctorCgroupPosture(add func(string, string, string)) {
+	root := "/sys/fs/cgroup"
+	if _, err := doctorStat(root); err != nil {
+		add("warn", "cgroup", fmt.Sprintf("%s is not accessible: %v", root, err))
+		return
+	}
+	data, err := doctorReadFile(filepath.Join(root, "cgroup.controllers"))
+	if err != nil {
+		add("warn", "cgroup", fmt.Sprintf("cgroup v2 controller list is not readable: %v", err))
+		return
+	}
+	controllers := strings.Fields(string(data))
+	if len(controllers) == 0 {
+		add("warn", "cgroup", "cgroup v2 controller list is empty")
+		return
+	}
+	required := []string{"cpu", "memory", "pids"}
+	missing := make([]string, 0, len(required))
+	for _, controller := range required {
+		if !containsString(controllers, controller) {
+			missing = append(missing, controller)
+		}
+	}
+	if len(missing) > 0 {
+		add("warn", "cgroup", fmt.Sprintf("cgroup v2 is present but missing controllers: %s", strings.Join(missing, ", ")))
+		return
+	}
+	add("pass", "cgroup", fmt.Sprintf("cgroup v2 controllers available: %s", strings.Join(required, ", ")))
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), target) {
+			return true
+		}
+	}
+	return false
+}
+
+func humanBytes(value uint64) string {
+	const unit = 1024
+	if value < unit {
+		return fmt.Sprintf("%d B", value)
+	}
+	div, exp := uint64(unit), 0
+	for n := value / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(value)/float64(div), "KMGTPE"[exp])
+}
+
+func splitCommaSeparated(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		result = append(result, part)
+	}
+	return result
+}
+
+func parseDoctorGuestProfiles(raw string) []model.GuestProfile {
+	values := splitCommaSeparated(raw)
+	profiles := make([]model.GuestProfile, 0, len(values))
+	for _, value := range values {
+		profile := model.GuestProfile(strings.ToLower(strings.TrimSpace(value)))
+		if profile.IsValid() {
+			profiles = append(profiles, profile)
+		}
+	}
+	return profiles
+}
 ````
 
 ## File: internal/auth/middleware.go
@@ -10685,6 +11145,14 @@ func (s *Service) MetricsReport(ctx context.Context, tenantID string) (string, e
 	if err != nil {
 		return "", err
 	}
+	promotedImages, err := s.store.ListPromotedGuestImages(ctx)
+	if err != nil {
+		return "", err
+	}
+	releaseEvidence, err := s.store.ListReleaseEvidence(ctx, "")
+	if err != nil {
+		return "", err
+	}
 	var lines []string
 	lines = append(lines,
 		"# TYPE or3_sandbox_sandboxes_total gauge",
@@ -10702,7 +11170,11 @@ func (s *Service) MetricsReport(ctx context.Context, tenantID string) (string, e
 		fmt.Sprintf("or3_sandbox_node_running_cpu_millis %d", report.NodePressure.RunningCPUMillis),
 		fmt.Sprintf("or3_sandbox_node_running_memory_mb %d", report.NodePressure.RunningMemoryMB),
 		fmt.Sprintf("or3_sandbox_runtime_healthy %d", boolMetric(health.Healthy)),
+		fmt.Sprintf("or3_sandbox_promoted_guest_images_total %d", len(promotedImages)),
 	)
+	if len(releaseEvidence) > 0 {
+		lines = append(lines, fmt.Sprintf("or3_sandbox_release_gate_freshness_seconds %d", int(time.Since(releaseEvidence[0].StartedAt).Seconds())))
+	}
 	if report.NodePressure.FreeStorageBytes >= 0 {
 		lines = append(lines, fmt.Sprintf("or3_sandbox_node_free_storage_bytes %d", report.NodePressure.FreeStorageBytes))
 	}
@@ -10739,6 +11211,9 @@ func (s *Service) MetricsReport(ctx context.Context, tenantID string) (string, e
 			}
 			if action == "tunnel.create" || action == "tunnel.revoke" {
 				lines = append(lines, fmt.Sprintf("or3_sandbox_tunnel_events_total{action=%q,outcome=%q} %d", action, outcome, count))
+			}
+			if action == "policy.profile.override" {
+				lines = append(lines, fmt.Sprintf("or3_sandbox_dangerous_profile_exceptions_total{outcome=%q} %d", outcome, count))
 			}
 			if strings.HasPrefix(action, "sandbox.") && outcome == "error" {
 				lines = append(lines, fmt.Sprintf("or3_sandbox_lifecycle_failures_total{action=%q} %d", action, count))
@@ -10854,140 +11329,6 @@ func sortedExecutionStatuses(values map[model.ExecutionStatus]int) []model.Execu
 }
 ````
 
-## File: README.md
-````markdown
-# or3-sandbox
-
-Single-node sandbox control plane for durable tenant environments.
-
-Current status:
-
-- shipped today: trusted Docker-backed control plane for development or internal trusted use
-- shipped today: guest-backed `qemu` runtime for the intended higher-isolation path, with real host validation still required before calling a deployment production-ready
-
-Runtime rule of thumb:
-
-- use `docker` when cost and density matter more than isolation and the workload is trusted
-- use `qemu` when isolation strength matters more than density and you have validated the guest image, suspend/resume behavior, and recovery drills on your hosts
-
-The current Docker backend is not the hostile multi-tenant production boundary described by the architecture docs.
-
-The repository ships:
-
-- `sandboxd`: Go HTTP daemon with SQLite metadata, static-token or JWT tenancy, quotas, lifecycle orchestration, file APIs, exec streaming, PTY attach, tunnels, snapshots, and restart reconciliation
-- `sandboxctl`: CLI for lifecycle, exec, TTY, file transfer, and tunnel management
-- Docker-backed runtime implementation for durable per-sandbox environments with isolated networks and persistent workspace mounts in trusted or development mode
-- QEMU-backed runtime implementation with booting, suspended, degraded, and failed guest visibility, plus opt-in host-prepared guest verification
-- integration tests that exercise the main control-plane flows, with opt-in host-prepared QEMU verification for the real guest path
-
-See also:
-
-- `planning/whats_left.md`
-- `planning/tasks2.md`
-- `planning/onwards/requirements.md`
-- `planning/onwards/design.md`
-- `planning/onwards/tasks.md`
-- `planning/onwards/status_matrix.md`
-- `docs/README.md`
-- `docs/operations/README.md`
-
-## Documentation
-
-For a beginner-friendly walkthrough of the project, see:
-
-- `docs/README.md`
-- `docs/setup.md`
-- `docs/usage.md`
-- `docs/tutorials/first-sandbox.md`
-
-## Quick Start
-
-Requirements for the shipped trusted Docker path:
-
-- Go 1.26+
-- Docker
-
-Run the daemon:
-
-```bash
-go run ./cmd/sandboxd \
-  -listen :8080 \
-  -db ./data/sandbox.db \
-  -storage-root ./data/storage \
-  -snapshot-root ./data/snapshots
-```
-
-Use the CLI:
-
-```bash
-export SANDBOX_API=http://127.0.0.1:8080
-export SANDBOX_TOKEN=dev-token
-
-go run ./cmd/sandboxctl create --image alpine:3.20 --start
-go run ./cmd/sandboxctl list
-go run ./cmd/sandboxctl exec <sandbox-id> sh -lc 'echo hello > /workspace/hello.txt && cat /workspace/hello.txt'
-go run ./cmd/sandboxctl tty <sandbox-id>
-```
-
-## Default Auth
-
-Development mode seeds bearer tokens from `SANDBOX_TOKENS`.
-
-Default:
-
-- token: `dev-token`
-- tenant: `tenant-dev`
-
-Format:
-
-```text
-SANDBOX_TOKENS=token-a=tenant-a,token-b=tenant-b
-```
-
-For production mode, use JWT auth instead:
-
-```bash
-export SANDBOX_MODE=production
-export SANDBOX_AUTH_MODE=jwt-hs256
-export SANDBOX_AUTH_JWT_ISSUER=https://issuer.example
-export SANDBOX_AUTH_JWT_AUDIENCE=sandbox-api
-export SANDBOX_AUTH_JWT_SECRET_PATHS=/run/secrets/or3-jwt-hmac
-export SANDBOX_TUNNEL_SIGNING_KEY_PATH=/run/secrets/or3-tunnel-signing-key
-```
-
-For browser-facing tunnel flows behind rolling restarts or multiple replicas, configure a shared tunnel signing secret so signed URLs and bootstrap cookies validate consistently across instances.
-
-## Runtime Notes
-
-- Each sandbox maps to a durable Docker container with a persistent `/workspace` mount.
-- `internet-enabled` sandboxes receive a dedicated Docker bridge network.
-- `internet-disabled` sandboxes run with Docker `--network none`.
-- Tunnels are explicit daemon-managed proxy endpoints; containers do not publish host ports directly.
-- Snapshots combine a committed container image with a workspace tarball.
-- The daemon requires `SANDBOX_TRUSTED_DOCKER_RUNTIME=true` when `SANDBOX_RUNTIME=docker` because Docker is treated as a shared-kernel trusted mode, not a production hostile multi-tenant boundary.
-- Policy guardrails can restrict allowed base images, public tunnels, maximum sandbox lifetime, and idle time.
-- `GET /v1/runtime/capacity` and `GET /metrics` expose production-oriented capacity and pressure views for operators.
-- Use `sandboxctl inspect <sandbox-id>` or `sandboxctl runtime-health` to confirm whether a sandbox is running on `docker` or `qemu`.
-
-## Production Roadmap Notes
-
-The active next-step design work is focused on:
-
-- enterprise identity, authorization, TLS, and policy hardening around the shipped `qemu` production boundary
-- stronger workload verification, failure drills, and operator runbooks
-- resource enforcement, observability, and backup or recovery confidence for production deployments
-
-## Tests
-
-```bash
-./scripts/production-smoke.sh
-```
-
-For host-prepared QEMU verification, backup or restore procedures, and incident drills, use the operator docs under `docs/operations/`.
-
-Production-facing deployment language should be gated on the smoke path above plus the documented drills in `docs/operations/verification.md`.
-````
-
 ## File: cmd/sandboxctl/main.go
 ````go
 package main
@@ -11028,6 +11369,8 @@ func main() {
 	switch os.Args[1] {
 	case "doctor":
 		err = runDoctor(os.Args[2:])
+	case "config-lint":
+		err = runConfigLint(os.Args[2:])
 	case "create":
 		err = runCreate(client, os.Args[2:])
 	case "list":
@@ -11070,6 +11413,10 @@ func main() {
 		err = runSnapshotRestore(client, os.Args[2:])
 	case "preset":
 		err = runPreset(client, os.Args[2:])
+	case "image":
+		err = runImage(os.Args[2:])
+	case "release-gate":
+		err = runReleaseGate(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -11509,7 +11856,7 @@ func printJSON(value any) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: sandboxctl <doctor|create|list|inspect|start|stop|suspend|resume|delete|exec|tty|upload|download|mkdir|tunnel-create|tunnel-list|tunnel-revoke|quota|runtime-health|snapshot-create|snapshot-list|snapshot-inspect|snapshot-restore|preset>")
+	fmt.Fprintln(os.Stderr, "usage: sandboxctl <doctor|config-lint|create|list|inspect|start|stop|suspend|resume|delete|exec|tty|upload|download|mkdir|tunnel-create|tunnel-list|tunnel-revoke|quota|runtime-health|snapshot-create|snapshot-list|snapshot-inspect|snapshot-restore|preset|image|release-gate>")
 }
 
 func env(key, fallback string) string {
@@ -11517,210 +11864,6 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
-}
-````
-
-## File: internal/service/policy.go
-````go
-package service
-
-import (
-	"context"
-	"fmt"
-	"strings"
-	"time"
-
-	"or3-sandbox/internal/auth"
-	"or3-sandbox/internal/model"
-)
-
-func (s *Service) enforceCreatePolicy(ctx context.Context, tenantID string, req model.CreateSandboxRequest) error {
-	selection := s.resolveRuntimeSelection(req)
-	if !s.cfg.IsRuntimeSelectionEnabled(selection) {
-		message := fmt.Sprintf("runtime selection %q is not enabled", selection)
-		s.recordAudit(ctx, tenantID, "", "policy.create", string(selection), "denied", message)
-		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
-	}
-	if !s.runtimeImageAllowed(selection.Backend(), req.BaseImageRef) {
-		message := fmt.Sprintf("image %q is not allowed by policy", req.BaseImageRef)
-		s.recordAudit(ctx, tenantID, "", "policy.create", req.BaseImageRef, "denied", message)
-		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
-	}
-	if err := s.enforceGuestProfilePolicy(ctx, tenantID, "", selection.Backend(), req.Profile, "policy.create"); err != nil {
-		return err
-	}
-	if selection.Backend() == "docker" {
-		if err := s.enforceDockerCreatePolicy(ctx, tenantID, "", req.Profile, req.Features, req.Capabilities, "policy.create"); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *Service) enforceLifecyclePolicy(ctx context.Context, sandbox model.Sandbox, action string) error {
-	selection := resolvedSandboxRuntimeSelection(sandbox)
-	if !s.cfg.IsRuntimeSelectionEnabled(selection) {
-		message := fmt.Sprintf("runtime selection %q is not enabled", selection)
-		s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.ID, "denied", auditDetail(message, auditKV("runtime_selection", selection)))
-		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
-	}
-	now := time.Now().UTC()
-	if s.cfg.PolicyMaxSandboxLifetime > 0 {
-		age := now.Sub(sandbox.CreatedAt)
-		if age > s.cfg.PolicyMaxSandboxLifetime {
-			message := fmt.Sprintf("sandbox lifetime %s exceeds policy limit %s", age.Round(time.Second), s.cfg.PolicyMaxSandboxLifetime)
-			s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.ID, "denied", message)
-			return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
-		}
-	}
-	if s.cfg.PolicyMaxIdleTimeout > 0 && !sandbox.LastActiveAt.IsZero() {
-		idle := now.Sub(sandbox.LastActiveAt)
-		if idle > s.cfg.PolicyMaxIdleTimeout {
-			message := fmt.Sprintf("sandbox idle time %s exceeds policy limit %s", idle.Round(time.Second), s.cfg.PolicyMaxIdleTimeout)
-			s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.ID, "denied", message)
-			return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
-		}
-	}
-	if !s.runtimeImageAllowed(selection.Backend(), sandbox.BaseImageRef) {
-		message := fmt.Sprintf("sandbox image %q is no longer allowed by policy", sandbox.BaseImageRef)
-		s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.BaseImageRef, "denied", message)
-		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
-	}
-	if selection.Backend() == "docker" {
-		if err := s.enforceDockerCreatePolicy(ctx, sandbox.TenantID, sandbox.ID, sandbox.Profile, sandbox.Features, sandbox.Capabilities, "policy."+action); err != nil {
-			return err
-		}
-	}
-	if err := s.enforceGuestProfilePolicy(ctx, sandbox.TenantID, sandbox.ID, selection.Backend(), sandbox.Profile, "policy."+action); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (s *Service) enforceGuestProfilePolicy(ctx context.Context, tenantID, sandboxID, runtimeBackend string, profile model.GuestProfile, action string) error {
-	if profile == "" {
-		return nil
-	}
-	if !s.cfg.IsAllowedGuestProfile(runtimeBackend, profile) {
-		message := fmt.Sprintf("sandbox profile %q is not allowed by policy", profile)
-		s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, auditKV("runtime", runtimeBackend)))
-		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
-	}
-	if s.cfg.IsDangerousGuestProfile(runtimeBackend, profile) && !s.cfg.AllowsDangerousGuestProfiles(runtimeBackend) {
-		message := fmt.Sprintf("sandbox profile %q is blocked by dangerous-profile policy until SANDBOX_ALLOW_DANGEROUS_PROFILES=true", profile)
-		s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, auditKV("runtime", runtimeBackend)))
-		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
-	}
-	if s.cfg.IsDangerousGuestProfile(runtimeBackend, profile) && s.cfg.AllowsDangerousGuestProfiles(runtimeBackend) && action == "policy.create" {
-		s.recordAudit(ctx, tenantID, sandboxID, "policy.profile.override", sandboxID, "ok", auditDetail(
-			auditKV("runtime", runtimeBackend),
-			auditKV("profile", profile),
-			auditKV("reason", "dangerous_profile_explicitly_allowed"),
-		))
-	}
-	return nil
-}
-
-func (s *Service) enforceTunnelPolicy(ctx context.Context, sandbox model.Sandbox, req model.CreateTunnelRequest) error {
-	if strings.EqualFold(req.Visibility, "public") && !s.cfg.PolicyAllowPublicTunnels {
-		message := "public tunnels are disabled by policy"
-		s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy.tunnel", sandbox.ID, "denied", message)
-		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
-	}
-	return nil
-}
-
-func (s *Service) enforceAdminInspectionPolicy(ctx context.Context, tenantID, action string) error {
-	if s.cfg.DeploymentMode == "production" && !s.cfg.DefaultRuntimeSelection.IsVMBacked() {
-		message := "admin inspection requires a VM-backed runtime class in production mode"
-		s.recordAudit(ctx, tenantID, "", "policy."+action, action, "denied", message)
-		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
-	}
-	return nil
-}
-
-func (s *Service) imageAllowed(imageRef string) bool {
-	if len(s.cfg.PolicyAllowedImages) == 0 {
-		return true
-	}
-	for _, allowed := range s.cfg.PolicyAllowedImages {
-		allowed = strings.TrimSpace(allowed)
-		if allowed == "" {
-			continue
-		}
-		if strings.HasSuffix(allowed, "*") {
-			if strings.HasPrefix(imageRef, strings.TrimSuffix(allowed, "*")) {
-				return true
-			}
-			continue
-		}
-		if imageRef == allowed {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Service) runtimeImageAllowed(runtimeBackend, imageRef string) bool {
-	if runtimeBackend == "qemu" {
-		normalized := s.normalizeQEMUBaseImageRef(imageRef)
-		for _, allowed := range s.cfg.EffectiveQEMUAllowedBaseImagePaths() {
-			if normalized == allowed {
-				return true
-			}
-		}
-		return false
-	}
-	return s.imageAllowed(imageRef)
-}
-
-var deniedDockerFeatures = map[string]string{
-	"docker.host-ipc":            "host IPC sharing is blocked by policy",
-	"docker.host-network":        "host network sharing is blocked by policy",
-	"docker.host-pid":            "host PID namespace sharing is blocked by policy",
-	"docker.mount-docker-socket": "mounting the Docker socket is blocked by policy",
-	"docker.privileged":          "privileged Docker mode is blocked by policy",
-}
-
-func (s *Service) enforceDockerCreatePolicy(ctx context.Context, tenantID, sandboxID string, profile model.GuestProfile, features, capabilities []string, action string) error {
-	features = model.NormalizeFeatures(features)
-	capabilities = model.NormalizeCapabilities(capabilities)
-	if profile != "" && s.cfg.IsDangerousGuestProfile("docker", profile) && !s.cfg.AllowsDangerousGuestProfiles("docker") {
-		message := fmt.Sprintf("docker profile %q is blocked by dangerous-profile policy", profile)
-		s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, dockerOverrideAuditDetail(features, capabilities)))
-		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
-	}
-	for _, feature := range features {
-		if message, ok := deniedDockerFeatures[feature]; ok {
-			s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, dockerOverrideAuditDetail(features, capabilities)))
-			return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
-		}
-	}
-	dangerous := false
-	for _, capability := range capabilities {
-		switch {
-		case capability == "docker.elevated-user":
-			dangerous = true
-		case strings.HasPrefix(capability, "docker.extra-cap:"):
-			dangerous = true
-		default:
-			message := fmt.Sprintf("docker capability %q is not supported", capability)
-			s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, dockerOverrideAuditDetail(features, capabilities)))
-			return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
-		}
-	}
-	if dangerous && !s.cfg.DockerAllowDangerousOverrides {
-		message := "dangerous Docker capability overrides are blocked until SANDBOX_DOCKER_ALLOW_DANGEROUS_OVERRIDES=true"
-		s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, dockerOverrideAuditDetail(features, capabilities)))
-		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
-	}
-	if dangerous && action == "policy.create" {
-		s.recordAudit(ctx, tenantID, sandboxID, "policy.create.override", sandboxID, "ok", auditDetail(
-			"dangerous Docker override explicitly allowed",
-			dockerOverrideAuditDetail(features, capabilities),
-		))
-	}
-	return nil
 }
 ````
 
@@ -11739,7 +11882,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 func Open(ctx context.Context, path string) (*sql.DB, error) {
 	dsn, err := sqliteDSN(path)
@@ -11876,9 +12019,55 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			control_protocol_version TEXT NOT NULL DEFAULT '',
 			workspace_contract_version TEXT NOT NULL DEFAULT '',
 			workspace_tar TEXT NOT NULL,
+			bundle_sha256 TEXT NOT NULL DEFAULT '',
 			export_location TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL,
 			completed_at TEXT
+		);`,
+		`CREATE TABLE IF NOT EXISTS service_accounts (
+			service_account_id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			scope_json TEXT NOT NULL DEFAULT '[]',
+			disabled INTEGER NOT NULL DEFAULT 0,
+			expires_at TEXT,
+			created_at TEXT NOT NULL,
+			revoked_at TEXT
+		);`,
+		`CREATE TABLE IF NOT EXISTS promoted_guest_images (
+			image_ref TEXT PRIMARY KEY,
+			image_sha256 TEXT NOT NULL,
+			profile TEXT NOT NULL,
+			control_mode TEXT NOT NULL,
+			control_protocol_version TEXT NOT NULL,
+			contract_version TEXT NOT NULL,
+			provenance_json TEXT NOT NULL DEFAULT '',
+			verification_status TEXT NOT NULL,
+			promotion_status TEXT NOT NULL,
+			promoted_at TEXT,
+			promoted_by TEXT NOT NULL DEFAULT ''
+		);`,
+		`CREATE TABLE IF NOT EXISTS release_evidence (
+			evidence_id TEXT PRIMARY KEY,
+			gate_name TEXT NOT NULL,
+			host_fingerprint TEXT NOT NULL,
+			runtime_selection TEXT NOT NULL DEFAULT '',
+			image_ref TEXT NOT NULL DEFAULT '',
+			profile TEXT NOT NULL DEFAULT '',
+			outcome TEXT NOT NULL,
+			artifact_path TEXT NOT NULL DEFAULT '',
+			started_at TEXT NOT NULL,
+			completed_at TEXT
+		);`,
+		`CREATE TABLE IF NOT EXISTS tunnel_capabilities (
+			capability_id TEXT PRIMARY KEY,
+			tunnel_id TEXT NOT NULL REFERENCES tunnels(tunnel_id) ON DELETE CASCADE,
+			nonce_hash TEXT NOT NULL,
+			path TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			consumed_at TEXT,
+			revoked_at TEXT,
+			created_at TEXT NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS executions (
 			execution_id TEXT PRIMARY KEY,
@@ -11929,6 +12118,9 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_executions_tenant_status ON executions(tenant_id, status);`,
 		`CREATE INDEX IF NOT EXISTS idx_tunnels_tenant_sandbox_revoked ON tunnels(tenant_id, sandbox_id, revoked_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_snapshots_tenant_status ON snapshots(tenant_id, status);`,
+		`CREATE INDEX IF NOT EXISTS idx_service_accounts_tenant_id ON service_accounts(tenant_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_release_evidence_gate_started ON release_evidence(gate_name, started_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_tunnel_capabilities_tunnel_id ON tunnel_capabilities(tunnel_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_created ON audit_events(tenant_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_action_outcome ON audit_events(tenant_id, action, outcome);`,
 	}
@@ -11985,6 +12177,9 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	if err := ensureColumn(ctx, tx, "snapshots", "workspace_contract_version", `ALTER TABLE snapshots ADD COLUMN workspace_contract_version TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, tx, "snapshots", "bundle_sha256", `ALTER TABLE snapshots ADD COLUMN bundle_sha256 TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
 	if err := ensureColumn(ctx, tx, "sandboxes", "runtime_class", `ALTER TABLE sandboxes ADD COLUMN runtime_class TEXT NOT NULL DEFAULT ''`); err != nil {
@@ -13368,6 +13563,499 @@ func shellQuote(value string) string {
 }
 ````
 
+## File: internal/service/policy.go
+````go
+package service
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"or3-sandbox/internal/auth"
+	"or3-sandbox/internal/guestimage"
+	"or3-sandbox/internal/model"
+	"or3-sandbox/internal/repository"
+)
+
+func (s *Service) enforceCreatePolicy(ctx context.Context, tenantID string, req model.CreateSandboxRequest, contract guestimage.Contract) error {
+	selection := s.resolveRuntimeSelection(req)
+	if !s.cfg.IsRuntimeSelectionEnabled(selection) {
+		message := fmt.Sprintf("runtime selection %q is not enabled", selection)
+		s.recordAudit(ctx, tenantID, "", "policy.create", string(selection), "denied", message)
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	if !s.runtimeImageAllowed(selection.Backend(), req.BaseImageRef) {
+		message := fmt.Sprintf("image %q is not allowed by policy", req.BaseImageRef)
+		s.recordAudit(ctx, tenantID, "", "policy.create", req.BaseImageRef, "denied", message)
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	if err := s.enforceGuestProfilePolicy(ctx, tenantID, "", selection.Backend(), req.Profile, req.DangerousProfileReason, "policy.create"); err != nil {
+		return err
+	}
+	if err := s.enforcePromotedImagePolicy(ctx, tenantID, "", selection, req.BaseImageRef, "policy.create", contract); err != nil {
+		return err
+	}
+	if selection.Backend() == "docker" {
+		if err := s.enforceDockerCreatePolicy(ctx, tenantID, "", req.Profile, req.Features, req.Capabilities, "policy.create"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) enforceLifecyclePolicy(ctx context.Context, sandbox model.Sandbox, action string) error {
+	selection := resolvedSandboxRuntimeSelection(sandbox)
+	if !s.cfg.IsRuntimeSelectionEnabled(selection) {
+		message := fmt.Sprintf("runtime selection %q is not enabled", selection)
+		s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.ID, "denied", auditDetail(message, auditKV("runtime_selection", selection)))
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	now := time.Now().UTC()
+	if s.cfg.PolicyMaxSandboxLifetime > 0 {
+		age := now.Sub(sandbox.CreatedAt)
+		if age > s.cfg.PolicyMaxSandboxLifetime {
+			message := fmt.Sprintf("sandbox lifetime %s exceeds policy limit %s", age.Round(time.Second), s.cfg.PolicyMaxSandboxLifetime)
+			s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.ID, "denied", message)
+			return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+		}
+	}
+	if s.cfg.PolicyMaxIdleTimeout > 0 && !sandbox.LastActiveAt.IsZero() {
+		idle := now.Sub(sandbox.LastActiveAt)
+		if idle > s.cfg.PolicyMaxIdleTimeout {
+			message := fmt.Sprintf("sandbox idle time %s exceeds policy limit %s", idle.Round(time.Second), s.cfg.PolicyMaxIdleTimeout)
+			s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.ID, "denied", message)
+			return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+		}
+	}
+	if !s.runtimeImageAllowed(selection.Backend(), sandbox.BaseImageRef) {
+		message := fmt.Sprintf("sandbox image %q is no longer allowed by policy", sandbox.BaseImageRef)
+		s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy."+action, sandbox.BaseImageRef, "denied", message)
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	if selection.Backend() == "docker" {
+		if err := s.enforceDockerCreatePolicy(ctx, sandbox.TenantID, sandbox.ID, sandbox.Profile, sandbox.Features, sandbox.Capabilities, "policy."+action); err != nil {
+			return err
+		}
+	}
+	if err := s.enforceGuestProfilePolicy(ctx, sandbox.TenantID, sandbox.ID, selection.Backend(), sandbox.Profile, "", "policy."+action); err != nil {
+		return err
+	}
+	if err := s.enforcePromotedImagePolicy(ctx, sandbox.TenantID, sandbox.ID, selection, sandbox.BaseImageRef, "policy."+action, guestimage.Contract{}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) enforceGuestProfilePolicy(ctx context.Context, tenantID, sandboxID, runtimeBackend string, profile model.GuestProfile, reason string, action string) error {
+	if profile == "" {
+		return nil
+	}
+	if !s.cfg.IsAllowedGuestProfile(runtimeBackend, profile) {
+		message := fmt.Sprintf("sandbox profile %q is not allowed by policy", profile)
+		s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, auditKV("runtime", runtimeBackend)))
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	if s.cfg.IsDangerousGuestProfile(runtimeBackend, profile) && !s.cfg.AllowsDangerousGuestProfiles(runtimeBackend) {
+		message := fmt.Sprintf("sandbox profile %q is blocked by dangerous-profile policy until SANDBOX_ALLOW_DANGEROUS_PROFILES=true", profile)
+		s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, auditKV("runtime", runtimeBackend)))
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	if s.cfg.DeploymentMode == "production" && s.cfg.IsDangerousGuestProfile(runtimeBackend, profile) && strings.TrimSpace(reason) == "" && action == "policy.create" {
+		message := fmt.Sprintf("sandbox profile %q requires dangerous_profile_reason for audited exception use", profile)
+		s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, auditKV("runtime", runtimeBackend)))
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	if s.cfg.IsDangerousGuestProfile(runtimeBackend, profile) && s.cfg.AllowsDangerousGuestProfiles(runtimeBackend) && action == "policy.create" {
+		auditReason := strings.TrimSpace(reason)
+		if auditReason == "" {
+			auditReason = "dangerous_profile_explicitly_allowed"
+		}
+		s.recordAudit(ctx, tenantID, sandboxID, "policy.profile.override", sandboxID, "ok", auditDetail(
+			auditKV("runtime", runtimeBackend),
+			auditKV("profile", profile),
+			auditKV("reason", auditReason),
+		))
+	}
+	return nil
+}
+
+func (s *Service) enforcePromotedImagePolicy(ctx context.Context, tenantID, sandboxID string, selection model.RuntimeSelection, imageRef, action string, contract guestimage.Contract) error {
+	if s.cfg.DeploymentMode != "production" || selection.Backend() != "qemu" {
+		return nil
+	}
+	record, err := s.store.GetPromotedGuestImage(ctx, imageRef)
+	if err != nil {
+		if !errors.Is(err, repository.ErrNotFound) {
+			return err
+		}
+		message := fmt.Sprintf("production qemu workloads require a promoted guest image; %q is not promoted", imageRef)
+		s.recordAudit(ctx, tenantID, sandboxID, action, imageRef, "denied", message)
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	if !strings.EqualFold(record.VerificationStatus, "verified") || !strings.EqualFold(record.PromotionStatus, "promoted") {
+		message := fmt.Sprintf("guest image %q is not production-ready (verification=%s promotion=%s)", imageRef, record.VerificationStatus, record.PromotionStatus)
+		s.recordAudit(ctx, tenantID, sandboxID, action, imageRef, "denied", message)
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	if !requiresPromotedImageContractValidation(action) {
+		return nil
+	}
+	if contract.ImageSHA256 == "" {
+		contract, err = guestimage.Load(imageRef)
+		if err != nil {
+			return err
+		}
+		if err := guestimage.Validate(imageRef, contract); err != nil {
+			return err
+		}
+	}
+	if err := promotedImageContractMatchesRecord(contract, record); err != nil {
+		message := fmt.Sprintf("guest image %q no longer matches promoted record: %s", imageRef, err)
+		s.recordAudit(ctx, tenantID, sandboxID, action, imageRef, "denied", message)
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	return nil
+}
+
+func requiresPromotedImageContractValidation(action string) bool {
+	switch action {
+	case "policy.create", "policy.start", "policy.resume", "policy.snapshot.restore":
+		return true
+	default:
+		return false
+	}
+}
+
+func promotedImageContractMatchesRecord(contract guestimage.Contract, record model.PromotedGuestImage) error {
+	if !strings.EqualFold(strings.TrimSpace(contract.ImageSHA256), strings.TrimSpace(record.ImageSHA256)) {
+		return fmt.Errorf("checksum mismatch")
+	}
+	if contract.Profile != record.Profile {
+		return fmt.Errorf("profile mismatch")
+	}
+	if contract.Control.Mode != record.ControlMode {
+		return fmt.Errorf("control mode mismatch")
+	}
+	if contract.Control.ProtocolVersion != record.ControlProtocolVersion {
+		return fmt.Errorf("control protocol version mismatch")
+	}
+	if contract.ContractVersion != record.ContractVersion {
+		return fmt.Errorf("contract version mismatch")
+	}
+	return nil
+}
+
+func (s *Service) enforceTunnelPolicy(ctx context.Context, sandbox model.Sandbox, req model.CreateTunnelRequest) error {
+	if strings.EqualFold(req.Visibility, "public") && !s.cfg.PolicyAllowPublicTunnels {
+		message := "public tunnels are disabled by policy"
+		s.recordAudit(ctx, sandbox.TenantID, sandbox.ID, "policy.tunnel", sandbox.ID, "denied", message)
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	return nil
+}
+
+func (s *Service) enforceAdminInspectionPolicy(ctx context.Context, tenantID, action string) error {
+	if s.cfg.DeploymentMode == "production" && !s.cfg.DefaultRuntimeSelection.IsVMBacked() {
+		message := "admin inspection requires a VM-backed runtime class in production mode"
+		s.recordAudit(ctx, tenantID, "", "policy."+action, action, "denied", message)
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	return nil
+}
+
+func (s *Service) imageAllowed(imageRef string) bool {
+	if len(s.cfg.PolicyAllowedImages) == 0 {
+		return true
+	}
+	for _, allowed := range s.cfg.PolicyAllowedImages {
+		allowed = strings.TrimSpace(allowed)
+		if allowed == "" {
+			continue
+		}
+		if strings.HasSuffix(allowed, "*") {
+			if strings.HasPrefix(imageRef, strings.TrimSuffix(allowed, "*")) {
+				return true
+			}
+			continue
+		}
+		if imageRef == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) runtimeImageAllowed(runtimeBackend, imageRef string) bool {
+	if runtimeBackend == "qemu" {
+		normalized := s.normalizeQEMUBaseImageRef(imageRef)
+		for _, allowed := range s.cfg.EffectiveQEMUAllowedBaseImagePaths() {
+			if normalized == allowed {
+				return true
+			}
+		}
+		return false
+	}
+	return s.imageAllowed(imageRef)
+}
+
+var deniedDockerFeatures = map[string]string{
+	"docker.host-ipc":            "host IPC sharing is blocked by policy",
+	"docker.host-network":        "host network sharing is blocked by policy",
+	"docker.host-pid":            "host PID namespace sharing is blocked by policy",
+	"docker.mount-docker-socket": "mounting the Docker socket is blocked by policy",
+	"docker.privileged":          "privileged Docker mode is blocked by policy",
+}
+
+func (s *Service) enforceDockerCreatePolicy(ctx context.Context, tenantID, sandboxID string, profile model.GuestProfile, features, capabilities []string, action string) error {
+	features = model.NormalizeFeatures(features)
+	capabilities = model.NormalizeCapabilities(capabilities)
+	if profile != "" && s.cfg.IsDangerousGuestProfile("docker", profile) && !s.cfg.AllowsDangerousGuestProfiles("docker") {
+		message := fmt.Sprintf("docker profile %q is blocked by dangerous-profile policy", profile)
+		s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, dockerOverrideAuditDetail(features, capabilities)))
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	for _, feature := range features {
+		if message, ok := deniedDockerFeatures[feature]; ok {
+			s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, dockerOverrideAuditDetail(features, capabilities)))
+			return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+		}
+	}
+	dangerous := false
+	for _, capability := range capabilities {
+		switch {
+		case capability == "docker.elevated-user":
+			dangerous = true
+		case strings.HasPrefix(capability, "docker.extra-cap:"):
+			dangerous = true
+		default:
+			message := fmt.Sprintf("docker capability %q is not supported", capability)
+			s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, dockerOverrideAuditDetail(features, capabilities)))
+			return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+		}
+	}
+	if dangerous && !s.cfg.DockerAllowDangerousOverrides {
+		message := "dangerous Docker capability overrides are blocked until SANDBOX_DOCKER_ALLOW_DANGEROUS_OVERRIDES=true"
+		s.recordAudit(ctx, tenantID, sandboxID, action, sandboxID, "denied", auditDetail(message, dockerOverrideAuditDetail(features, capabilities)))
+		return fmt.Errorf("%w: %s", auth.ErrForbidden, message)
+	}
+	if dangerous && action == "policy.create" {
+		s.recordAudit(ctx, tenantID, sandboxID, "policy.create.override", sandboxID, "ok", auditDetail(
+			"dangerous Docker override explicitly allowed",
+			dockerOverrideAuditDetail(features, capabilities),
+		))
+	}
+	return nil
+}
+````
+
+## File: README.md
+````markdown
+# or3-sandbox
+
+Single-node sandbox control plane for durable tenant environments.
+
+Current status:
+
+- shipped today: trusted Docker-backed control plane for development or internal trusted use
+- shipped today: guest-backed `qemu` runtime for the intended higher-isolation path, with real host validation still required before calling a deployment production-ready
+
+Runtime rule of thumb:
+
+- use `docker` when cost and density matter more than isolation and the workload is trusted
+- use `qemu` when isolation strength matters more than density and you have validated the guest image, suspend/resume behavior, and recovery drills on your hosts
+
+Production default posture:
+
+- set `SANDBOX_DEPLOYMENT_PROFILE=production-qemu-core` for the smallest supported production footprint
+- use `SANDBOX_DEPLOYMENT_PROFILE=production-qemu-browser` only when browser tooling is explicitly required
+- use `SANDBOX_DEPLOYMENT_PROFILE=exception-container` only for time-bounded dangerous-profile exceptions with an audit reason
+
+The current Docker backend is not the hostile multi-tenant production boundary described by the architecture docs.
+
+The repository ships:
+
+- `sandboxd`: Go HTTP daemon with SQLite metadata, static-token or JWT tenancy, quotas, lifecycle orchestration, file APIs, exec streaming, PTY attach, tunnels, snapshots, and restart reconciliation
+- `sandboxctl`: CLI for lifecycle, exec, TTY, file transfer, and tunnel management
+- Docker-backed runtime implementation for durable per-sandbox environments with isolated networks and persistent workspace mounts in trusted or development mode
+- Kata-backed runtime implementation for Linux hosts that have containerd plus Kata Containers available, exposed through the `containerd-kata-professional` runtime selection
+- QEMU-backed runtime implementation with booting, suspended, degraded, and failed guest visibility, plus opt-in host-prepared guest verification
+- integration tests that exercise the main control-plane flows, with opt-in host-prepared QEMU verification for the real guest path
+
+See also:
+
+- `planning/qemu-production-readiness/requirements.md`
+- `planning/qemu-production-readiness/design.md`
+- `planning/qemu-production-readiness/tasks.md`
+- `planning/runtime-proof/requirements.md`
+- `planning/runtime-proof/design.md`
+- `planning/runtime-proof/tasks.md`
+- `docs/README.md`
+- `docs/operations/README.md`
+
+## Documentation
+
+For a beginner-friendly walkthrough of the project, see:
+
+- `docs/README.md`
+- `docs/setup.md`
+- `docs/usage.md`
+- `docs/tutorials/first-sandbox.md`
+- `docs/tutorials/kata-runtime.md`
+
+## Quick Start
+
+Requirements for the shipped trusted Docker path:
+
+- Go 1.26+
+- Docker
+
+Run the daemon:
+
+```bash
+SANDBOX_DEPLOYMENT_PROFILE=dev-trusted-docker \
+go run ./cmd/sandboxd \
+  -listen :8080 \
+  -db ./data/sandbox.db \
+  -storage-root ./data/storage \
+  -snapshot-root ./data/snapshots
+```
+
+Use the CLI:
+
+```bash
+export SANDBOX_API=http://127.0.0.1:8080
+export SANDBOX_TOKEN=dev-token
+
+go run ./cmd/sandboxctl create --image alpine:3.20 --start
+go run ./cmd/sandboxctl list
+go run ./cmd/sandboxctl exec <sandbox-id> sh -lc 'echo hello > /workspace/hello.txt && cat /workspace/hello.txt'
+go run ./cmd/sandboxctl tty <sandbox-id>
+```
+
+Production bootstrap path:
+
+```bash
+export SANDBOX_DEPLOYMENT_PROFILE=production-qemu-core
+export SANDBOX_PRODUCTION_TRANSPORT=terminated-proxy
+export SANDBOX_OPERATOR_HOST=https://sandbox.example.com
+export SANDBOX_TRUST_PROXY_HEADERS=true
+export SANDBOX_AUTH_MODE=jwt-hs256
+export SANDBOX_AUTH_JWT_ISSUER=https://issuer.example
+export SANDBOX_AUTH_JWT_AUDIENCE=sandbox-api
+export SANDBOX_AUTH_JWT_SECRET_PATHS=/run/secrets/or3-jwt-hmac
+export SANDBOX_TUNNEL_SIGNING_KEY_PATH=/run/secrets/or3-tunnel-signing-key
+
+go run ./cmd/sandboxctl config-lint
+go run ./cmd/sandboxctl doctor --production-qemu
+go run ./cmd/sandboxctl image promote --image /var/lib/or3-images/or3-guest-core.qcow2
+go run ./cmd/sandboxctl release-gate
+```
+
+## Default Auth
+
+Development mode seeds bearer tokens from `SANDBOX_TOKENS`.
+
+Default:
+
+- token: `dev-token`
+- tenant: `tenant-dev`
+
+Format:
+
+```text
+SANDBOX_TOKENS=token-a=tenant-a,token-b=tenant-b
+```
+
+For production mode, use JWT auth instead:
+
+```bash
+export SANDBOX_MODE=production
+export SANDBOX_AUTH_MODE=jwt-hs256
+export SANDBOX_AUTH_JWT_ISSUER=https://issuer.example
+export SANDBOX_AUTH_JWT_AUDIENCE=sandbox-api
+export SANDBOX_AUTH_JWT_SECRET_PATHS=/run/secrets/or3-jwt-hmac
+export SANDBOX_TUNNEL_SIGNING_KEY_PATH=/run/secrets/or3-tunnel-signing-key
+```
+
+For browser-facing tunnel flows behind rolling restarts or multiple replicas, configure a shared tunnel signing secret so signed URLs and bootstrap cookies validate consistently across instances.
+
+## Platform Boundary Notes
+
+`sandboxd` is a raw tenant-scoped control-plane API. Its persisted resources and direct API responses may include `tenant_id` because `tenant_id` is the daemon's canonical internal ownership key.
+
+When `sandboxd` sits behind `or3-net`, the boundary contract is:
+
+- `or3-net` maps upstream `workspace_id` context into sandbox tenant auth before calling `sandboxd`
+- `tenant_id` stays internal to the sandbox/provider boundary and must not become a UI-facing identifier
+- browser and app clients should rely on upstream `workspace_id` contracts, not raw `tenant_id` fields from `sandboxd`
+
+Service-account guidance for `or3-net` callers:
+
+- use the smallest stored scope set needed for the workflow: typically `sandbox.read`, `sandbox.lifecycle`, `exec.run`, `files.read`, `files.write`, `tunnels.read`, `tunnels.write`, `snapshots.read`, and `snapshots.write`
+- reserve `admin.inspect` for explicit operator tooling, not routine workspace flows
+- treat service-account credentials and tunnel access tokens as control-plane secrets
+
+Browser launch guidance:
+
+- tunnel create responses may contain `access_token`; treat it as a control-plane capability that must not be relayed to browser clients
+- browser clients should use `POST /v1/tunnels/{id}/signed-url`, which returns a short-lived, path-scoped launch capability and bootstrap cookie flow instead of a reusable admin credential
+
+## Config alignment
+
+- Native sandbox runtime variables remain `SANDBOX_*`; cross-repo deployment tooling should reserve `OR3_SANDBOX_*` and translate those values into the daemon's native env or secret-file inputs before startup.
+- Secret precedence should be launch-time env or mounted secret paths → instance-local config/profile material → checked-in defaults.
+- Shared-key mapping for sandbox auth material and tunnel-signing keys is documented in [../or3-net/planning/platform-standardization/config-alignment.md](../or3-net/planning/platform-standardization/config-alignment.md).
+- Frozen sandbox fixture coverage is enforced via [.github/workflows/contracts.yml](.github/workflows/contracts.yml).
+
+## Runtime Notes
+
+- Each sandbox maps to a durable Docker container with a persistent `/workspace` mount.
+- `internet-enabled` sandboxes receive a dedicated Docker bridge network.
+- `internet-disabled` sandboxes run with Docker `--network none`.
+- Tunnels are explicit daemon-managed proxy endpoints; containers do not publish host ports directly.
+- Snapshots combine a committed container image with a workspace tarball.
+- The daemon requires `SANDBOX_TRUSTED_DOCKER_RUNTIME=true` when `SANDBOX_RUNTIME=docker` because Docker is treated as a shared-kernel trusted mode, not a production hostile multi-tenant boundary.
+- Policy guardrails can restrict allowed base images, public tunnels, maximum sandbox lifetime, and idle time.
+- `GET /v1/runtime/capacity` and `GET /metrics` expose production-oriented capacity and pressure views for operators.
+- Use `sandboxctl inspect <sandbox-id>` or `sandboxctl runtime-health` to confirm whether a sandbox is running on `docker` or `qemu`.
+
+## Production Roadmap Notes
+
+The active next-step design work is focused on:
+
+- enterprise identity, authorization, TLS, and policy hardening around the shipped `qemu` production boundary
+- stronger workload verification, failure drills, and operator runbooks
+- resource enforcement, observability, and backup or recovery confidence for production deployments
+
+## Tests
+
+```bash
+./scripts/production-smoke.sh
+```
+
+Production test matrix:
+
+| Claim | Evidence |
+| --- | --- |
+| Production runtime boundary defaults to VM-backed QEMU | `go test ./internal/config ./internal/service` |
+| Explicit RBAC and service-account scope checks | `go test ./internal/auth` |
+| Runtime info / operator inspection surfaces | `go test ./internal/api -run 'Test(StartAdmissionDenialAppearsInMetrics|RuntimeHealthEndpoint)'` |
+| Promoted image enforcement | `go test ./internal/service -run TestProductionQEMUCreateRequiresPromotedImage` |
+| SQLite migrations for hardening state | `go test ./internal/db ./internal/repository` |
+| Config lint and doctor bootstrap path | `go test ./cmd/sandboxctl -run 'Test(RunConfigLint|RunDoctorRequiresProductionQEMUFlag|ProductionQEMUDoctor.*)'` |
+| Host-gated QEMU posture | `./scripts/qemu-host-verification.sh --profile core --control-mode agent` |
+| Production smoke | `./scripts/qemu-production-smoke.sh` |
+| Abuse-path behavior | `./scripts/qemu-resource-abuse.sh` |
+| Recovery / restore drill | `./scripts/qemu-recovery-drill.sh` |
+
+For host-prepared QEMU verification, backup or restore procedures, and incident drills, use the operator docs under `docs/operations/`.
+
+Production-facing deployment language should be gated on the smoke path above plus the documented drills in `docs/operations/verification.md`.
+````
+
 ## File: cmd/sandboxd/main.go
 ````go
 package main
@@ -13438,7 +14126,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
-		log.Info("daemon listening", "event", "daemon.listen", "addr", cfg.ListenAddress, "default_runtime", cfg.DefaultRuntimeSelection, "enabled_runtimes", cfg.EnabledRuntimeSelections, "runtime_class", string(cfg.RuntimeClass()), "mode", cfg.DeploymentMode, "auth_mode", cfg.AuthMode, "tls_enabled", cfg.TLSCertPath != "", "trusted_proxy", cfg.TrustedProxyHeaders)
+		log.Info("daemon listening", "event", "daemon.listen", "addr", cfg.ListenAddress, "default_runtime", cfg.DefaultRuntimeSelection, "enabled_runtimes", cfg.EnabledRuntimeSelections, "runtime_class", string(cfg.RuntimeClass()), "mode", cfg.DeploymentMode, "deployment_profile", cfg.DeploymentProfile, "auth_mode", cfg.AuthMode, "tls_enabled", cfg.TLSCertPath != "", "trusted_proxy", cfg.TrustedProxyHeaders, "production_transport_mode", cfg.ProductionTransportMode)
 		var err error
 		if cfg.TLSCertPath != "" {
 			err = server.ListenAndServeTLS(cfg.TLSCertPath, cfg.TLSKeyPath)
@@ -13529,6 +14217,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -14031,15 +14720,45 @@ func (s *Store) RevokeTunnel(ctx context.Context, tenantID, tunnelID string) err
 	return err
 }
 
+func (s *Store) CreateTunnelCapability(ctx context.Context, capability model.TunnelCapability) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO tunnel_capabilities(capability_id, tunnel_id, nonce_hash, path, expires_at, consumed_at, revoked_at, created_at)
+		VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)
+	`, capability.ID, capability.TunnelID, capability.NonceHash, capability.Path, capability.ExpiresAt.UTC().Format(time.RFC3339Nano), capability.CreatedAt.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+func (s *Store) GetTunnelCapability(ctx context.Context, capabilityID string) (model.TunnelCapability, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT capability_id, tunnel_id, nonce_hash, path, expires_at, consumed_at, revoked_at, created_at
+		FROM tunnel_capabilities WHERE capability_id=?
+	`, capabilityID)
+	return scanTunnelCapability(row)
+}
+
+func (s *Store) ConsumeTunnelCapability(ctx context.Context, capabilityID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE tunnel_capabilities SET consumed_at=? WHERE capability_id=? AND consumed_at IS NULL AND revoked_at IS NULL
+	`, time.Now().UTC().Format(time.RFC3339Nano), capabilityID)
+	return err
+}
+
+func (s *Store) RevokeTunnelCapabilities(ctx context.Context, tunnelID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE tunnel_capabilities SET revoked_at=? WHERE tunnel_id=? AND revoked_at IS NULL
+	`, time.Now().UTC().Format(time.RFC3339Nano), tunnelID)
+	return err
+}
+
 func (s *Store) CreateSnapshot(ctx context.Context, snapshot model.Snapshot) error {
 	var completed interface{}
 	if snapshot.CompletedAt != nil {
 		completed = snapshot.CompletedAt.UTC().Format(time.RFC3339Nano)
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO snapshots(snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, export_location, created_at, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, snapshot.ID, snapshot.SandboxID, snapshot.TenantID, snapshot.Name, string(snapshot.Status), snapshot.ImageRef, string(snapshot.RuntimeSelection), snapshot.RuntimeBackend, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceContractVersion, snapshot.WorkspaceTar, snapshot.ExportLocation, snapshot.CreatedAt.UTC().Format(time.RFC3339Nano), completed)
+		INSERT INTO snapshots(snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, bundle_sha256, export_location, created_at, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, snapshot.ID, snapshot.SandboxID, snapshot.TenantID, snapshot.Name, string(snapshot.Status), snapshot.ImageRef, string(snapshot.RuntimeSelection), snapshot.RuntimeBackend, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceContractVersion, snapshot.WorkspaceTar, snapshot.BundleSHA256, snapshot.ExportLocation, snapshot.CreatedAt.UTC().Format(time.RFC3339Nano), completed)
 	return err
 }
 
@@ -14050,15 +14769,15 @@ func (s *Store) UpdateSnapshot(ctx context.Context, snapshot model.Snapshot) err
 	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE snapshots
-		SET status=?, image_ref=?, runtime_selection=?, runtime_backend=?, profile=?, image_contract_version=?, control_protocol_version=?, workspace_contract_version=?, workspace_tar=?, export_location=?, completed_at=?
+		SET status=?, image_ref=?, runtime_selection=?, runtime_backend=?, profile=?, image_contract_version=?, control_protocol_version=?, workspace_contract_version=?, workspace_tar=?, bundle_sha256=?, export_location=?, completed_at=?
 		WHERE snapshot_id=? AND tenant_id=?
-	`, string(snapshot.Status), snapshot.ImageRef, string(snapshot.RuntimeSelection), snapshot.RuntimeBackend, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceContractVersion, snapshot.WorkspaceTar, snapshot.ExportLocation, completed, snapshot.ID, snapshot.TenantID)
+	`, string(snapshot.Status), snapshot.ImageRef, string(snapshot.RuntimeSelection), snapshot.RuntimeBackend, string(snapshot.Profile), snapshot.ImageContractVersion, snapshot.ControlProtocolVersion, snapshot.WorkspaceContractVersion, snapshot.WorkspaceTar, snapshot.BundleSHA256, snapshot.ExportLocation, completed, snapshot.ID, snapshot.TenantID)
 	return err
 }
 
 func (s *Store) GetSnapshot(ctx context.Context, tenantID, snapshotID string) (model.Snapshot, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, export_location, created_at, completed_at
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, bundle_sha256, export_location, created_at, completed_at
 		FROM snapshots WHERE tenant_id=? AND snapshot_id=?
 	`, tenantID, snapshotID)
 	return scanSnapshot(row)
@@ -14066,7 +14785,7 @@ func (s *Store) GetSnapshot(ctx context.Context, tenantID, snapshotID string) (m
 
 func (s *Store) ListSnapshots(ctx context.Context, tenantID, sandboxID string) ([]model.Snapshot, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, export_location, created_at, completed_at
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, bundle_sha256, export_location, created_at, completed_at
 		FROM snapshots
 		WHERE tenant_id=? AND sandbox_id=?
 		ORDER BY created_at DESC
@@ -14132,7 +14851,7 @@ func (s *Store) ListRunningExecutions(ctx context.Context) ([]model.Execution, e
 
 func (s *Store) ListSnapshotsByStatus(ctx context.Context, status model.SnapshotStatus) ([]model.Snapshot, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, export_location, created_at, completed_at
+		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, bundle_sha256, export_location, created_at, completed_at
 		FROM snapshots
 		WHERE status = ?
 		ORDER BY created_at
@@ -14254,6 +14973,113 @@ func (s *Store) AuditEventCounts(ctx context.Context, tenantID string) (map[stri
 	return counts, rows.Err()
 }
 
+func (s *Store) UpsertServiceAccount(ctx context.Context, account model.ServiceAccount) error {
+	scopeJSON, err := json.Marshal(account.Scopes)
+	if err != nil {
+		return err
+	}
+	var expiresAt, revokedAt any
+	if account.ExpiresAt != nil {
+		expiresAt = account.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	if account.RevokedAt != nil {
+		revokedAt = account.RevokedAt.UTC().Format(time.RFC3339Nano)
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO service_accounts(service_account_id, tenant_id, name, scope_json, disabled, expires_at, created_at, revoked_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(service_account_id) DO UPDATE SET tenant_id=excluded.tenant_id, name=excluded.name, scope_json=excluded.scope_json, disabled=excluded.disabled, expires_at=excluded.expires_at, revoked_at=excluded.revoked_at
+	`, account.ID, account.TenantID, account.Name, string(scopeJSON), boolToInt(account.Disabled), expiresAt, account.CreatedAt.UTC().Format(time.RFC3339Nano), revokedAt)
+	return err
+}
+
+func (s *Store) GetServiceAccount(ctx context.Context, serviceAccountID string) (model.ServiceAccount, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT service_account_id, tenant_id, name, scope_json, disabled, expires_at, created_at, revoked_at
+		FROM service_accounts WHERE service_account_id=?
+	`, serviceAccountID)
+	return scanServiceAccount(row)
+}
+
+func (s *Store) UpsertPromotedGuestImage(ctx context.Context, image model.PromotedGuestImage) error {
+	var promotedAt any
+	if image.PromotedAt != nil {
+		promotedAt = image.PromotedAt.UTC().Format(time.RFC3339Nano)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO promoted_guest_images(image_ref, image_sha256, profile, control_mode, control_protocol_version, contract_version, provenance_json, verification_status, promotion_status, promoted_at, promoted_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(image_ref) DO UPDATE SET image_sha256=excluded.image_sha256, profile=excluded.profile, control_mode=excluded.control_mode, control_protocol_version=excluded.control_protocol_version, contract_version=excluded.contract_version, provenance_json=excluded.provenance_json, verification_status=excluded.verification_status, promotion_status=excluded.promotion_status, promoted_at=excluded.promoted_at, promoted_by=excluded.promoted_by
+	`, image.ImageRef, image.ImageSHA256, string(image.Profile), string(image.ControlMode), image.ControlProtocolVersion, image.ContractVersion, image.ProvenanceJSON, image.VerificationStatus, image.PromotionStatus, promotedAt, image.PromotedBy)
+	return err
+}
+
+func (s *Store) GetPromotedGuestImage(ctx context.Context, imageRef string) (model.PromotedGuestImage, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT image_ref, image_sha256, profile, control_mode, control_protocol_version, contract_version, provenance_json, verification_status, promotion_status, promoted_at, promoted_by
+		FROM promoted_guest_images WHERE image_ref=?
+	`, imageRef)
+	return scanPromotedGuestImage(row)
+}
+
+func (s *Store) ListPromotedGuestImages(ctx context.Context) ([]model.PromotedGuestImage, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT image_ref, image_sha256, profile, control_mode, control_protocol_version, contract_version, provenance_json, verification_status, promotion_status, promoted_at, promoted_by
+		FROM promoted_guest_images ORDER BY image_ref
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var images []model.PromotedGuestImage
+	for rows.Next() {
+		image, err := scanPromotedGuestImage(rows)
+		if err != nil {
+			return nil, err
+		}
+		images = append(images, image)
+	}
+	return images, rows.Err()
+}
+
+func (s *Store) CreateReleaseEvidence(ctx context.Context, evidence model.ReleaseEvidence) error {
+	var completedAt any
+	if evidence.CompletedAt != nil {
+		completedAt = evidence.CompletedAt.UTC().Format(time.RFC3339Nano)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO release_evidence(evidence_id, gate_name, host_fingerprint, runtime_selection, image_ref, profile, outcome, artifact_path, started_at, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, evidence.ID, evidence.GateName, evidence.HostFingerprint, string(evidence.RuntimeSelection), evidence.ImageRef, string(evidence.Profile), evidence.Outcome, evidence.ArtifactPath, evidence.StartedAt.UTC().Format(time.RFC3339Nano), completedAt)
+	return err
+}
+
+func (s *Store) ListReleaseEvidence(ctx context.Context, gateName string) ([]model.ReleaseEvidence, error) {
+	query := `
+		SELECT evidence_id, gate_name, host_fingerprint, runtime_selection, image_ref, profile, outcome, artifact_path, started_at, completed_at
+		FROM release_evidence`
+	args := []any{}
+	if strings.TrimSpace(gateName) != "" {
+		query += ` WHERE gate_name=?`
+		args = append(args, gateName)
+	}
+	query += ` ORDER BY started_at DESC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var evidence []model.ReleaseEvidence
+	for rows.Next() {
+		entry, err := scanReleaseEvidence(rows)
+		if err != nil {
+			return nil, err
+		}
+		evidence = append(evidence, entry)
+	}
+	return evidence, rows.Err()
+}
+
 func scanSandbox(scanner interface{ Scan(...any) error }) (model.Sandbox, error) {
 	var sandbox model.Sandbox
 	var created, updated, lastActive string
@@ -14346,7 +15172,7 @@ func scanSnapshot(scanner interface{ Scan(...any) error }) (model.Snapshot, erro
 	var created string
 	var completed sql.NullString
 	var runtimeSelection, runtimeBackend, profile, imageContractVersion, controlProtocolVersion, workspaceContractVersion string
-	if err := scanner.Scan(&snapshot.ID, &snapshot.SandboxID, &snapshot.TenantID, &snapshot.Name, &snapshot.Status, &snapshot.ImageRef, &runtimeSelection, &runtimeBackend, &profile, &imageContractVersion, &controlProtocolVersion, &workspaceContractVersion, &snapshot.WorkspaceTar, &snapshot.ExportLocation, &created, &completed); err != nil {
+	if err := scanner.Scan(&snapshot.ID, &snapshot.SandboxID, &snapshot.TenantID, &snapshot.Name, &snapshot.Status, &snapshot.ImageRef, &runtimeSelection, &runtimeBackend, &profile, &imageContractVersion, &controlProtocolVersion, &workspaceContractVersion, &snapshot.WorkspaceTar, &snapshot.BundleSHA256, &snapshot.ExportLocation, &created, &completed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.Snapshot{}, ErrNotFound
 		}
@@ -14371,6 +15197,130 @@ func scanSnapshot(scanner interface{ Scan(...any) error }) (model.Snapshot, erro
 		snapshot.CompletedAt = &t
 	}
 	return snapshot, nil
+}
+
+func scanServiceAccount(scanner interface{ Scan(...any) error }) (model.ServiceAccount, error) {
+	var account model.ServiceAccount
+	var scopeJSON string
+	var expiresAt, revokedAt sql.NullString
+	var createdAt string
+	var disabled int
+	if err := scanner.Scan(&account.ID, &account.TenantID, &account.Name, &scopeJSON, &disabled, &expiresAt, &createdAt, &revokedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.ServiceAccount{}, ErrNotFound
+		}
+		return model.ServiceAccount{}, err
+	}
+	account.Disabled = disabled == 1
+	if err := json.Unmarshal([]byte(scopeJSON), &account.Scopes); err != nil {
+		return model.ServiceAccount{}, err
+	}
+	created, err := parseTime(createdAt)
+	if err != nil {
+		return model.ServiceAccount{}, err
+	}
+	account.CreatedAt = created
+	if expiresAt.Valid {
+		parsed, err := parseTime(expiresAt.String)
+		if err != nil {
+			return model.ServiceAccount{}, err
+		}
+		account.ExpiresAt = &parsed
+	}
+	if revokedAt.Valid {
+		parsed, err := parseTime(revokedAt.String)
+		if err != nil {
+			return model.ServiceAccount{}, err
+		}
+		account.RevokedAt = &parsed
+	}
+	return account, nil
+}
+
+func scanPromotedGuestImage(scanner interface{ Scan(...any) error }) (model.PromotedGuestImage, error) {
+	var image model.PromotedGuestImage
+	var profile, controlMode string
+	var promotedAt sql.NullString
+	if err := scanner.Scan(&image.ImageRef, &image.ImageSHA256, &profile, &controlMode, &image.ControlProtocolVersion, &image.ContractVersion, &image.ProvenanceJSON, &image.VerificationStatus, &image.PromotionStatus, &promotedAt, &image.PromotedBy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.PromotedGuestImage{}, ErrNotFound
+		}
+		return model.PromotedGuestImage{}, err
+	}
+	image.Profile = model.GuestProfile(profile)
+	image.ControlMode = model.GuestControlMode(controlMode)
+	if promotedAt.Valid {
+		parsed, err := parseTime(promotedAt.String)
+		if err != nil {
+			return model.PromotedGuestImage{}, err
+		}
+		image.PromotedAt = &parsed
+	}
+	return image, nil
+}
+
+func scanReleaseEvidence(scanner interface{ Scan(...any) error }) (model.ReleaseEvidence, error) {
+	var evidence model.ReleaseEvidence
+	var runtimeSelection, profile, started string
+	var completed sql.NullString
+	if err := scanner.Scan(&evidence.ID, &evidence.GateName, &evidence.HostFingerprint, &runtimeSelection, &evidence.ImageRef, &profile, &evidence.Outcome, &evidence.ArtifactPath, &started, &completed); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.ReleaseEvidence{}, ErrNotFound
+		}
+		return model.ReleaseEvidence{}, err
+	}
+	evidence.RuntimeSelection = model.ParseRuntimeSelection(runtimeSelection)
+	evidence.Profile = model.GuestProfile(profile)
+	startedAt, err := parseTime(started)
+	if err != nil {
+		return model.ReleaseEvidence{}, err
+	}
+	evidence.StartedAt = startedAt
+	if completed.Valid {
+		parsed, err := parseTime(completed.String)
+		if err != nil {
+			return model.ReleaseEvidence{}, err
+		}
+		evidence.CompletedAt = &parsed
+	}
+	return evidence, nil
+}
+
+func scanTunnelCapability(scanner interface{ Scan(...any) error }) (model.TunnelCapability, error) {
+	var capability model.TunnelCapability
+	var expiresAt, createdAt string
+	var consumedAt, revokedAt sql.NullString
+	if err := scanner.Scan(&capability.ID, &capability.TunnelID, &capability.NonceHash, &capability.Path, &expiresAt, &consumedAt, &revokedAt, &createdAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.TunnelCapability{}, ErrNotFound
+		}
+		return model.TunnelCapability{}, err
+	}
+	parsedExpiresAt, err := parseTime(expiresAt)
+	if err != nil {
+		return model.TunnelCapability{}, err
+	}
+	capability.ExpiresAt = parsedExpiresAt
+	parsedCreatedAt, err := parseTime(createdAt)
+	if err != nil {
+		return model.TunnelCapability{}, err
+	}
+	capability.CreatedAt = parsedCreatedAt
+	if consumedAt.Valid {
+		parsed, err := parseTime(consumedAt.String)
+		if err != nil {
+			return model.TunnelCapability{}, err
+		}
+		capability.ConsumedAt = &parsed
+	}
+	if revokedAt.Valid {
+		parsed, err := parseTime(revokedAt.String)
+		if err != nil {
+			return model.TunnelCapability{}, err
+		}
+		capability.RevokedAt = &parsed
+	}
+	return capability, nil
 }
 
 func parseTime(value string) (time.Time, error) {
@@ -14409,6 +15359,428 @@ func splitStringList(value string) []string {
 }
 ````
 
+## File: internal/model/model.go
+````go
+package model
+
+import (
+	"errors"
+	"fmt"
+	"time"
+)
+
+const MaxWorkspaceFileTransferBytes = 64 * 1024 * 1024
+
+var ErrFileTransferTooLarge = errors.New("workspace file transfer too large")
+
+func FileTransferTooLargeError(limit int64) error {
+	return fmt.Errorf("%w: workspace file exceeds maximum transfer size of %d bytes", ErrFileTransferTooLarge, limit)
+}
+
+type SandboxStatus string
+
+const (
+	SandboxStatusCreating   SandboxStatus = "creating"
+	SandboxStatusBooting    SandboxStatus = "booting"
+	SandboxStatusDegraded   SandboxStatus = "degraded"
+	SandboxStatusStopped    SandboxStatus = "stopped"
+	SandboxStatusStarting   SandboxStatus = "starting"
+	SandboxStatusRunning    SandboxStatus = "running"
+	SandboxStatusSuspending SandboxStatus = "suspending"
+	SandboxStatusSuspended  SandboxStatus = "suspended"
+	SandboxStatusStopping   SandboxStatus = "stopping"
+	SandboxStatusDeleting   SandboxStatus = "deleting"
+	SandboxStatusDeleted    SandboxStatus = "deleted"
+	SandboxStatusError      SandboxStatus = "error"
+)
+
+type NetworkMode string
+
+const (
+	NetworkModeInternetEnabled  NetworkMode = "internet-enabled"
+	NetworkModeInternetDisabled NetworkMode = "internet-disabled"
+)
+
+type TunnelProtocol string
+
+const (
+	TunnelProtocolHTTP TunnelProtocol = "http"
+	TunnelProtocolTCP  TunnelProtocol = "tcp"
+)
+
+type SnapshotStatus string
+
+const (
+	SnapshotStatusCreating SnapshotStatus = "creating"
+	SnapshotStatusReady    SnapshotStatus = "ready"
+	SnapshotStatusError    SnapshotStatus = "error"
+)
+
+type ExecutionStatus string
+
+const (
+	ExecutionStatusRunning   ExecutionStatus = "running"
+	ExecutionStatusDetached  ExecutionStatus = "detached"
+	ExecutionStatusSucceeded ExecutionStatus = "succeeded"
+	ExecutionStatusFailed    ExecutionStatus = "failed"
+	ExecutionStatusTimedOut  ExecutionStatus = "timed_out"
+	ExecutionStatusCanceled  ExecutionStatus = "canceled"
+)
+
+type GuestProfile string
+
+const (
+	GuestProfileCore      GuestProfile = "core"
+	GuestProfileRuntime   GuestProfile = "runtime"
+	GuestProfileBrowser   GuestProfile = "browser"
+	GuestProfileContainer GuestProfile = "container"
+	GuestProfileDebug     GuestProfile = "debug"
+)
+
+type GuestControlMode string
+
+const (
+	GuestControlModeAgent     GuestControlMode = "agent"
+	GuestControlModeSSHCompat GuestControlMode = "ssh-compat"
+)
+
+func (p GuestProfile) IsValid() bool {
+	switch p {
+	case GuestProfileCore, GuestProfileRuntime, GuestProfileBrowser, GuestProfileContainer, GuestProfileDebug:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m GuestControlMode) IsValid() bool {
+	switch m {
+	case GuestControlModeAgent, GuestControlModeSSHCompat:
+		return true
+	default:
+		return false
+	}
+}
+
+// Sandbox is the primary lifecycle resource returned by sandbox CRUD endpoints.
+type Sandbox struct {
+	ID                       string           `json:"id"`
+	TenantID                 string           `json:"tenant_id"`
+	Status                   SandboxStatus    `json:"status"`
+	RuntimeSelection         RuntimeSelection `json:"runtime_selection,omitempty"`
+	RuntimeBackend           string           `json:"runtime_backend"`
+	RuntimeClass             RuntimeClass     `json:"runtime_class,omitempty"`
+	BaseImageRef             string           `json:"base_image_ref"`
+	Profile                  GuestProfile     `json:"profile,omitempty"`
+	Features                 []string         `json:"features,omitempty"`
+	Capabilities             []string         `json:"capabilities,omitempty"`
+	ControlMode              GuestControlMode `json:"control_mode,omitempty"`
+	ControlProtocolVersion   string           `json:"control_protocol_version,omitempty"`
+	WorkspaceContractVersion string           `json:"workspace_contract_version,omitempty"`
+	ImageContractVersion     string           `json:"image_contract_version,omitempty"`
+	CPULimit                 CPUQuantity      `json:"cpu_limit"`
+	MemoryLimitMB            int              `json:"memory_limit_mb"`
+	PIDsLimit                int              `json:"pids_limit"`
+	DiskLimitMB              int              `json:"disk_limit_mb"`
+	NetworkMode              NetworkMode      `json:"network_mode"`
+	AllowTunnels             bool             `json:"allow_tunnels"`
+	StorageRoot              string           `json:"-"`
+	WorkspaceRoot            string           `json:"-"`
+	CacheRoot                string           `json:"-"`
+	RuntimeID                string           `json:"runtime_id"`
+	RuntimeStatus            string           `json:"runtime_status"`
+	LastRuntimeError         string           `json:"last_runtime_error,omitempty"`
+	CreatedAt                time.Time        `json:"created_at"`
+	UpdatedAt                time.Time        `json:"updated_at"`
+	LastActiveAt             time.Time        `json:"last_active_at"`
+	DeletedAt                *time.Time       `json:"deleted_at,omitempty"`
+}
+
+// CreateSandboxRequest is the JSON payload accepted by POST /v1/sandboxes.
+type CreateSandboxRequest struct {
+	RuntimeSelection       RuntimeSelection `json:"runtime_selection,omitempty"`
+	BaseImageRef           string           `json:"base_image_ref"`
+	Profile                GuestProfile     `json:"profile,omitempty"`
+	Features               []string         `json:"features,omitempty"`
+	Capabilities           []string         `json:"capabilities,omitempty"`
+	DangerousProfileReason string           `json:"dangerous_profile_reason,omitempty"`
+	CPULimit               CPUQuantity      `json:"cpu_limit"`
+	MemoryLimitMB          int              `json:"memory_limit_mb"`
+	PIDsLimit              int              `json:"pids_limit"`
+	DiskLimitMB            int              `json:"disk_limit_mb"`
+	NetworkMode            NetworkMode      `json:"network_mode"`
+	AllowTunnels           *bool            `json:"allow_tunnels,omitempty"`
+	Start                  bool             `json:"start"`
+}
+
+// LifecycleRequest is the JSON payload used by lifecycle mutation endpoints.
+type LifecycleRequest struct {
+	Force bool `json:"force"`
+}
+
+// ErrorResponse is the normalized error envelope returned by API endpoints.
+type ErrorResponse struct {
+	Error  string `json:"error"`
+	Code   string `json:"code"`
+	Status int    `json:"status"`
+}
+
+// ExecRequest is the JSON payload accepted by POST /v1/sandboxes/{id}/exec.
+type ExecRequest struct {
+	Command  []string          `json:"command"`
+	Env      map[string]string `json:"env"`
+	Cwd      string            `json:"cwd"`
+	Timeout  time.Duration     `json:"timeout"`
+	Detached bool              `json:"detached"`
+}
+
+// Execution is the command result returned by sync exec and SSE terminal events.
+type Execution struct {
+	ID              string          `json:"id"`
+	SandboxID       string          `json:"sandbox_id"`
+	TenantID        string          `json:"tenant_id"`
+	Command         string          `json:"command"`
+	Cwd             string          `json:"cwd"`
+	TimeoutSeconds  int             `json:"timeout_seconds"`
+	Status          ExecutionStatus `json:"status"`
+	ExitCode        *int            `json:"exit_code,omitempty"`
+	StdoutPreview   string          `json:"stdout_preview,omitempty"`
+	StderrPreview   string          `json:"stderr_preview,omitempty"`
+	StdoutTruncated bool            `json:"stdout_truncated"`
+	StderrTruncated bool            `json:"stderr_truncated"`
+	StartedAt       time.Time       `json:"started_at"`
+	CompletedAt     *time.Time      `json:"completed_at,omitempty"`
+	DurationMS      *int64          `json:"duration_ms,omitempty"`
+}
+
+// TTYRequest is the first WebSocket frame sent when opening a TTY session.
+type TTYRequest struct {
+	Command []string          `json:"command"`
+	Env     map[string]string `json:"env"`
+	Cwd     string            `json:"cwd"`
+	Cols    int               `json:"cols"`
+	Rows    int               `json:"rows"`
+}
+
+// TTYSession describes a persisted terminal session record.
+type TTYSession struct {
+	ID         string     `json:"id"`
+	SandboxID  string     `json:"sandbox_id"`
+	TenantID   string     `json:"tenant_id"`
+	Command    string     `json:"command"`
+	Connected  bool       `json:"connected"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ClosedAt   *time.Time `json:"closed_at,omitempty"`
+	LastResize string     `json:"last_resize,omitempty"`
+}
+
+// FileWriteRequest is the JSON payload for file writes.
+type FileWriteRequest struct {
+	Content       string `json:"content,omitempty"`
+	ContentBase64 string `json:"content_base64,omitempty"`
+	Encoding      string `json:"encoding,omitempty"`
+}
+
+// FileReadResponse is the JSON payload returned by file reads.
+type FileReadResponse struct {
+	Path          string `json:"path"`
+	Content       string `json:"content,omitempty"`
+	ContentBase64 string `json:"content_base64,omitempty"`
+	Size          int64  `json:"size"`
+	Encoding      string `json:"encoding"`
+}
+
+// MkdirRequest is the JSON payload for directory creation.
+type MkdirRequest struct {
+	Path string `json:"path"`
+}
+
+// CreateTunnelRequest is the JSON payload accepted by tunnel creation endpoints.
+type CreateTunnelRequest struct {
+	TargetPort int            `json:"target_port"`
+	Protocol   TunnelProtocol `json:"protocol"`
+	AuthMode   string         `json:"auth_mode"`
+	Visibility string         `json:"visibility"`
+}
+
+// CreateTunnelSignedURLRequest is the JSON payload accepted by signed browser URL issuance.
+type CreateTunnelSignedURLRequest struct {
+	Path       string `json:"path,omitempty"`
+	TTLSeconds int    `json:"ttl_seconds,omitempty"`
+	OneTime    bool   `json:"one_time,omitempty"`
+}
+
+// Tunnel is the HTTP tunnel resource returned by tunnel endpoints.
+type Tunnel struct {
+	ID             string         `json:"id"`
+	SandboxID      string         `json:"sandbox_id"`
+	TenantID       string         `json:"tenant_id"`
+	TargetPort     int            `json:"target_port"`
+	Protocol       TunnelProtocol `json:"protocol"`
+	AuthMode       string         `json:"auth_mode"`
+	Visibility     string         `json:"visibility"`
+	Endpoint       string         `json:"endpoint"`
+	AccessToken    string         `json:"access_token,omitempty"`
+	AuthSecretHash string         `json:"-"`
+	CreatedAt      time.Time      `json:"created_at"`
+	RevokedAt      *time.Time     `json:"revoked_at,omitempty"`
+}
+
+// TunnelSignedURL is the browser-launch capability returned by POST /v1/tunnels/{id}/signed-url.
+type TunnelSignedURL struct {
+	URL          string    `json:"url"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	CapabilityID string    `json:"capability_id,omitempty"`
+}
+
+// CreateSnapshotRequest is the JSON payload accepted by snapshot creation.
+type CreateSnapshotRequest struct {
+	Name string `json:"name"`
+}
+
+// Snapshot is the snapshot resource returned by snapshot endpoints.
+type Snapshot struct {
+	ID                       string           `json:"id"`
+	SandboxID                string           `json:"sandbox_id"`
+	TenantID                 string           `json:"tenant_id"`
+	Name                     string           `json:"name"`
+	Status                   SnapshotStatus   `json:"status"`
+	ImageRef                 string           `json:"image_ref"`
+	RuntimeSelection         RuntimeSelection `json:"runtime_selection,omitempty"`
+	RuntimeBackend           string           `json:"runtime_backend,omitempty"`
+	Profile                  GuestProfile     `json:"profile,omitempty"`
+	ImageContractVersion     string           `json:"image_contract_version,omitempty"`
+	ControlProtocolVersion   string           `json:"control_protocol_version,omitempty"`
+	WorkspaceContractVersion string           `json:"workspace_contract_version,omitempty"`
+	WorkspaceTar             string           `json:"-"`
+	BundleSHA256             string           `json:"bundle_sha256,omitempty"`
+	ExportLocation           string           `json:"export_location,omitempty"`
+	CreatedAt                time.Time        `json:"created_at"`
+	CompletedAt              *time.Time       `json:"completed_at,omitempty"`
+}
+
+// RestoreSnapshotRequest is the JSON payload accepted by snapshot restore.
+type RestoreSnapshotRequest struct {
+	TargetSandboxID string `json:"target_sandbox_id"`
+}
+
+// RuntimeHealth is the runtime health report returned by GET /v1/runtime/health.
+type RuntimeHealth struct {
+	DefaultRuntimeSelection  RuntimeSelection       `json:"default_runtime_selection,omitempty"`
+	EnabledRuntimeSelections []RuntimeSelection     `json:"enabled_runtime_selections,omitempty"`
+	Backend                  string                 `json:"backend"`
+	Healthy                  bool                   `json:"healthy"`
+	CheckedAt                time.Time              `json:"checked_at"`
+	RuntimeSelectionCounts   map[string]int         `json:"runtime_selection_counts,omitempty"`
+	StatusCounts             map[string]int         `json:"status_counts,omitempty"`
+	Sandboxes                []RuntimeSandboxHealth `json:"sandboxes"`
+}
+
+// RuntimeInfo is the runtime summary returned by GET /v1/runtime/info.
+type RuntimeInfo struct {
+	Backend                  string             `json:"backend,omitempty"`
+	Class                    string             `json:"class,omitempty"`
+	DefaultRuntimeSelection  RuntimeSelection   `json:"default_runtime_selection,omitempty"`
+	EnabledRuntimeSelections []RuntimeSelection `json:"enabled_runtime_selections,omitempty"`
+}
+
+// RuntimeSandboxHealth is one sandbox entry inside RuntimeHealth.
+type RuntimeSandboxHealth struct {
+	SandboxID        string           `json:"sandbox_id"`
+	TenantID         string           `json:"tenant_id"`
+	RuntimeSelection RuntimeSelection `json:"runtime_selection,omitempty"`
+	PersistedStatus  SandboxStatus    `json:"persisted_status"`
+	ObservedStatus   SandboxStatus    `json:"observed_status"`
+	RuntimeID        string           `json:"runtime_id"`
+	RuntimeStatus    string           `json:"runtime_status"`
+	Pid              int              `json:"pid"`
+	IPAddress        string           `json:"ip_address,omitempty"`
+	Error            string           `json:"error,omitempty"`
+}
+
+type Tenant struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	TokenHash string    `json:"-"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// TenantQuota is the tenant quota configuration exposed through quota and capacity responses.
+type TenantQuota struct {
+	TenantID                string      `json:"tenant_id"`
+	MaxSandboxes            int         `json:"max_sandboxes"`
+	MaxRunningSandboxes     int         `json:"max_running_sandboxes"`
+	MaxConcurrentExecs      int         `json:"max_concurrent_execs"`
+	MaxTunnels              int         `json:"max_tunnels"`
+	MaxCPUCores             CPUQuantity `json:"max_cpu_cores"`
+	MaxMemoryMB             int         `json:"max_memory_mb"`
+	MaxStorageMB            int         `json:"max_storage_mb"`
+	AllowTunnels            bool        `json:"allow_tunnels"`
+	DefaultTunnelAuthMode   string      `json:"default_tunnel_auth_mode"`
+	DefaultTunnelVisibility string      `json:"default_tunnel_visibility"`
+}
+
+type AuditEvent struct {
+	ID         string    `json:"id"`
+	TenantID   string    `json:"tenant_id"`
+	SandboxID  string    `json:"sandbox_id,omitempty"`
+	Action     string    `json:"action"`
+	ResourceID string    `json:"resource_id,omitempty"`
+	Outcome    string    `json:"outcome"`
+	Message    string    `json:"message"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+type ServiceAccount struct {
+	ID        string     `json:"id"`
+	TenantID  string     `json:"tenant_id"`
+	Name      string     `json:"name"`
+	Scopes    []string   `json:"scopes,omitempty"`
+	Disabled  bool       `json:"disabled"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+}
+
+type PromotedGuestImage struct {
+	ImageRef               string           `json:"image_ref"`
+	ImageSHA256            string           `json:"image_sha256"`
+	Profile                GuestProfile     `json:"profile"`
+	ControlMode            GuestControlMode `json:"control_mode"`
+	ControlProtocolVersion string           `json:"control_protocol_version"`
+	ContractVersion        string           `json:"contract_version"`
+	ProvenanceJSON         string           `json:"provenance_json,omitempty"`
+	VerificationStatus     string           `json:"verification_status"`
+	PromotionStatus        string           `json:"promotion_status"`
+	PromotedAt             *time.Time       `json:"promoted_at,omitempty"`
+	PromotedBy             string           `json:"promoted_by,omitempty"`
+}
+
+type ReleaseEvidence struct {
+	ID               string           `json:"id"`
+	GateName         string           `json:"gate_name"`
+	HostFingerprint  string           `json:"host_fingerprint"`
+	RuntimeSelection RuntimeSelection `json:"runtime_selection,omitempty"`
+	ImageRef         string           `json:"image_ref,omitempty"`
+	Profile          GuestProfile     `json:"profile,omitempty"`
+	Outcome          string           `json:"outcome"`
+	ArtifactPath     string           `json:"artifact_path,omitempty"`
+	StartedAt        time.Time        `json:"started_at"`
+	CompletedAt      *time.Time       `json:"completed_at,omitempty"`
+}
+
+type TunnelCapability struct {
+	ID         string     `json:"id"`
+	TunnelID   string     `json:"tunnel_id"`
+	NonceHash  string     `json:"-"`
+	Path       string     `json:"path"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	ConsumedAt *time.Time `json:"consumed_at,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+````
+
 ## File: internal/config/config.go
 ````go
 package config
@@ -14437,92 +15809,97 @@ type TenantConfig struct {
 }
 
 type Config struct {
-	DeploymentMode                string
-	ListenAddress                 string
-	DatabasePath                  string
-	StorageRoot                   string
-	SnapshotRoot                  string
-	BaseImageRef                  string
-	RuntimeBackend                string
-	EnabledRuntimeSelections      []model.RuntimeSelection
-	DefaultRuntimeSelection       model.RuntimeSelection
-	AuthMode                      string
-	AuthJWTIssuer                 string
-	AuthJWTAudience               string
-	AuthJWTSecretPaths            []string
-	TLSCertPath                   string
-	TLSKeyPath                    string
-	TrustedProxyHeaders           bool
-	TrustedDockerRuntime          bool
-	PolicyAllowedImages           []string
-	PolicyAllowPublicTunnels      bool
-	PolicyMaxSandboxLifetime      time.Duration
-	PolicyMaxIdleTimeout          time.Duration
-	AdmissionMaxNodeSandboxes     int
-	AdmissionMaxNodeRunning       int
-	AdmissionMaxNodeCPU           model.CPUQuantity
-	AdmissionMaxNodeMemoryMB      int
-	AdmissionMinNodeFreeStorageMB int
-	AdmissionMaxTenantStarts      int
-	AdmissionMaxTenantHeavyOps    int
-	StorageWarningFileCount       int
-	SnapshotMaxBytes              int64
-	SnapshotMaxFiles              int
-	SnapshotMaxExpansionRatio     int
-	AllowedGuestProfiles          []model.GuestProfile
-	DangerousGuestProfiles        []model.GuestProfile
-	AllowDangerousProfiles        bool
-	DockerUser                    string
-	DockerTmpfsSizeMB             int
-	DockerSeccompProfile          string
-	DockerAppArmorProfile         string
-	DockerSELinuxLabel            string
-	DockerAllowDangerousOverrides bool
-	DefaultCPULimit               model.CPUQuantity
-	DefaultMemoryLimitMB          int
-	DefaultPIDsLimit              int
-	DefaultDiskLimitMB            int
-	DefaultNetworkMode            model.NetworkMode
-	DefaultAllowTunnels           bool
-	RequestRatePerMinute          int
-	RequestBurst                  int
-	DefaultQuota                  model.TenantQuota
-	GracefulShutdown              time.Duration
-	ReconcileInterval             time.Duration
-	CleanupInterval               time.Duration
-	OperatorHost                  string
-	TunnelSigningKey              string
-	TunnelSigningKeyPath          string
-	Tenants                       []TenantConfig
-	OptionalSnapshotExport        string
-	QEMUBinary                    string
-	QEMUAccel                     string
-	QEMUBaseImagePath             string
-	QEMUAllowedBaseImagePaths     []string
-	QEMUControlMode               model.GuestControlMode
-	QEMUAllowedProfiles           []model.GuestProfile
-	QEMUDangerousProfiles         []model.GuestProfile
-	QEMUAllowDangerousProfiles    bool
-	QEMUAllowSSHCompat            bool
-	QEMUSSHUser                   string
-	QEMUSSHPrivateKeyPath         string
-	QEMUSSHHostKeyPath            string
-	QEMUBootTimeout               time.Duration
-	KataBinary                    string
-	KataRuntimeClass              string
-	KataContainerdSocket          string
+	DeploymentMode                  string
+	DeploymentProfile               string
+	ProductionTransportMode         string
+	ProductionAllowDockerBreakglass bool
+	ListenAddress                   string
+	DatabasePath                    string
+	StorageRoot                     string
+	SnapshotRoot                    string
+	BaseImageRef                    string
+	RuntimeBackend                  string
+	EnabledRuntimeSelections        []model.RuntimeSelection
+	DefaultRuntimeSelection         model.RuntimeSelection
+	AuthMode                        string
+	AuthJWTIssuer                   string
+	AuthJWTAudience                 string
+	AuthJWTSecretPaths              []string
+	TLSCertPath                     string
+	TLSKeyPath                      string
+	TrustedProxyHeaders             bool
+	TrustedDockerRuntime            bool
+	PolicyAllowedImages             []string
+	PolicyAllowPublicTunnels        bool
+	PolicyMaxSandboxLifetime        time.Duration
+	PolicyMaxIdleTimeout            time.Duration
+	AdmissionMaxNodeSandboxes       int
+	AdmissionMaxNodeRunning         int
+	AdmissionMaxNodeCPU             model.CPUQuantity
+	AdmissionMaxNodeMemoryMB        int
+	AdmissionMinNodeFreeStorageMB   int
+	AdmissionMaxTenantStarts        int
+	AdmissionMaxTenantHeavyOps      int
+	StorageWarningFileCount         int
+	SnapshotMaxBytes                int64
+	SnapshotMaxFiles                int
+	SnapshotMaxExpansionRatio       int
+	AllowedGuestProfiles            []model.GuestProfile
+	DangerousGuestProfiles          []model.GuestProfile
+	AllowDangerousProfiles          bool
+	DockerUser                      string
+	DockerTmpfsSizeMB               int
+	DockerSeccompProfile            string
+	DockerAppArmorProfile           string
+	DockerSELinuxLabel              string
+	DockerAllowDangerousOverrides   bool
+	DefaultCPULimit                 model.CPUQuantity
+	DefaultMemoryLimitMB            int
+	DefaultPIDsLimit                int
+	DefaultDiskLimitMB              int
+	DefaultNetworkMode              model.NetworkMode
+	DefaultAllowTunnels             bool
+	RequestRatePerMinute            int
+	RequestBurst                    int
+	DefaultQuota                    model.TenantQuota
+	GracefulShutdown                time.Duration
+	ReconcileInterval               time.Duration
+	CleanupInterval                 time.Duration
+	OperatorHost                    string
+	TunnelSigningKey                string
+	TunnelSigningKeyPath            string
+	Tenants                         []TenantConfig
+	OptionalSnapshotExport          string
+	QEMUBinary                      string
+	QEMUAccel                       string
+	QEMUBaseImagePath               string
+	QEMUAllowedBaseImagePaths       []string
+	QEMUControlMode                 model.GuestControlMode
+	QEMUAllowedProfiles             []model.GuestProfile
+	QEMUDangerousProfiles           []model.GuestProfile
+	QEMUAllowDangerousProfiles      bool
+	QEMUAllowSSHCompat              bool
+	QEMUSSHUser                     string
+	QEMUSSHPrivateKeyPath           string
+	QEMUSSHHostKeyPath              string
+	QEMUBootTimeout                 time.Duration
+	KataBinary                      string
+	KataRuntimeClass                string
+	KataContainerdSocket            string
 }
 
 func Load(args []string) (Config, error) {
 	fs := flag.NewFlagSet("sandboxd", flag.ContinueOnError)
 	cfg := Config{}
 	fs.StringVar(&cfg.DeploymentMode, "mode", env("SANDBOX_MODE", "development"), "deployment mode")
+	fs.StringVar(&cfg.DeploymentProfile, "deployment-profile", env("SANDBOX_DEPLOYMENT_PROFILE", ""), "supported deployment profile")
+	fs.StringVar(&cfg.ProductionTransportMode, "production-transport", env("SANDBOX_PRODUCTION_TRANSPORT", "auto"), "production transport mode: auto, direct-tls, terminated-proxy")
 	fs.StringVar(&cfg.ListenAddress, "listen", env("SANDBOX_LISTEN", ":8080"), "HTTP listen address")
 	fs.StringVar(&cfg.DatabasePath, "db", env("SANDBOX_DB_PATH", "./data/sandbox.db"), "SQLite path")
 	fs.StringVar(&cfg.StorageRoot, "storage-root", env("SANDBOX_STORAGE_ROOT", "./data/storage"), "storage root")
 	fs.StringVar(&cfg.SnapshotRoot, "snapshot-root", env("SANDBOX_SNAPSHOT_ROOT", "./data/snapshots"), "snapshot root")
 	fs.StringVar(&cfg.BaseImageRef, "base-image", env("SANDBOX_BASE_IMAGE", "alpine:3.20"), "default base image")
-	fs.StringVar(&cfg.RuntimeBackend, "runtime", env("SANDBOX_RUNTIME", "docker"), "runtime backend")
+	fs.StringVar(&cfg.RuntimeBackend, "runtime", defaultRuntimeBackend(args), "runtime backend")
 	enabledRuntimeSelections := env("SANDBOX_ENABLED_RUNTIMES", "")
 	defaultRuntimeSelection := env("SANDBOX_DEFAULT_RUNTIME", "")
 	fs.StringVar(&enabledRuntimeSelections, "enabled-runtimes", enabledRuntimeSelections, "comma-separated enabled runtime selections")
@@ -14566,7 +15943,7 @@ func Load(args []string) (Config, error) {
 	qemuAllowedBaseImagePaths := env("SANDBOX_QEMU_ALLOWED_BASE_IMAGE_PATHS", "")
 	fs.StringVar(&qemuAllowedBaseImagePaths, "qemu-allowed-base-image-paths", qemuAllowedBaseImagePaths, "comma-separated qemu guest image paths tenants may request")
 	allowedGuestProfiles := env("SANDBOX_ALLOWED_PROFILES", "")
-	qemuAllowedProfiles := env("SANDBOX_QEMU_ALLOWED_PROFILES", "core,runtime,browser,container,debug")
+	qemuAllowedProfiles := env("SANDBOX_QEMU_ALLOWED_PROFILES", "")
 	fs.StringVar(&qemuAllowedProfiles, "qemu-allowed-profiles", qemuAllowedProfiles, "comma-separated qemu guest profiles allowed for sandbox creation")
 	dangerousGuestProfiles := env("SANDBOX_DANGEROUS_PROFILES", "")
 	qemuDangerousProfiles := env("SANDBOX_QEMU_DANGEROUS_PROFILES", "container,debug")
@@ -14581,6 +15958,8 @@ func Load(args []string) (Config, error) {
 	fs.BoolVar(&qemuAllowDangerousProfiles, "qemu-allow-dangerous-profiles", qemuAllowDangerousProfiles, "allow dangerous qemu guest profiles such as container and debug")
 	qemuAllowSSHCompat := strings.EqualFold(env("SANDBOX_QEMU_ALLOW_SSH_COMPAT", "false"), "true")
 	fs.BoolVar(&qemuAllowSSHCompat, "qemu-allow-ssh-compat", qemuAllowSSHCompat, "allow ssh-compat qemu image contracts in production validation and policy")
+	productionAllowDockerBreakglass := strings.EqualFold(env("SANDBOX_PRODUCTION_ALLOW_DOCKER_BREAKGLASS", "false"), "true")
+	fs.BoolVar(&productionAllowDockerBreakglass, "production-allow-docker-breakglass", productionAllowDockerBreakglass, "allow docker-dev as an explicit production break-glass default")
 	fs.StringVar(&cfg.QEMUSSHUser, "qemu-ssh-user", env("SANDBOX_QEMU_SSH_USER", ""), "qemu guest ssh user")
 	fs.StringVar(&cfg.QEMUSSHPrivateKeyPath, "qemu-ssh-private-key", env("SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH", ""), "qemu guest ssh private key path")
 	fs.StringVar(&cfg.QEMUSSHHostKeyPath, "qemu-ssh-host-key", env("SANDBOX_QEMU_SSH_HOST_KEY_PATH", ""), "qemu guest ssh host public key path")
@@ -14645,6 +16024,8 @@ func Load(args []string) (Config, error) {
 	cfg.QEMUDangerousProfiles = parseGuestProfiles(qemuDangerousProfiles)
 	cfg.QEMUAllowDangerousProfiles = qemuAllowDangerousProfiles
 	cfg.QEMUAllowSSHCompat = qemuAllowSSHCompat
+	cfg.ProductionTransportMode = normalizeProductionTransportMode(cfg.ProductionTransportMode)
+	cfg.ProductionAllowDockerBreakglass = productionAllowDockerBreakglass
 	cfg.DefaultQuota = model.TenantQuota{
 		MaxSandboxes:            envInt("SANDBOX_QUOTA_MAX_SANDBOXES", 10),
 		MaxRunningSandboxes:     envInt("SANDBOX_QUOTA_MAX_RUNNING", 5),
@@ -14658,11 +16039,13 @@ func Load(args []string) (Config, error) {
 		DefaultTunnelVisibility: env("SANDBOX_DEFAULT_TUNNEL_VISIBILITY", "private"),
 	}
 	cfg.Tenants = parseTenants(env("SANDBOX_TOKENS", "dev-token=tenant-dev"))
+	cfg.applyDeploymentProfile()
 	cfg.applyRuntimeSelectionCompatibility()
 	return cfg, cfg.Validate()
 }
 
 func (c Config) Validate() error {
+	c.applyDeploymentProfile()
 	c.applyRuntimeSelectionCompatibility()
 	var problems []string
 	if c.StorageWarningFileCount == 0 {
@@ -14759,14 +16142,35 @@ func (c Config) Validate() error {
 		problems = append(problems, "at least one tenant token is required")
 	}
 	if c.DeploymentMode == "production" {
+		if c.DefaultRuntimeSelection == model.RuntimeSelectionDockerDev && !c.ProductionAllowDockerBreakglass {
+			problems = append(problems, "production mode rejects docker-dev as the default runtime selection unless SANDBOX_PRODUCTION_ALLOW_DOCKER_BREAKGLASS=true")
+		}
 		if !c.DefaultRuntimeSelection.IsVMBacked() {
 			problems = append(problems, fmt.Sprintf("production mode requires a VM-backed runtime class; %q resolves to class %q which is not VM-backed", c.DefaultRuntimeSelection, c.DefaultRuntimeSelection.RuntimeClass()))
 		}
 		if c.AuthMode == "static" {
 			problems = append(problems, "production mode requires SANDBOX_AUTH_MODE=jwt-hs256")
 		}
-		if c.TLSCertPath == "" && !c.TrustedProxyHeaders {
-			problems = append(problems, "production mode requires TLS certificate paths or SANDBOX_TRUST_PROXY_HEADERS=true")
+		switch normalizeProductionTransportMode(c.ProductionTransportMode) {
+		case "auto":
+			if c.TLSCertPath == "" && !c.TrustedProxyHeaders {
+				problems = append(problems, "production mode requires TLS certificate paths or SANDBOX_TRUST_PROXY_HEADERS=true")
+			}
+		case "direct-tls":
+			if c.TLSCertPath == "" || c.TLSKeyPath == "" {
+				problems = append(problems, "production direct-tls mode requires SANDBOX_TLS_CERT_PATH and SANDBOX_TLS_KEY_PATH")
+			}
+		case "terminated-proxy":
+			if !c.TrustedProxyHeaders {
+				problems = append(problems, "production terminated-proxy mode requires SANDBOX_TRUST_PROXY_HEADERS=true")
+			}
+		default:
+			problems = append(problems, fmt.Sprintf("unsupported production transport mode %q", c.ProductionTransportMode))
+		}
+		for _, profile := range c.effectiveAllowedGuestProfiles("qemu") {
+			if c.DeploymentProfile != "exception-container" && (profile == model.GuestProfileContainer || profile == model.GuestProfileDebug) {
+				problems = append(problems, fmt.Sprintf("production mode rejects dangerous default qemu profile %q", profile))
+			}
 		}
 	}
 	for _, dir := range []string{filepath.Dir(c.DatabasePath), c.StorageRoot, c.SnapshotRoot} {
@@ -14916,6 +16320,9 @@ func validateDockerConfig(c Config, probe runtimeValidationProbe) error {
 }
 
 func validateKataConfig(c Config, probe runtimeValidationProbe) error {
+	if probe.goos != "linux" {
+		return fmt.Errorf("kata runtime requires linux (host OS is %q)", probe.goos)
+	}
 	if err := probe.commandExists(c.KataBinary); err != nil {
 		return fmt.Errorf("kata runtime requires a working client binary: %w", err)
 	}
@@ -15019,6 +16426,10 @@ func (c *Config) applyRuntimeSelectionCompatibility() {
 	if c.DefaultRuntimeSelection.IsValid() {
 		c.RuntimeBackend = c.DefaultRuntimeSelection.Backend()
 	}
+	if c.DeploymentMode == "production" && !c.DefaultRuntimeSelection.IsValid() && c.RuntimeBackend == "" {
+		c.DefaultRuntimeSelection = model.RuntimeSelectionQEMUProfessional
+		c.RuntimeBackend = c.DefaultRuntimeSelection.Backend()
+	}
 }
 
 func parseRuntimeSelections(raw string) []model.RuntimeSelection {
@@ -15037,6 +16448,38 @@ func parseRuntimeSelections(raw string) []model.RuntimeSelection {
 		result = append(result, selection)
 	}
 	return result
+}
+
+func defaultRuntimeBackend(args []string) string {
+	if value := strings.TrimSpace(os.Getenv("SANDBOX_RUNTIME")); value != "" {
+		return value
+	}
+	if strings.EqualFold(strings.TrimSpace(flagValue(args, "mode")), "production") {
+		return "qemu"
+	}
+	if strings.EqualFold(strings.TrimSpace(env("SANDBOX_MODE", "development")), "production") {
+		return "qemu"
+	}
+	return "docker"
+}
+
+func flagValue(args []string, name string) string {
+	short := "-" + name
+	long := "--" + name
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		switch {
+		case strings.HasPrefix(arg, short+"="):
+			return strings.TrimPrefix(arg, short+"=")
+		case strings.HasPrefix(arg, long+"="):
+			return strings.TrimPrefix(arg, long+"=")
+		case arg == short || arg == long:
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+		}
+	}
+	return ""
 }
 
 func (c Config) EffectiveQEMUAllowedBaseImagePaths() []string {
@@ -15114,6 +16557,60 @@ func (c Config) effectiveAllowedGuestProfiles(runtimeBackend string) []model.Gue
 	}
 }
 
+func (c *Config) applyDeploymentProfile() {
+	switch strings.TrimSpace(c.DeploymentProfile) {
+	case "":
+		if c.DeploymentMode == "production" {
+			if c.RuntimeBackend == "" {
+				c.RuntimeBackend = "qemu"
+			}
+			if len(c.EnabledRuntimeSelections) == 0 && c.RuntimeBackend == "qemu" {
+				c.EnabledRuntimeSelections = []model.RuntimeSelection{model.RuntimeSelectionQEMUProfessional}
+			}
+			if !c.DefaultRuntimeSelection.IsValid() && c.RuntimeBackend == "qemu" {
+				c.DefaultRuntimeSelection = model.RuntimeSelectionQEMUProfessional
+			}
+			if len(c.QEMUAllowedProfiles) == 0 {
+				c.QEMUAllowedProfiles = []model.GuestProfile{model.GuestProfileCore, model.GuestProfileRuntime}
+			}
+		}
+	case "dev-trusted-docker":
+		c.DeploymentMode = "development"
+		c.RuntimeBackend = "docker"
+		c.TrustedDockerRuntime = true
+		c.EnabledRuntimeSelections = []model.RuntimeSelection{model.RuntimeSelectionDockerDev}
+		c.DefaultRuntimeSelection = model.RuntimeSelectionDockerDev
+	case "production-qemu-core":
+		c.DeploymentMode = "production"
+		c.RuntimeBackend = "qemu"
+		c.EnabledRuntimeSelections = []model.RuntimeSelection{model.RuntimeSelectionQEMUProfessional}
+		c.DefaultRuntimeSelection = model.RuntimeSelectionQEMUProfessional
+		c.QEMUAllowedProfiles = []model.GuestProfile{model.GuestProfileCore, model.GuestProfileRuntime}
+	case "production-qemu-browser":
+		c.DeploymentMode = "production"
+		c.RuntimeBackend = "qemu"
+		c.EnabledRuntimeSelections = []model.RuntimeSelection{model.RuntimeSelectionQEMUProfessional}
+		c.DefaultRuntimeSelection = model.RuntimeSelectionQEMUProfessional
+		c.QEMUAllowedProfiles = []model.GuestProfile{model.GuestProfileCore, model.GuestProfileRuntime, model.GuestProfileBrowser}
+	case "exception-container":
+		c.DeploymentMode = "production"
+		c.RuntimeBackend = "qemu"
+		c.EnabledRuntimeSelections = []model.RuntimeSelection{model.RuntimeSelectionQEMUProfessional}
+		c.DefaultRuntimeSelection = model.RuntimeSelectionQEMUProfessional
+		c.QEMUAllowedProfiles = []model.GuestProfile{model.GuestProfileCore, model.GuestProfileRuntime, model.GuestProfileContainer}
+		c.QEMUAllowDangerousProfiles = true
+	default:
+	}
+}
+
+func normalizeProductionTransportMode(value string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	if trimmed == "" {
+		return "auto"
+	}
+	return trimmed
+}
+
 func (c Config) effectiveDangerousGuestProfiles(runtimeBackend string) []model.GuestProfile {
 	if len(c.DangerousGuestProfiles) > 0 {
 		return c.DangerousGuestProfiles
@@ -15163,6 +16660,8 @@ func resolveQEMUAccel(value, goos string) (string, error) {
 			return "", fmt.Errorf("qemu accel %q is unsupported on host OS %q", value, goos)
 		}
 		return "hvf", nil
+	case "tcg":
+		return "tcg", nil
 	default:
 		return "", fmt.Errorf("unsupported qemu accelerator %q", value)
 	}
@@ -15296,375 +16795,6 @@ func defaultDockerTmpfsSizeMB() int {
 }
 ````
 
-## File: internal/model/model.go
-````go
-package model
-
-import (
-	"errors"
-	"fmt"
-	"time"
-)
-
-const MaxWorkspaceFileTransferBytes = 64 * 1024 * 1024
-
-var ErrFileTransferTooLarge = errors.New("workspace file transfer too large")
-
-func FileTransferTooLargeError(limit int64) error {
-	return fmt.Errorf("%w: workspace file exceeds maximum transfer size of %d bytes", ErrFileTransferTooLarge, limit)
-}
-
-type SandboxStatus string
-
-const (
-	SandboxStatusCreating   SandboxStatus = "creating"
-	SandboxStatusBooting    SandboxStatus = "booting"
-	SandboxStatusDegraded   SandboxStatus = "degraded"
-	SandboxStatusStopped    SandboxStatus = "stopped"
-	SandboxStatusStarting   SandboxStatus = "starting"
-	SandboxStatusRunning    SandboxStatus = "running"
-	SandboxStatusSuspending SandboxStatus = "suspending"
-	SandboxStatusSuspended  SandboxStatus = "suspended"
-	SandboxStatusStopping   SandboxStatus = "stopping"
-	SandboxStatusDeleting   SandboxStatus = "deleting"
-	SandboxStatusDeleted    SandboxStatus = "deleted"
-	SandboxStatusError      SandboxStatus = "error"
-)
-
-type NetworkMode string
-
-const (
-	NetworkModeInternetEnabled  NetworkMode = "internet-enabled"
-	NetworkModeInternetDisabled NetworkMode = "internet-disabled"
-)
-
-type TunnelProtocol string
-
-const (
-	TunnelProtocolHTTP TunnelProtocol = "http"
-	TunnelProtocolTCP  TunnelProtocol = "tcp"
-)
-
-type SnapshotStatus string
-
-const (
-	SnapshotStatusCreating SnapshotStatus = "creating"
-	SnapshotStatusReady    SnapshotStatus = "ready"
-	SnapshotStatusError    SnapshotStatus = "error"
-)
-
-type ExecutionStatus string
-
-const (
-	ExecutionStatusRunning   ExecutionStatus = "running"
-	ExecutionStatusDetached  ExecutionStatus = "detached"
-	ExecutionStatusSucceeded ExecutionStatus = "succeeded"
-	ExecutionStatusFailed    ExecutionStatus = "failed"
-	ExecutionStatusTimedOut  ExecutionStatus = "timed_out"
-	ExecutionStatusCanceled  ExecutionStatus = "canceled"
-)
-
-type GuestProfile string
-
-const (
-	GuestProfileCore      GuestProfile = "core"
-	GuestProfileRuntime   GuestProfile = "runtime"
-	GuestProfileBrowser   GuestProfile = "browser"
-	GuestProfileContainer GuestProfile = "container"
-	GuestProfileDebug     GuestProfile = "debug"
-)
-
-type GuestControlMode string
-
-const (
-	GuestControlModeAgent     GuestControlMode = "agent"
-	GuestControlModeSSHCompat GuestControlMode = "ssh-compat"
-)
-
-func (p GuestProfile) IsValid() bool {
-	switch p {
-	case GuestProfileCore, GuestProfileRuntime, GuestProfileBrowser, GuestProfileContainer, GuestProfileDebug:
-		return true
-	default:
-		return false
-	}
-}
-
-func (m GuestControlMode) IsValid() bool {
-	switch m {
-	case GuestControlModeAgent, GuestControlModeSSHCompat:
-		return true
-	default:
-		return false
-	}
-}
-
-// Sandbox is the primary lifecycle resource returned by sandbox CRUD endpoints.
-type Sandbox struct {
-	ID                       string           `json:"id"`
-	TenantID                 string           `json:"tenant_id"`
-	Status                   SandboxStatus    `json:"status"`
-	RuntimeSelection         RuntimeSelection `json:"runtime_selection,omitempty"`
-	RuntimeBackend           string           `json:"runtime_backend"`
-	RuntimeClass             RuntimeClass     `json:"runtime_class,omitempty"`
-	BaseImageRef             string           `json:"base_image_ref"`
-	Profile                  GuestProfile     `json:"profile,omitempty"`
-	Features                 []string         `json:"features,omitempty"`
-	Capabilities             []string         `json:"capabilities,omitempty"`
-	ControlMode              GuestControlMode `json:"control_mode,omitempty"`
-	ControlProtocolVersion   string           `json:"control_protocol_version,omitempty"`
-	WorkspaceContractVersion string           `json:"workspace_contract_version,omitempty"`
-	ImageContractVersion     string           `json:"image_contract_version,omitempty"`
-	CPULimit                 CPUQuantity      `json:"cpu_limit"`
-	MemoryLimitMB            int              `json:"memory_limit_mb"`
-	PIDsLimit                int              `json:"pids_limit"`
-	DiskLimitMB              int              `json:"disk_limit_mb"`
-	NetworkMode              NetworkMode      `json:"network_mode"`
-	AllowTunnels             bool             `json:"allow_tunnels"`
-	StorageRoot              string           `json:"-"`
-	WorkspaceRoot            string           `json:"-"`
-	CacheRoot                string           `json:"-"`
-	RuntimeID                string           `json:"runtime_id"`
-	RuntimeStatus            string           `json:"runtime_status"`
-	LastRuntimeError         string           `json:"last_runtime_error,omitempty"`
-	CreatedAt                time.Time        `json:"created_at"`
-	UpdatedAt                time.Time        `json:"updated_at"`
-	LastActiveAt             time.Time        `json:"last_active_at"`
-	DeletedAt                *time.Time       `json:"deleted_at,omitempty"`
-}
-
-// CreateSandboxRequest is the JSON payload accepted by POST /v1/sandboxes.
-type CreateSandboxRequest struct {
-	RuntimeSelection RuntimeSelection `json:"runtime_selection,omitempty"`
-	BaseImageRef     string           `json:"base_image_ref"`
-	Profile          GuestProfile     `json:"profile,omitempty"`
-	Features         []string         `json:"features,omitempty"`
-	Capabilities     []string         `json:"capabilities,omitempty"`
-	CPULimit         CPUQuantity      `json:"cpu_limit"`
-	MemoryLimitMB    int              `json:"memory_limit_mb"`
-	PIDsLimit        int              `json:"pids_limit"`
-	DiskLimitMB      int              `json:"disk_limit_mb"`
-	NetworkMode      NetworkMode      `json:"network_mode"`
-	AllowTunnels     *bool            `json:"allow_tunnels,omitempty"`
-	Start            bool             `json:"start"`
-}
-
-// LifecycleRequest is the JSON payload used by lifecycle mutation endpoints.
-type LifecycleRequest struct {
-	Force bool `json:"force"`
-}
-
-// ErrorResponse is the normalized error envelope returned by API endpoints.
-type ErrorResponse struct {
-	Error  string `json:"error"`
-	Code   string `json:"code"`
-	Status int    `json:"status"`
-}
-
-// ExecRequest is the JSON payload accepted by POST /v1/sandboxes/{id}/exec.
-type ExecRequest struct {
-	Command  []string          `json:"command"`
-	Env      map[string]string `json:"env"`
-	Cwd      string            `json:"cwd"`
-	Timeout  time.Duration     `json:"timeout"`
-	Detached bool              `json:"detached"`
-}
-
-// Execution is the command result returned by sync exec and SSE terminal events.
-type Execution struct {
-	ID              string          `json:"id"`
-	SandboxID       string          `json:"sandbox_id"`
-	TenantID        string          `json:"tenant_id"`
-	Command         string          `json:"command"`
-	Cwd             string          `json:"cwd"`
-	TimeoutSeconds  int             `json:"timeout_seconds"`
-	Status          ExecutionStatus `json:"status"`
-	ExitCode        *int            `json:"exit_code,omitempty"`
-	StdoutPreview   string          `json:"stdout_preview,omitempty"`
-	StderrPreview   string          `json:"stderr_preview,omitempty"`
-	StdoutTruncated bool            `json:"stdout_truncated"`
-	StderrTruncated bool            `json:"stderr_truncated"`
-	StartedAt       time.Time       `json:"started_at"`
-	CompletedAt     *time.Time      `json:"completed_at,omitempty"`
-	DurationMS      *int64          `json:"duration_ms,omitempty"`
-}
-
-// TTYRequest is the first WebSocket frame sent when opening a TTY session.
-type TTYRequest struct {
-	Command []string          `json:"command"`
-	Env     map[string]string `json:"env"`
-	Cwd     string            `json:"cwd"`
-	Cols    int               `json:"cols"`
-	Rows    int               `json:"rows"`
-}
-
-// TTYSession describes a persisted terminal session record.
-type TTYSession struct {
-	ID         string     `json:"id"`
-	SandboxID  string     `json:"sandbox_id"`
-	TenantID   string     `json:"tenant_id"`
-	Command    string     `json:"command"`
-	Connected  bool       `json:"connected"`
-	CreatedAt  time.Time  `json:"created_at"`
-	ClosedAt   *time.Time `json:"closed_at,omitempty"`
-	LastResize string     `json:"last_resize,omitempty"`
-}
-
-// FileWriteRequest is the JSON payload for file writes.
-type FileWriteRequest struct {
-	Content       string `json:"content,omitempty"`
-	ContentBase64 string `json:"content_base64,omitempty"`
-	Encoding      string `json:"encoding,omitempty"`
-}
-
-// FileReadResponse is the JSON payload returned by file reads.
-type FileReadResponse struct {
-	Path          string `json:"path"`
-	Content       string `json:"content,omitempty"`
-	ContentBase64 string `json:"content_base64,omitempty"`
-	Size          int64  `json:"size"`
-	Encoding      string `json:"encoding"`
-}
-
-// MkdirRequest is the JSON payload for directory creation.
-type MkdirRequest struct {
-	Path string `json:"path"`
-}
-
-// CreateTunnelRequest is the JSON payload accepted by tunnel creation endpoints.
-type CreateTunnelRequest struct {
-	TargetPort int            `json:"target_port"`
-	Protocol   TunnelProtocol `json:"protocol"`
-	AuthMode   string         `json:"auth_mode"`
-	Visibility string         `json:"visibility"`
-}
-
-// CreateTunnelSignedURLRequest is the JSON payload accepted by signed browser URL issuance.
-type CreateTunnelSignedURLRequest struct {
-	Path       string `json:"path,omitempty"`
-	TTLSeconds int    `json:"ttl_seconds,omitempty"`
-}
-
-// Tunnel is the HTTP tunnel resource returned by tunnel endpoints.
-type Tunnel struct {
-	ID             string         `json:"id"`
-	SandboxID      string         `json:"sandbox_id"`
-	TenantID       string         `json:"tenant_id"`
-	TargetPort     int            `json:"target_port"`
-	Protocol       TunnelProtocol `json:"protocol"`
-	AuthMode       string         `json:"auth_mode"`
-	Visibility     string         `json:"visibility"`
-	Endpoint       string         `json:"endpoint"`
-	AccessToken    string         `json:"access_token,omitempty"`
-	AuthSecretHash string         `json:"-"`
-	CreatedAt      time.Time      `json:"created_at"`
-	RevokedAt      *time.Time     `json:"revoked_at,omitempty"`
-}
-
-// TunnelSignedURL is the browser-launch capability returned by POST /v1/tunnels/{id}/signed-url.
-type TunnelSignedURL struct {
-	URL       string    `json:"url"`
-	ExpiresAt time.Time `json:"expires_at"`
-}
-
-// CreateSnapshotRequest is the JSON payload accepted by snapshot creation.
-type CreateSnapshotRequest struct {
-	Name string `json:"name"`
-}
-
-// Snapshot is the snapshot resource returned by snapshot endpoints.
-type Snapshot struct {
-	ID                       string           `json:"id"`
-	SandboxID                string           `json:"sandbox_id"`
-	TenantID                 string           `json:"tenant_id"`
-	Name                     string           `json:"name"`
-	Status                   SnapshotStatus   `json:"status"`
-	ImageRef                 string           `json:"image_ref"`
-	RuntimeSelection         RuntimeSelection `json:"runtime_selection,omitempty"`
-	RuntimeBackend           string           `json:"runtime_backend,omitempty"`
-	Profile                  GuestProfile     `json:"profile,omitempty"`
-	ImageContractVersion     string           `json:"image_contract_version,omitempty"`
-	ControlProtocolVersion   string           `json:"control_protocol_version,omitempty"`
-	WorkspaceContractVersion string           `json:"workspace_contract_version,omitempty"`
-	WorkspaceTar             string           `json:"-"`
-	ExportLocation           string           `json:"export_location,omitempty"`
-	CreatedAt                time.Time        `json:"created_at"`
-	CompletedAt              *time.Time       `json:"completed_at,omitempty"`
-}
-
-// RestoreSnapshotRequest is the JSON payload accepted by snapshot restore.
-type RestoreSnapshotRequest struct {
-	TargetSandboxID string `json:"target_sandbox_id"`
-}
-
-// RuntimeHealth is the runtime health report returned by GET /v1/runtime/health.
-type RuntimeHealth struct {
-	DefaultRuntimeSelection  RuntimeSelection       `json:"default_runtime_selection,omitempty"`
-	EnabledRuntimeSelections []RuntimeSelection     `json:"enabled_runtime_selections,omitempty"`
-	Backend                  string                 `json:"backend"`
-	Healthy                  bool                   `json:"healthy"`
-	CheckedAt                time.Time              `json:"checked_at"`
-	RuntimeSelectionCounts   map[string]int         `json:"runtime_selection_counts,omitempty"`
-	StatusCounts             map[string]int         `json:"status_counts,omitempty"`
-	Sandboxes                []RuntimeSandboxHealth `json:"sandboxes"`
-}
-
-// RuntimeInfo is the runtime summary returned by GET /v1/runtime/info.
-type RuntimeInfo struct {
-	Backend                  string             `json:"backend,omitempty"`
-	Class                    string             `json:"class,omitempty"`
-	DefaultRuntimeSelection  RuntimeSelection   `json:"default_runtime_selection,omitempty"`
-	EnabledRuntimeSelections []RuntimeSelection `json:"enabled_runtime_selections,omitempty"`
-}
-
-// RuntimeSandboxHealth is one sandbox entry inside RuntimeHealth.
-type RuntimeSandboxHealth struct {
-	SandboxID        string           `json:"sandbox_id"`
-	TenantID         string           `json:"tenant_id"`
-	RuntimeSelection RuntimeSelection `json:"runtime_selection,omitempty"`
-	PersistedStatus  SandboxStatus    `json:"persisted_status"`
-	ObservedStatus   SandboxStatus    `json:"observed_status"`
-	RuntimeID        string           `json:"runtime_id"`
-	RuntimeStatus    string           `json:"runtime_status"`
-	Pid              int              `json:"pid"`
-	IPAddress        string           `json:"ip_address,omitempty"`
-	Error            string           `json:"error,omitempty"`
-}
-
-type Tenant struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	TokenHash string    `json:"-"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// TenantQuota is the tenant quota configuration exposed through quota and capacity responses.
-type TenantQuota struct {
-	TenantID                string      `json:"tenant_id"`
-	MaxSandboxes            int         `json:"max_sandboxes"`
-	MaxRunningSandboxes     int         `json:"max_running_sandboxes"`
-	MaxConcurrentExecs      int         `json:"max_concurrent_execs"`
-	MaxTunnels              int         `json:"max_tunnels"`
-	MaxCPUCores             CPUQuantity `json:"max_cpu_cores"`
-	MaxMemoryMB             int         `json:"max_memory_mb"`
-	MaxStorageMB            int         `json:"max_storage_mb"`
-	AllowTunnels            bool        `json:"allow_tunnels"`
-	DefaultTunnelAuthMode   string      `json:"default_tunnel_auth_mode"`
-	DefaultTunnelVisibility string      `json:"default_tunnel_visibility"`
-}
-
-type AuditEvent struct {
-	ID         string    `json:"id"`
-	TenantID   string    `json:"tenant_id"`
-	SandboxID  string    `json:"sandbox_id,omitempty"`
-	Action     string    `json:"action"`
-	ResourceID string    `json:"resource_id,omitempty"`
-	Outcome    string    `json:"outcome"`
-	Message    string    `json:"message"`
-	CreatedAt  time.Time `json:"created_at"`
-}
-````
-
 ## File: internal/api/router.go
 ````go
 package api
@@ -15704,16 +16834,19 @@ type Router struct {
 	service          *service.Service
 	operatorHost     string
 	tunnelSigningKey []byte
+	deploymentMode   string
 	upgrader         websocket.Upgrader
 }
 
 const (
-	tunnelSignedURLDefaultTTL = 5 * time.Minute
-	tunnelSignedURLMaxTTL     = 15 * time.Minute
-	tunnelSignedURLExpiryKey  = "or3_exp"
-	tunnelSignedURLSigKey     = "or3_sig"
-	tunnelAuthCookieName      = "or3_tunnel_auth"
-	fileUploadBodyBytes       = ((model.MaxWorkspaceFileTransferBytes + 2) / 3 * 4) + 64*1024
+	tunnelSignedURLDefaultTTL    = 5 * time.Minute
+	tunnelSignedURLProductionTTL = 2 * time.Minute
+	tunnelSignedURLMaxTTL        = 15 * time.Minute
+	tunnelSignedURLExpiryKey     = "or3_exp"
+	tunnelSignedURLSigKey        = "or3_sig"
+	tunnelSignedURLCapabilityKey = "or3_cap"
+	tunnelAuthCookieName         = "or3_tunnel_auth"
+	fileUploadBodyBytes          = ((model.MaxWorkspaceFileTransferBytes + 2) / 3 * 4) + 64*1024
 )
 
 func New(log *slog.Logger, svc *service.Service, cfg config.Config) http.Handler {
@@ -15722,6 +16855,7 @@ func New(log *slog.Logger, svc *service.Service, cfg config.Config) http.Handler
 		service:          svc,
 		operatorHost:     strings.TrimRight(cfg.OperatorHost, "/"),
 		tunnelSigningKey: newTunnelSigningKey(cfg),
+		deploymentMode:   cfg.DeploymentMode,
 		upgrader:         websocket.Upgrader{},
 	}
 	router.upgrader.CheckOrigin = router.checkWebSocketOrigin
@@ -16447,6 +17581,9 @@ func (rt *Router) handleTunnelSignedURL(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	ttl := tunnelSignedURLDefaultTTL
+	if rt.deploymentMode == "production" {
+		ttl = tunnelSignedURLProductionTTL
+	}
 	if req.TTLSeconds > 0 {
 		ttl = time.Duration(req.TTLSeconds) * time.Second
 	}
@@ -16460,11 +17597,27 @@ func (rt *Router) handleTunnelSignedURL(w http.ResponseWriter, r *http.Request, 
 	}
 	expiresAt := time.Now().UTC().Add(ttl)
 	expiry := strconv.FormatInt(expiresAt.Unix(), 10)
-	sig := rt.signTunnelCapability(tunnel.ID, capabilityPath, expiry)
-	signedURL, err := rt.buildTunnelProxyURL(tunnel.ID, capabilityPath, url.Values{
+	capabilityID := ""
+	query := url.Values{
 		tunnelSignedURLExpiryKey: []string{expiry},
-		tunnelSignedURLSigKey:    []string{sig},
-	}, r)
+		tunnelSignedURLSigKey:    []string{rt.signTunnelCapability(tunnel.ID, capabilityPath, expiry)},
+	}
+	if req.OneTime {
+		capabilityID = newTunnelCapabilityID()
+		if err := rt.service.CreateTunnelCapability(r.Context(), model.TunnelCapability{
+			ID:        capabilityID,
+			TunnelID:  tunnel.ID,
+			NonceHash: config.HashToken(capabilityID),
+			Path:      capabilityPath,
+			ExpiresAt: expiresAt,
+			CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			handleError(w, err)
+			return
+		}
+		query.Set(tunnelSignedURLCapabilityKey, capabilityID)
+	}
+	signedURL, err := rt.buildTunnelProxyURL(tunnel.ID, capabilityPath, query, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
@@ -16481,7 +17634,7 @@ func (rt *Router) handleTunnelSignedURL(w http.ResponseWriter, r *http.Request, 
 		"ttl_seconds", int(ttl.Seconds()),
 		"outcome", "ok",
 	)
-	writeJSON(w, http.StatusOK, model.TunnelSignedURL{URL: signedURL, ExpiresAt: expiresAt})
+	writeJSON(w, http.StatusOK, model.TunnelSignedURL{URL: signedURL, ExpiresAt: expiresAt, CapabilityID: capabilityID})
 }
 
 func (rt *Router) handleTunnelProxy(w http.ResponseWriter, r *http.Request, tunnelID string) {
@@ -16679,7 +17832,7 @@ func (rt *Router) authorizeTunnelBrowserSession(w http.ResponseWriter, r *http.R
 		return false, false
 	}
 	if cookie, err := r.Cookie(tunnelAuthCookieName); err == nil {
-		if capabilityPath, expiry, sig, ok := parseTunnelAuthCookie(cookie.Value); ok && rt.validateTunnelCapability(tunnel.ID, capabilityPath, expiry, sig) && tunnelCapabilityAllowsRequest(capabilityPath, requestCapability) {
+		if capabilityPath, expiry, sig, capabilityID, ok := parseTunnelAuthCookie(cookie.Value); ok && rt.validateTunnelCapability(r.Context(), tunnel.ID, capabilityPath, expiry, sig, capabilityID) && tunnelCapabilityAllowsRequest(capabilityPath, requestCapability) {
 			return true, false
 		}
 	}
@@ -16688,14 +17841,15 @@ func (rt *Router) authorizeTunnelBrowserSession(w http.ResponseWriter, r *http.R
 	}
 	expiry := r.URL.Query().Get(tunnelSignedURLExpiryKey)
 	sig := r.URL.Query().Get(tunnelSignedURLSigKey)
-	if !rt.validateTunnelCapability(tunnel.ID, requestCapability, expiry, sig) {
+	capabilityID := r.URL.Query().Get(tunnelSignedURLCapabilityKey)
+	if !rt.validateTunnelCapability(r.Context(), tunnel.ID, requestCapability, expiry, sig, capabilityID) {
 		return false, false
 	}
 	expiresAt, _ := strconv.ParseInt(expiry, 10, 64)
 	cookiePath := "/v1/tunnels/" + tunnel.ID + "/proxy" + tunnelCapabilityCookiePath(requestCapability)
 	http.SetCookie(w, &http.Cookie{
 		Name:     tunnelAuthCookieName,
-		Value:    tunnelAuthCookieValue(requestCapability, expiry, sig),
+		Value:    tunnelAuthCookieValue(requestCapability, expiry, sig, ""),
 		Path:     cookiePath,
 		Expires:  time.Unix(expiresAt, 0).UTC(),
 		HttpOnly: true,
@@ -16706,6 +17860,7 @@ func (rt *Router) authorizeTunnelBrowserSession(w http.ResponseWriter, r *http.R
 	query := redirectURL.Query()
 	query.Del(tunnelSignedURLExpiryKey)
 	query.Del(tunnelSignedURLSigKey)
+	query.Del(tunnelSignedURLCapabilityKey)
 	redirectURL.RawQuery = query.Encode()
 	rt.serveTunnelBootstrapPage(w, redirectURL.String())
 	return false, true
@@ -16771,7 +17926,7 @@ func (rt *Router) signTunnelCapability(tunnelID, capabilityPath, expiry string) 
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (rt *Router) validateTunnelCapability(tunnelID, capabilityPath, expiry, signature string) bool {
+func (rt *Router) validateTunnelCapability(ctx context.Context, tunnelID, capabilityPath, expiry, signature, capabilityID string) bool {
 	if strings.TrimSpace(expiry) == "" || strings.TrimSpace(signature) == "" {
 		return false
 	}
@@ -16783,7 +17938,23 @@ func (rt *Router) validateTunnelCapability(tunnelID, capabilityPath, expiry, sig
 		return false
 	}
 	expected := rt.signTunnelCapability(tunnelID, capabilityPath, expiry)
-	return hmac.Equal([]byte(expected), []byte(signature))
+	if !hmac.Equal([]byte(expected), []byte(signature)) {
+		return false
+	}
+	if strings.TrimSpace(capabilityID) == "" {
+		return true
+	}
+	capability, err := rt.service.GetTunnelCapability(ctx, capabilityID)
+	if err != nil {
+		return false
+	}
+	if capability.TunnelID != tunnelID || capability.RevokedAt != nil || capability.ConsumedAt != nil || time.Now().UTC().After(capability.ExpiresAt) || capability.Path != capabilityPath {
+		return false
+	}
+	if err := rt.service.ConsumeTunnelCapability(ctx, capabilityID); err != nil {
+		return false
+	}
+	return true
 }
 
 func newTunnelSigningKey(cfg config.Config) []byte {
@@ -16850,7 +18021,7 @@ func tunnelUpstreamQuery(query url.Values, queryAccessToken string) url.Values {
 	filtered := url.Values{}
 	for key, values := range query {
 		switch key {
-		case tunnelSignedURLExpiryKey, tunnelSignedURLSigKey:
+		case tunnelSignedURLExpiryKey, tunnelSignedURLSigKey, tunnelSignedURLCapabilityKey:
 			continue
 		case "token":
 			preserved := make([]string, 0, len(values))
@@ -16896,20 +18067,31 @@ func sanitizeTunnelProxyRequest(header http.Header) {
 	}
 }
 
-func tunnelAuthCookieValue(capabilityPath, expiry, sig string) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(capabilityPath)) + "." + expiry + "." + sig
+func tunnelAuthCookieValue(capabilityPath, expiry, sig, capabilityID string) string {
+	value := base64.RawURLEncoding.EncodeToString([]byte(capabilityPath)) + "." + expiry + "." + sig
+	if strings.TrimSpace(capabilityID) == "" {
+		return value
+	}
+	return value + "." + base64.RawURLEncoding.EncodeToString([]byte(capabilityID))
 }
 
-func parseTunnelAuthCookie(value string) (capabilityPath string, expiry string, sig string, ok bool) {
-	parts := strings.SplitN(value, ".", 3)
-	if len(parts) != 3 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[2]) == "" {
-		return "", "", "", false
+func parseTunnelAuthCookie(value string) (capabilityPath string, expiry string, sig string, capabilityID string, ok bool) {
+	parts := strings.SplitN(value, ".", 4)
+	if len(parts) < 3 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[2]) == "" {
+		return "", "", "", "", false
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return "", "", "", false
+		return "", "", "", "", false
 	}
-	return string(decoded), parts[1], parts[2], true
+	if len(parts) == 4 && strings.TrimSpace(parts[3]) != "" {
+		capabilityBytes, err := base64.RawURLEncoding.DecodeString(parts[3])
+		if err != nil {
+			return "", "", "", "", false
+		}
+		capabilityID = string(capabilityBytes)
+	}
+	return string(decoded), parts[1], parts[2], capabilityID, true
 }
 
 func normalizeTunnelCapabilityPath(raw string) (string, error) {
@@ -16950,7 +18132,7 @@ func tunnelCapabilityFromProxyRequest(r *http.Request, tunnelID string) (string,
 	}
 	values := url.Values{}
 	for key, rawValues := range r.URL.Query() {
-		if key == tunnelSignedURLExpiryKey || key == tunnelSignedURLSigKey {
+		if key == tunnelSignedURLExpiryKey || key == tunnelSignedURLSigKey || key == tunnelSignedURLCapabilityKey {
 			continue
 		}
 		for _, value := range rawValues {
@@ -17156,6 +18338,10 @@ func sanitizeTunnelAuditPath(path string) string {
 	return sanitized
 }
 
+func newTunnelCapabilityID() string {
+	return fmt.Sprintf("cap-%d", time.Now().UTC().UnixNano())
+}
+
 type responseRecorder struct {
 	http.ResponseWriter
 	status int
@@ -17271,7 +18457,9 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -17347,7 +18535,7 @@ func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota 
 	if err != nil {
 		return model.Sandbox{}, err
 	}
-	if err := s.enforceCreatePolicy(ctx, tenant.ID, req); err != nil {
+	if err := s.enforceCreatePolicy(ctx, tenant.ID, req, contract); err != nil {
 		return model.Sandbox{}, err
 	}
 	id := newID("sbx-")
@@ -18086,8 +19274,23 @@ func (s *Service) RevokeTunnel(ctx context.Context, tenantID, tunnelID string) e
 	if err := s.store.RevokeTunnel(ctx, tenantID, tunnelID); err != nil {
 		return err
 	}
+	if err := s.store.RevokeTunnelCapabilities(ctx, tunnelID); err != nil {
+		return err
+	}
 	s.recordAudit(ctx, tenantID, tunnel.SandboxID, "tunnel.revoke", tunnelID, "ok", tunnelAuditDetail(tunnel))
 	return nil
+}
+
+func (s *Service) CreateTunnelCapability(ctx context.Context, capability model.TunnelCapability) error {
+	return s.store.CreateTunnelCapability(ctx, capability)
+}
+
+func (s *Service) GetTunnelCapability(ctx context.Context, capabilityID string) (model.TunnelCapability, error) {
+	return s.store.GetTunnelCapability(ctx, capabilityID)
+}
+
+func (s *Service) ConsumeTunnelCapability(ctx context.Context, capabilityID string) error {
+	return s.store.ConsumeTunnelCapability(ctx, capabilityID)
 }
 
 func (s *Service) GetTunnel(ctx context.Context, tenantID, tunnelID string) (model.Tunnel, model.Sandbox, error) {
@@ -18208,6 +19411,13 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 	snapshot.Status = model.SnapshotStatusReady
 	completed := time.Now().UTC()
 	snapshot.CompletedAt = &completed
+	if snapshot.WorkspaceTar != "" && looksLikeFilesystemPath(snapshot.WorkspaceTar) {
+		sum, err := fileSHA256(snapshot.WorkspaceTar)
+		if err != nil {
+			return failSnapshot(err)
+		}
+		snapshot.BundleSHA256 = sum
+	}
 	if s.cfg.OptionalSnapshotExport != "" {
 		stage = "export_bundle"
 		exportLocation, err := s.exportSnapshotBundle(ctx, sandbox, snapshot)
@@ -18740,6 +19950,9 @@ func (s *Service) revokeActiveTunnels(ctx context.Context, tenantID string, sand
 		if err := s.store.RevokeTunnel(ctx, tenantID, tunnel.ID); err != nil {
 			return err
 		}
+		if err := s.store.RevokeTunnelCapabilities(ctx, tunnel.ID); err != nil {
+			return err
+		}
 		s.recordAudit(ctx, tenantID, sandbox.ID, "tunnel.revoke", tunnel.ID, "ok", auditDetail(
 			auditKV("reason", reason),
 			tunnelAuditDetail(tunnel),
@@ -18953,6 +20166,13 @@ func (s *Service) validateSnapshotCompatibility(snapshot model.Snapshot, sandbox
 	if snapshot.WorkspaceContractVersion != "" && sandbox.WorkspaceContractVersion != "" && snapshot.WorkspaceContractVersion != sandbox.WorkspaceContractVersion {
 		return fmt.Errorf("snapshot workspace contract version %q does not match target sandbox workspace contract version %q", snapshot.WorkspaceContractVersion, sandbox.WorkspaceContractVersion)
 	}
+	restoreImageRef := snapshot.ImageRef
+	if sandboxSelection.Backend() == "qemu" {
+		restoreImageRef = sandbox.BaseImageRef
+	}
+	if err := s.enforcePromotedImagePolicy(context.Background(), sandbox.TenantID, sandbox.ID, resolvedSandboxRuntimeSelection(sandbox), restoreImageRef, "policy.snapshot.restore", guestimage.Contract{}); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -19012,6 +20232,15 @@ func (s *Service) ensureSnapshotArtifacts(ctx context.Context, sandbox model.San
 		}
 	}
 	if haveLocal {
+		if snapshot.BundleSHA256 != "" && snapshot.WorkspaceTar != "" && looksLikeFilesystemPath(snapshot.WorkspaceTar) {
+			sum, err := fileSHA256(snapshot.WorkspaceTar)
+			if err != nil {
+				return model.Snapshot{}, err
+			}
+			if !strings.EqualFold(sum, snapshot.BundleSHA256) {
+				return model.Snapshot{}, fmt.Errorf("snapshot bundle checksum mismatch")
+			}
+		}
 		return snapshot, nil
 	}
 	if snapshot.ExportLocation == "" {
@@ -19031,6 +20260,15 @@ func (s *Service) ensureSnapshotArtifacts(ctx context.Context, sandbox model.San
 	}
 	snapshot.ImageRef = rebindSnapshotArtifactPath(targetDir, snapshot.ImageRef)
 	snapshot.WorkspaceTar = rebindSnapshotArtifactPath(targetDir, snapshot.WorkspaceTar)
+	if snapshot.BundleSHA256 != "" && snapshot.WorkspaceTar != "" && looksLikeFilesystemPath(snapshot.WorkspaceTar) {
+		sum, err := fileSHA256(snapshot.WorkspaceTar)
+		if err != nil {
+			return model.Snapshot{}, err
+		}
+		if !strings.EqualFold(sum, snapshot.BundleSHA256) {
+			return model.Snapshot{}, fmt.Errorf("snapshot bundle checksum mismatch")
+		}
+	}
 	return snapshot, nil
 }
 
@@ -19121,6 +20359,19 @@ func writeTarGz(destination, root string) error {
 		_, err = io.Copy(tw, file)
 		return err
 	})
+}
+
+func fileSHA256(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func extractTarGz(source, destination string) error {
