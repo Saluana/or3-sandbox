@@ -21,6 +21,7 @@ import (
 	runtimedocker "or3-sandbox/internal/runtime/docker"
 	runtimeqemu "or3-sandbox/internal/runtime/qemu"
 	"or3-sandbox/internal/service"
+	"or3-sandbox/internal/testutil"
 )
 
 func TestPresetRunToolingDocker(t *testing.T) {
@@ -182,8 +183,8 @@ type presetQEMUHarness struct {
 
 func newPresetDockerHarness(t *testing.T) *presetDockerHarness {
 	t.Helper()
-	if _, err := os.Stat("/var/run/docker.sock"); err != nil {
-		t.Skip("docker socket not available")
+	if err := testutil.DockerAvailable(context.Background()); err != nil {
+		t.Skipf("docker unavailable: %v", err)
 	}
 	root := t.TempDir()
 	cfg := config.Config{

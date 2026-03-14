@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"or3-sandbox/internal/model"
+	"or3-sandbox/internal/testutil"
 )
 
 func newFakeDocker(t *testing.T) (string, string) {
@@ -313,8 +314,8 @@ func TestPreviewWriterTracksTruncation(t *testing.T) {
 }
 
 func TestDockerRuntimeLifecycle(t *testing.T) {
-	if _, err := os.Stat("/var/run/docker.sock"); err != nil {
-		t.Skip("docker socket not available")
+	if err := testutil.DockerAvailable(context.Background()); err != nil {
+		t.Skipf("docker unavailable: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()

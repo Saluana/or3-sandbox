@@ -33,6 +33,7 @@ import (
 	"or3-sandbox/internal/repository"
 	runtimedocker "or3-sandbox/internal/runtime/docker"
 	"or3-sandbox/internal/service"
+	"or3-sandbox/internal/testutil"
 )
 
 func TestAPILifecycleOwnershipFilesAndSnapshots(t *testing.T) {
@@ -1846,8 +1847,8 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	if _, err := os.Stat("/var/run/docker.sock"); err != nil {
-		t.Skip("docker socket not available")
+	if err := testutil.DockerAvailable(context.Background()); err != nil {
+		t.Skipf("docker unavailable: %v", err)
 	}
 	root := t.TempDir()
 	cfg := config.Config{
