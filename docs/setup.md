@@ -44,6 +44,36 @@ cd or3-sandbox
 
 If you already have the repo, just `cd` into it.
 
+## Bootstrap helper scripts
+
+If you want a runtime-specific host bootstrap instead of installing packages by hand,
+the repo now ships separate installer scripts:
+
+```bash
+./scripts/install-docker-runtime.sh
+./scripts/install-kata-runtime.sh
+./scripts/install-qemu-runtime.sh
+```
+
+Notes:
+
+- these scripts currently target apt-based Linux hosts
+- the Docker script installs Docker Engine, starts the daemon, and downloads Go modules for the repo
+- the Kata script installs containerd plus the latest upstream Kata static release, verifies the Kata shim is runnable, and fails early on older hosts whose glibc is too old for the current upstream release
+- the QEMU script installs the host packages needed by the repo's QEMU path and, by default, builds the repo's `core` guest image
+
+Kata-specific note:
+
+- `ctr` usually needs `sudo` on a default Ubuntu host because `/run/containerd/containerd.sock` is root-owned
+- the current upstream static Kata builds are a better fit for Ubuntu 22.04+ than Ubuntu 20.04
+
+QEMU-specific options:
+
+```bash
+PROFILE=runtime ./scripts/install-qemu-runtime.sh
+SKIP_IMAGE_BUILD=1 ./scripts/install-qemu-runtime.sh
+```
+
 ## Step 2: Make sure Docker works
 
 Run:
@@ -111,7 +141,7 @@ curl http://127.0.0.1:8080/healthz
 Expected result:
 
 ```json
-{"ok":true}
+{ "ok": true }
 ```
 
 ### Runtime health check
