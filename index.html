@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>or3-sandbox — Isolated Execution Environments, Instantly</title>
+<meta name="description" content="Single-node sandbox control plane for durable, isolated tenant environments.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,0&display=swap">
+<style>
+/* ══════════════════════════════════════════════════════════════
+   M3 Design Tokens — Dark Theme (Deep Purple / Teal Accent)
+   Using M3 tonal palette with creative surface layering
+   ══════════════════════════════════════════════════════════════ */
+:root {
+  /* Primary */
+  --primary:              #C9B8FF;
+  --on-primary:           #2F1578;
+  --primary-container:    #4A3590;
+  --on-primary-container: #E7DEFF;
+  --primary-fixed-dim:    #C9B8FF;
+
+  /* Secondary */
+  --secondary:            #CCC2DC;
+  --on-secondary:         #332D41;
+  --secondary-container:  #4A4458;
+  --on-secondary-container: #E8DEF8;
+
+  /* Tertiary (Teal accent for check marks, success) */
+  --tertiary:             #7DDAB3;
+  --on-tertiary:          #003825;
+  --tertiary-container:   #005138;
+  --on-tertiary-container:#9AF7CE;
+
+  /* Error */
+  --error:                #FFB4AB;
+  --error-container:      #93000A;
+  --on-error-container:   #FFDAD6;
+
+  /* Surfaces — M3 tonal elevation system */
+  --surface:              #131016;
+  --surface-dim:          #131016;
+  --surface-bright:       #3A3640;
+  --surface-container-lowest:  #0E0B13;
+  --surface-container-low:     #1C1923;
+  --surface-container:         #201D27;
+  --surface-container-high:    #2B2831;
+  --surface-container-highest: #36323C;
+
+  --on-surface:           #E7E1EC;
+  --on-surface-variant:   #C9C3D4;
+  --outline:              #938EA0;
+  --outline-variant:      #49454E;
+  --inverse-surface:      #E7E1EC;
+  --inverse-on-surface:   #322F38;
+  --inverse-primary:      #6240A9;
+
+  /* Extended surface tints for M3 elevation overlays */
+  --surface-tint:         var(--primary);
+
+  /* Shapes (M3 shape scale) */
+  --shape-xs: 4px;
+  --shape-s:  8px;
+  --shape-m:  12px;
+  --shape-l:  16px;
+  --shape-xl: 28px;
+  --shape-full: 9999px;
+
+  /* Motion */
+  --motion-standard: cubic-bezier(0.2, 0, 0, 1);
+  --motion-emphasized: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --motion-duration-medium: 400ms;
+  --motion-duration-long: 600ms;
+}
+
+/* ── Reset ──────────────────────────────────────────────────── */
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  font-family:'Inter',system-ui,sans-serif;
+  background:var(--surface);
+  color:var(--on-surface);
+  -webkit-font-smoothing:antialiased;
+  overflow-x:hidden;
+  line-height:1.6;
+}
+
+/* ── M3 Typography Scale ────────────────────────────────────── */
+.display-large  {font-size:clamp(42px,6vw,57px);line-height:1.12;font-weight:700;letter-spacing:-1.5px}
+.display-medium {font-size:clamp(32px,4.5vw,45px);line-height:1.16;font-weight:700;letter-spacing:-0.5px}
+.display-small  {font-size:36px;line-height:44px;font-weight:600}
+.headline-large {font-size:32px;line-height:40px;font-weight:600}
+.headline-medium{font-size:28px;line-height:36px;font-weight:600}
+.title-large    {font-size:22px;line-height:28px;font-weight:600}
+.title-medium   {font-size:16px;line-height:24px;font-weight:600;letter-spacing:0.15px}
+.body-large     {font-size:16px;line-height:24px;letter-spacing:0.5px}
+.body-medium    {font-size:14px;line-height:20px;letter-spacing:0.25px}
+.label-large    {font-size:14px;line-height:20px;font-weight:600;letter-spacing:0.1px}
+.label-medium   {font-size:12px;line-height:16px;font-weight:600;letter-spacing:0.5px}
+
+a{color:var(--primary);text-decoration:none;transition:color .2s}
+a:hover{color:#fff}
+
+/* ── Layout ─────────────────────────────────────────────────── */
+.container{max-width:1200px;margin:0 auto;padding:0 24px}
+section{padding:100px 0;position:relative}
+
+/* ── Material Symbols ───────────────────────────────────────── */
+.material-symbols-rounded{
+  font-variation-settings:'FILL' 0,'wght' 400,'GRAD' 0,'opsz' 24;
+}
+.icon-24{font-size:24px}
+.icon-32{font-size:32px}
+.icon-40{font-size:40px}
+
+/* ── Ambient Background ─────────────────────────────────────── */
+.hero-bg{
+  position:absolute;inset:0;overflow:hidden;z-index:0;
+}
+.hero-bg .orb{
+  position:absolute;border-radius:50%;filter:blur(100px);opacity:.35;
+  animation:drift 25s ease-in-out infinite;
+}
+.hero-bg .orb-1{width:700px;height:700px;top:-200px;left:-100px;background:var(--primary-container)}
+.hero-bg .orb-2{width:500px;height:500px;bottom:-150px;right:-80px;background:var(--tertiary-container);animation-delay:-12s}
+@keyframes drift{
+  0%,100%{transform:translate(0,0)}
+  50%{transform:translate(40px,-30px)}
+}
+
+/* ══ COMPONENTS ═════════════════════════════════════════════ */
+
+/* ── Top App Bar (M3 small) ─────────────────────────────────── */
+.top-bar{
+  position:fixed;top:0;left:0;right:0;z-index:50;
+  height:64px;display:flex;align-items:center;
+  background:rgba(19,16,22,.6);
+  backdrop-filter:blur(24px) saturate(1.6);
+  -webkit-backdrop-filter:blur(24px) saturate(1.6);
+  border-bottom:1px solid transparent;
+  transition:all .3s var(--motion-standard);
+}
+.top-bar.scrolled{
+  background:rgba(32,29,39,.92);
+  border-bottom-color:var(--outline-variant);
+}
+.top-bar-inner{
+  display:flex;align-items:center;justify-content:space-between;
+  width:100%;max-width:1200px;margin:0 auto;padding:0 24px;
+}
+.brand{display:flex;align-items:center;gap:12px;font-weight:700;font-size:18px;color:var(--on-surface)}
+.brand-mark{
+  width:36px;height:36px;border-radius:var(--shape-m);
+  background:linear-gradient(135deg,var(--primary-container),var(--primary));
+  display:flex;align-items:center;justify-content:center;
+  color:#fff;font-size:12px;font-weight:800;letter-spacing:.5px;
+}
+.nav-items{display:flex;align-items:center;gap:8px}
+.nav-items a{
+  padding:8px 16px;border-radius:var(--shape-full);
+  font-size:14px;font-weight:500;color:var(--on-surface-variant);
+  transition:all .2s var(--motion-standard);
+}
+.nav-items a:hover{color:var(--on-surface);background:rgba(255,255,255,.06)}
+
+/* ── Buttons (M3 filled / outlined / tonal) ─────────────────── */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  border:none;cursor:pointer;text-decoration:none;
+  font-family:inherit;font-weight:600;
+  border-radius:var(--shape-full);
+  transition:all .25s var(--motion-standard);
+}
+.btn-md{height:40px;padding:0 24px;font-size:14px}
+.btn-lg{height:48px;padding:0 32px;font-size:15px}
+.btn-xl{height:56px;padding:0 40px;font-size:16px}
+.btn-filled{
+  background:var(--primary);color:var(--on-primary);
+  box-shadow:0 1px 3px rgba(0,0,0,.3),0 1px 2px rgba(0,0,0,.2);
+}
+.btn-filled:hover{
+  box-shadow:0 4px 12px rgba(201,184,255,.25);
+  filter:brightness(1.08);color:var(--on-primary);
+}
+.btn-outlined{
+  background:transparent;color:var(--primary);
+  box-shadow:inset 0 0 0 1px var(--outline);
+}
+.btn-outlined:hover{
+  background:rgba(201,184,255,.08);
+  box-shadow:inset 0 0 0 1px var(--primary);color:var(--primary);
+}
+.btn-tonal{
+  background:var(--secondary-container);color:var(--on-secondary-container);
+}
+.btn-tonal:hover{filter:brightness(1.1);color:var(--on-secondary-container)}
+
+/* ── Assist Chip (M3) ───────────────────────────────────────── */
+.chip{
+  display:inline-flex;align-items:center;gap:6px;
+  height:32px;padding:0 16px;border-radius:var(--shape-s);
+  font-size:13px;font-weight:600;letter-spacing:.25px;
+  border:1px solid var(--outline-variant);
+  color:var(--on-surface-variant);
+  background:transparent;
+}
+.chip .dot{
+  width:8px;height:8px;border-radius:50%;background:var(--tertiary);
+  box-shadow:0 0 6px rgba(125,218,179,.5);
+  animation:pulse 2.5s ease-in-out infinite;
+}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+
+/* ── Card (M3 filled + outlined variants) ───────────────────── */
+.card{
+  border-radius:var(--shape-l);
+  padding:28px;
+  transition:all .3s var(--motion-standard);
+}
+.card-filled{
+  background:var(--surface-container);
+  border:1px solid transparent;
+}
+.card-filled:hover{
+  background:var(--surface-container-high);
+}
+.card-outlined{
+  background:var(--surface);
+  border:1px solid var(--outline-variant);
+}
+.card-outlined:hover{
+  border-color:var(--outline);
+  background:var(--surface-container-low);
+}
+.card-elevated{
+  background:var(--surface-container-low);
+  border:none;
+  box-shadow:0 1px 3px rgba(0,0,0,.3),0 4px 8px rgba(0,0,0,.15);
+}
+.card-elevated:hover{
+  box-shadow:0 2px 6px rgba(0,0,0,.35),0 8px 16px rgba(0,0,0,.2);
+  transform:translateY(-2px);
+}
+
+/* ── Terminal Component ─────────────────────────────────────── */
+.terminal{
+  border-radius:var(--shape-l);overflow:hidden;
+  background:var(--surface-container-lowest);
+  border:1px solid var(--outline-variant);
+  box-shadow:0 4px 16px rgba(0,0,0,.4),0 12px 40px rgba(0,0,0,.25);
+}
+.terminal-bar{
+  display:flex;align-items:center;gap:8px;
+  padding:14px 20px;
+  background:var(--surface-container);
+  border-bottom:1px solid var(--outline-variant);
+}
+.term-dot{width:12px;height:12px;border-radius:50%}
+.term-dot-r{background:#FF6B6B}.term-dot-y{background:#FFD93D}.term-dot-g{background:#6BCB77}
+.terminal-title{margin-left:auto;font-family:'Roboto Mono',monospace;font-size:12px;color:var(--outline)}
+.terminal-body{
+  padding:24px;font-family:'Roboto Mono',monospace;font-size:13.5px;line-height:2;
+  color:var(--on-surface-variant);overflow-x:auto;white-space:pre-wrap;
+}
+.t-prompt{color:var(--tertiary)}
+.t-cmd{color:var(--on-surface);font-weight:500}
+.t-flag{color:var(--primary)}
+.t-comment{color:var(--outline);font-style:italic}
+.t-out{color:var(--on-surface-variant)}
+.t-val{color:#FFD93D}
+.t-ok{color:var(--tertiary)}
+
+/* ══ SECTIONS ═══════════════════════════════════════════════ */
+
+/* ── Hero ───────────────────────────────────────────────────── */
+.hero{
+  min-height:100vh;display:flex;align-items:center;
+  padding-top:64px;position:relative;overflow:hidden;
+}
+.hero-inner{position:relative;z-index:1;max-width:780px}
+.hero .chip{margin-bottom:28px}
+.hero h1{margin-bottom:20px}
+.hero .subtitle{
+  font-size:clamp(17px,2vw,20px);line-height:1.6;
+  color:var(--on-surface-variant);max-width:640px;margin-bottom:40px;
+}
+.hero-actions{display:flex;gap:16px;flex-wrap:wrap}
+.hero-terminal{margin-top:64px;max-width:720px}
+
+/* ── Section Headers ────────────────────────────────────────── */
+.section-head{margin-bottom:64px}
+.section-head.center{text-align:center;max-width:640px;margin-left:auto;margin-right:auto}
+.section-head .overline{
+  display:inline-block;margin-bottom:16px;
+  font-size:13px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;
+}
+.section-head .body-large{margin-top:16px;color:var(--on-surface-variant)}
+
+/* ── Stats Bar ──────────────────────────────────────────────── */
+.stats-bar{
+  padding:48px 0;
+  background:var(--surface-container-low);
+  border-top:1px solid var(--outline-variant);
+  border-bottom:1px solid var(--outline-variant);
+}
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;text-align:center}
+.stat-value{
+  font-size:clamp(36px,4vw,48px);font-weight:800;line-height:1.2;
+  background:linear-gradient(135deg,var(--primary),var(--tertiary));
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
+}
+.stat-label{font-size:14px;font-weight:600;color:var(--on-surface);margin-top:4px}
+.stat-desc{font-size:13px;color:var(--outline);margin-top:2px}
+
+/* ── Problem Grid ───────────────────────────────────────────── */
+.problem-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px}
+.problem-card .material-symbols-rounded{
+  font-size:32px;color:var(--error);margin-bottom:16px;
+  font-variation-settings:'FILL' 1,'wght' 400,'GRAD' 0,'opsz' 32;
+}
+.problem-card h3{margin-bottom:8px;color:var(--on-surface)}
+.problem-card p{color:var(--on-surface-variant)}
+
+/* ── Feature Rows ───────────────────────────────────────────── */
+.feature-row{
+  display:grid;grid-template-columns:1fr 1fr;gap:64px;align-items:center;
+  margin-bottom:96px;
+}
+.feature-row.reverse{direction:rtl}
+.feature-row.reverse>*{direction:ltr}
+.feature-tag{
+  display:inline-flex;align-items:center;gap:6px;
+  margin-bottom:16px;font-size:12px;font-weight:700;
+  text-transform:uppercase;letter-spacing:1px;
+}
+.feature-tag .material-symbols-rounded{font-size:18px}
+.tag-purple{color:var(--primary)}
+.tag-teal{color:var(--tertiary)}
+.tag-amber{color:#FFD93D}
+.tag-red{color:var(--error)}
+.feature-content h3{margin-bottom:12px}
+.feature-content .body-large{color:var(--on-surface-variant);margin-bottom:24px}
+.feature-list{list-style:none}
+.feature-list li{
+  display:flex;gap:12px;align-items:flex-start;
+  padding:8px 0;font-size:15px;color:var(--on-surface-variant);
+}
+.feature-list li .material-symbols-rounded{
+  font-size:20px;color:var(--tertiary);flex-shrink:0;margin-top:2px;
+  font-variation-settings:'FILL' 1,'wght' 500,'GRAD' 0,'opsz' 20;
+}
+
+/* ── Code Block ─────────────────────────────────────────────── */
+.code-block{
+  background:var(--surface-container-lowest);
+  border:1px solid var(--outline-variant);
+  border-radius:var(--shape-l);
+  padding:28px 24px;
+  font-family:'Roboto Mono',monospace;font-size:13px;line-height:1.7;
+  color:var(--on-surface-variant);white-space:pre;overflow-x:auto;
+  box-shadow:0 4px 16px rgba(0,0,0,.35);
+}
+.code-hl{color:var(--primary);font-weight:500}
+.code-ok{color:var(--tertiary);font-weight:500}
+
+/* ── Steps ──────────────────────────────────────────────────── */
+.steps-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;position:relative}
+.steps-grid::before{
+  content:'';position:absolute;top:36px;left:calc(16.7% + 24px);right:calc(16.7% + 24px);
+  height:2px;background:linear-gradient(90deg,var(--primary),var(--tertiary));opacity:.25;
+}
+.step-card{text-align:center;position:relative;z-index:1}
+.step-num{
+  width:48px;height:48px;border-radius:var(--shape-full);margin:0 auto 24px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:20px;font-weight:700;
+  background:linear-gradient(135deg,var(--primary-container),var(--primary));
+  color:#fff;
+  box-shadow:0 2px 8px rgba(201,184,255,.3);
+}
+.step-card h3{margin-bottom:8px}
+.step-card p{color:var(--on-surface-variant);font-size:14px;max-width:300px;margin:0 auto}
+
+/* ── Use Cases ──────────────────────────────────────────────── */
+.use-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:20px}
+.use-card{position:relative;overflow:hidden}
+.use-card::after{
+  content:'';position:absolute;top:0;left:0;right:0;height:3px;
+  background:linear-gradient(90deg,var(--primary),var(--tertiary));
+  opacity:0;transition:opacity .3s;
+}
+.use-card:hover::after{opacity:1}
+.use-card .material-symbols-rounded{
+  font-size:36px;color:var(--primary);margin-bottom:16px;
+  font-variation-settings:'FILL' 0,'wght' 300,'GRAD' 0,'opsz' 40;
+}
+.use-card h3{margin-bottom:8px}
+.use-card p{color:var(--on-surface-variant);font-size:14px}
+
+/* ── Comparison Table ───────────────────────────────────────── */
+.table-wrap{
+  border-radius:var(--shape-l);overflow:hidden;
+  border:1px solid var(--outline-variant);
+  background:var(--surface-container-lowest);
+}
+table{width:100%;border-collapse:collapse}
+thead th{
+  padding:16px 24px;text-align:left;font-size:13px;font-weight:700;
+  letter-spacing:.5px;text-transform:uppercase;
+  background:var(--surface-container-high);color:var(--on-surface-variant);
+  border-bottom:1px solid var(--outline-variant);
+}
+thead th:last-child{color:var(--primary)}
+tbody td{
+  padding:18px 24px;font-size:14px;color:var(--on-surface-variant);
+  border-bottom:1px solid var(--outline-variant);
+}
+tbody td:first-child{color:var(--on-surface);font-weight:600}
+tbody td:last-child{color:var(--on-surface)}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover{background:rgba(255,255,255,.02)}
+.tbl-check{color:var(--tertiary);font-weight:700;margin-right:6px}
+.tbl-cross{color:var(--error);font-weight:700;margin-right:6px;opacity:.7}
+
+/* ── CTA Section ────────────────────────────────────────────── */
+.cta-section{padding:48px 0 120px}
+.cta-box{
+  position:relative;overflow:hidden;
+  border-radius:var(--shape-xl);
+  padding:80px 48px;text-align:center;
+  background:linear-gradient(135deg,var(--primary-container) 0%,#2d1f5e 50%,var(--tertiary-container) 100%);
+}
+.cta-box::before{
+  content:'';position:absolute;inset:0;
+  background:radial-gradient(ellipse at 30% 50%,rgba(201,184,255,.12),transparent 70%);
+}
+.cta-box>*{position:relative;z-index:1}
+.cta-box h2{color:#fff;margin-bottom:16px}
+.cta-box .body-large{color:rgba(255,255,255,.8);max-width:520px;margin:0 auto 40px}
+.cta-box .btn-filled{background:#fff;color:var(--on-primary);font-weight:700}
+.cta-box .btn-filled:hover{box-shadow:0 4px 20px rgba(255,255,255,.25)}
+.cta-note{margin-top:20px;font-size:13px;color:rgba(255,255,255,.5);display:flex;align-items:center;justify-content:center;gap:8px}
+.cta-note .dot{width:6px;height:6px;border-radius:50%;background:var(--tertiary);animation:pulse 2s ease-in-out infinite}
+
+/* ── Footer ─────────────────────────────────────────────────── */
+footer{
+  padding:40px 0;border-top:1px solid var(--outline-variant);
+  text-align:center;
+}
+.footer-links{display:flex;justify-content:center;gap:32px;margin-bottom:16px;flex-wrap:wrap}
+.footer-links a{font-size:14px;color:var(--outline);font-weight:500}
+.footer-links a:hover{color:var(--on-surface)}
+footer .body-medium{color:var(--outline)}
+
+/* ── Divider (tinted section bg) ────────────────────────────── */
+.surface-tinted{background:var(--surface-container-low)}
+
+/* ── Scroll Reveal ──────────────────────────────────────────── */
+.sr{opacity:0;transform:translateY(24px);transition:opacity var(--motion-duration-long) var(--motion-emphasized),transform var(--motion-duration-long) var(--motion-emphasized)}
+.sr.visible{opacity:1;transform:translateY(0)}
+.sr-d1{transition-delay:80ms}.sr-d2{transition-delay:160ms}.sr-d3{transition-delay:240ms}.sr-d4{transition-delay:320ms}
+
+/* ── Responsive ─────────────────────────────────────────────── */
+@media(max-width:900px){
+  .feature-row,.feature-row.reverse{grid-template-columns:1fr;gap:40px;direction:ltr}
+  .steps-grid{grid-template-columns:1fr;gap:40px}
+  .steps-grid::before{display:none}
+  .stats-grid{grid-template-columns:1fr 1fr}
+}
+@media(max-width:640px){
+  section{padding:72px 0}
+  .nav-items{display:none}
+  .hero{min-height:auto;padding-top:100px;padding-bottom:48px}
+  .hero-actions{flex-direction:column}
+  .hero-actions .btn{width:100%}
+  .stats-grid{grid-template-columns:1fr}
+  .cta-box{padding:56px 24px;border-radius:var(--shape-l)}
+  .table-wrap{font-size:13px}
+  thead th,tbody td{padding:12px 14px}
+}
+</style>
+</head>
+<body>
+
+<!-- ═══ TOP APP BAR ═══ -->
+<header class="top-bar" id="topbar">
+  <div class="top-bar-inner">
+    <div class="brand">
+      <div class="brand-mark">or3</div>
+      sandbox
+    </div>
+    <nav class="nav-items">
+      <a href="#features">Features</a>
+      <a href="#how-it-works">How It Works</a>
+      <a href="#use-cases">Use Cases</a>
+      <a href="#compare">Compare</a>
+      <a href="#get-started" class="btn btn-filled btn-md" style="margin-left:8px">Get Started</a>
+    </nav>
+  </div>
+</header>
+
+<!-- ═══ HERO ═══ -->
+<section class="hero">
+  <div class="hero-bg">
+    <div class="orb orb-1"></div>
+    <div class="orb orb-2"></div>
+  </div>
+  <div class="container">
+    <div class="hero-inner">
+      <div class="chip"><span class="dot"></span>Production-Ready &middot; Self-Hosted &middot; Open Source</div>
+      <h1 class="display-large">Isolated environments.<br>Instant control.</h1>
+      <p class="subtitle">
+        A single-node sandbox control plane that gives every tenant a durable,
+        resource-limited, fully isolated workspace — created with one API call,
+        secured by default.
+      </p>
+      <div class="hero-actions">
+        <a href="#get-started" class="btn btn-filled btn-lg">
+          <span class="material-symbols-rounded icon-24">bolt</span>
+          Start Building
+        </a>
+        <a href="#features" class="btn btn-outlined btn-lg">
+          See What's Inside
+        </a>
+      </div>
+    </div>
+
+    <div class="hero-terminal terminal">
+      <div class="terminal-bar">
+        <span class="term-dot term-dot-r"></span>
+        <span class="term-dot term-dot-y"></span>
+        <span class="term-dot term-dot-g"></span>
+        <span class="terminal-title">sandboxctl</span>
+      </div>
+      <div class="terminal-body"><span class="t-comment"># Create and boot a sandbox in one command</span>
+<span class="t-prompt">$</span> <span class="t-cmd">sandboxctl create</span> <span class="t-flag">--image alpine:3.20 --start</span>
+<span class="t-out">sandbox <span class="t-val">sbx-7f3a91c2</span> created  status: <span class="t-ok">running</span></span>
+
+<span class="t-comment"># Execute a command inside the sandbox</span>
+<span class="t-prompt">$</span> <span class="t-cmd">sandboxctl exec</span> <span class="t-val">sbx-7f3a91c2</span> <span class="t-flag">-- echo "Hello from isolation"</span>
+<span class="t-ok">Hello from isolation</span>
+
+<span class="t-comment"># Snapshot it — workspace, state, everything</span>
+<span class="t-prompt">$</span> <span class="t-cmd">sandboxctl snapshot create</span> <span class="t-val">sbx-7f3a91c2</span> <span class="t-flag">--name checkpoint-1</span>
+<span class="t-out">snapshot <span class="t-val">snap-e219bf04</span> created  status: <span class="t-ok">ready</span></span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ STATS BAR ═══ -->
+<div class="stats-bar">
+  <div class="container">
+    <div class="stats-grid">
+      <div class="sr">
+        <div class="stat-value">3</div>
+        <div class="stat-label">Runtime Backends</div>
+        <div class="stat-desc">Docker · Kata · QEMU</div>
+      </div>
+      <div class="sr sr-d1">
+        <div class="stat-value">&lt;2s</div>
+        <div class="stat-label">Boot Time</div>
+        <div class="stat-desc">Zero to running</div>
+      </div>
+      <div class="sr sr-d2">
+        <div class="stat-value">12</div>
+        <div class="stat-label">Lifecycle States</div>
+        <div class="stat-desc">Full granular control</div>
+      </div>
+      <div class="sr sr-d3">
+        <div class="stat-value">∞</div>
+        <div class="stat-label">Durability</div>
+        <div class="stat-desc">Survives restarts</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ PROBLEM ═══ -->
+<section id="problem">
+  <div class="container">
+    <div class="section-head center sr">
+      <div class="overline" style="color:var(--error)">The Problem</div>
+      <h2 class="display-medium">Running untrusted code<br>is a ticking time bomb</h2>
+      <p class="body-large">Every team building AI agents, dev platforms, or automation pipelines eventually faces these nightmares.</p>
+    </div>
+    <div class="problem-grid">
+      <div class="card card-outlined problem-card sr sr-d1">
+        <span class="material-symbols-rounded">shield</span>
+        <h3 class="title-large">Container Escapes</h3>
+        <p class="body-medium">A Docker escape is one CVE away. You're betting your production host on a shared-kernel model that collapses under adversarial workloads.</p>
+      </div>
+      <div class="card card-outlined problem-card sr sr-d2">
+        <span class="material-symbols-rounded">handyman</span>
+        <h3 class="title-large">Ad-Hoc Plumbing</h3>
+        <p class="body-medium">Tunnels, quotas, file APIs, TTY sessions — every team rebuilds the same lifecycle plumbing from scratch, shipping it with half the edge cases.</p>
+      </div>
+      <div class="card card-outlined problem-card sr sr-d3">
+        <span class="material-symbols-rounded">cloud_off</span>
+        <h3 class="title-large">Lost Context</h3>
+        <p class="body-medium">Your agent ran 20 minutes, installed dependencies, generated artifacts — then the container vanished. Ephemeral environments lose everything.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ FEATURES ═══ -->
+<section id="features" class="surface-tinted">
+  <div class="container">
+    <div class="section-head center sr">
+      <div class="overline" style="color:var(--primary)">The Solution</div>
+      <h2 class="display-medium">Everything you need.<br>Nothing you don't.</h2>
+    </div>
+
+    <!-- Feature 1: Isolation -->
+    <div class="feature-row sr">
+      <div class="feature-content">
+        <div class="feature-tag tag-purple">
+          <span class="material-symbols-rounded">verified_user</span> Real Isolation
+        </div>
+        <h3 class="headline-large">VM-level boundaries,<br>not container hopes</h3>
+        <p class="body-large">The QEMU runtime gives every sandbox its own kernel, memory space, and process tree. Production mode <em>refuses to start</em> on Docker — by design.</p>
+        <ul class="feature-list">
+          <li><span class="material-symbols-rounded">check_circle</span> Hardware-level isolation via QEMU &amp; Kata Containers</li>
+          <li><span class="material-symbols-rounded">check_circle</span> Per-sandbox CPU, memory, PID, and disk limits</li>
+          <li><span class="material-symbols-rounded">check_circle</span> Internet-enabled or loopback-only network modes</li>
+        </ul>
+      </div>
+      <div class="code-block"><span class="code-hl">┌─────────────────────────────────────────┐</span>
+<span class="code-hl">│</span>       <span class="code-ok">or3-sandbox control plane</span>          <span class="code-hl">│</span>
+<span class="code-hl">│</span>                                         <span class="code-hl">│</span>
+<span class="code-hl">│</span>  API → Auth → Service → Runtime         <span class="code-hl">│</span>
+<span class="code-hl">│</span>                   │                      <span class="code-hl">│</span>
+<span class="code-hl">│</span>         ┌─────────┼─────────┐            <span class="code-hl">│</span>
+<span class="code-hl">│</span>         ▼         ▼         ▼            <span class="code-hl">│</span>
+<span class="code-hl">│</span>      <span class="code-ok">docker</span>     <span class="code-ok">kata</span>      <span class="code-ok">qemu</span>          <span class="code-hl">│</span>
+<span class="code-hl">│</span>       dev     containers   VMs           <span class="code-hl">│</span>
+<span class="code-hl">│</span>                                         <span class="code-hl">│</span>
+<span class="code-hl">│</span>  ┌──────┐  ┌──────┐  ┌──────┐           <span class="code-hl">│</span>
+<span class="code-hl">│</span>  │ sbx  │  │ sbx  │  │ sbx  │  ← tenant <span class="code-hl">│</span>
+<span class="code-hl">│</span>  └──────┘  └──────┘  └──────┘    scoped  <span class="code-hl">│</span>
+<span class="code-hl">└─────────────────────────────────────────┘</span></div>
+    </div>
+
+    <!-- Feature 2: Durability -->
+    <div class="feature-row reverse sr">
+      <div class="feature-content">
+        <div class="feature-tag tag-teal">
+          <span class="material-symbols-rounded">save</span> Durable by Design
+        </div>
+        <h3 class="headline-large">Sandboxes that survive<br>the real world</h3>
+        <p class="body-large">Workspaces persist across suspends, stops, and full daemon restarts. SQLite-backed metadata means the control plane always recovers.</p>
+        <ul class="feature-list">
+          <li><span class="material-symbols-rounded">check_circle</span> Persistent workspace mounts — files survive lifecycle</li>
+          <li><span class="material-symbols-rounded">check_circle</span> Suspend &amp; resume without losing state</li>
+          <li><span class="material-symbols-rounded">check_circle</span> Snapshot and restore or fork environments</li>
+          <li><span class="material-symbols-rounded">check_circle</span> Automatic reconciliation on daemon restart</li>
+        </ul>
+      </div>
+      <div class="terminal">
+        <div class="terminal-bar">
+          <span class="term-dot term-dot-r"></span><span class="term-dot term-dot-y"></span><span class="term-dot term-dot-g"></span>
+          <span class="terminal-title">durability</span>
+        </div>
+        <div class="terminal-body"><span class="t-comment"># Write a file, suspend, restart daemon, resume</span>
+<span class="t-prompt">$</span> <span class="t-cmd">sandboxctl exec</span> <span class="t-val">sbx-1</span> <span class="t-flag">-- sh -c 'echo "I persist" > /workspace/data'</span>
+<span class="t-prompt">$</span> <span class="t-cmd">sandboxctl suspend</span> <span class="t-val">sbx-1</span>
+<span class="t-out">status: <span class="t-val">suspended</span></span>
+
+<span class="t-comment"># ... daemon restarts, power cycle, whatever ...</span>
+
+<span class="t-prompt">$</span> <span class="t-cmd">sandboxctl start</span> <span class="t-val">sbx-1</span>
+<span class="t-out">status: <span class="t-ok">running</span></span>
+<span class="t-prompt">$</span> <span class="t-cmd">sandboxctl exec</span> <span class="t-val">sbx-1</span> <span class="t-flag">-- cat /workspace/data</span>
+<span class="t-ok">I persist</span></div>
+      </div>
+    </div>
+
+    <!-- Feature 3: Platform -->
+    <div class="feature-row sr">
+      <div class="feature-content">
+        <div class="feature-tag tag-amber">
+          <span class="material-symbols-rounded">api</span> Complete Platform
+        </div>
+        <h3 class="headline-large">Not a wrapper —<br>a full control plane</h3>
+        <p class="body-large">Every primitive you need to build a developer platform or AI runtime, exposed through a clean REST + WebSocket API.</p>
+        <ul class="feature-list">
+          <li><span class="material-symbols-rounded">check_circle</span> Streaming exec with stdout/stderr and timeouts</li>
+          <li><span class="material-symbols-rounded">check_circle</span> WebSocket TTY attach with resize support</li>
+          <li><span class="material-symbols-rounded">check_circle</span> File read/write/export APIs (up to 1 GB)</li>
+          <li><span class="material-symbols-rounded">check_circle</span> HTTP &amp; TCP tunnels with signed URLs</li>
+          <li><span class="material-symbols-rounded">check_circle</span> Full audit trail for compliance</li>
+        </ul>
+      </div>
+      <div class="terminal">
+        <div class="terminal-bar">
+          <span class="term-dot term-dot-r"></span><span class="term-dot term-dot-y"></span><span class="term-dot term-dot-g"></span>
+          <span class="terminal-title">REST API</span>
+        </div>
+        <div class="terminal-body"><span class="t-comment"># Full lifecycle via REST</span>
+<span class="t-out">POST   /v1/sandboxes</span>
+<span class="t-out">GET    /v1/sandboxes/{id}</span>
+<span class="t-out">POST   /v1/sandboxes/{id}/<span class="t-ok">exec</span></span>
+<span class="t-out">GET    /v1/sandboxes/{id}/<span class="t-ok">tty</span>       <span class="t-comment">← WebSocket</span></span>
+<span class="t-out">PUT    /v1/sandboxes/{id}/<span class="t-ok">files</span>/{path}</span>
+<span class="t-out">POST   /v1/sandboxes/{id}/<span class="t-ok">tunnels</span></span>
+<span class="t-out">POST   /v1/sandboxes/{id}/<span class="t-ok">snapshots</span></span>
+<span class="t-out">GET    /v1/quotas/me</span>
+<span class="t-out">GET    /v1/runtime/health</span></div>
+      </div>
+    </div>
+
+    <!-- Feature 4: Security -->
+    <div class="feature-row reverse sr">
+      <div class="feature-content">
+        <div class="feature-tag tag-red">
+          <span class="material-symbols-rounded">lock</span> Security First
+        </div>
+        <h3 class="headline-large">Guardrails that<br>can't be skipped</h3>
+        <p class="body-large">Security isn't an afterthought — it's load-bearing architecture. The system won't start in an unsafe configuration.</p>
+        <ul class="feature-list">
+          <li><span class="material-symbols-rounded">check_circle</span> Production mode rejects Docker, requires VMs</li>
+          <li><span class="material-symbols-rounded">check_circle</span> Dangerous profiles require audit reasons</li>
+          <li><span class="material-symbols-rounded">check_circle</span> Per-tenant quotas on every resource dimension</li>
+          <li><span class="material-symbols-rounded">check_circle</span> Bearer token or JWT auth on every request</li>
+        </ul>
+      </div>
+      <div class="code-block"><span class="code-ok">Production Boot Sequence</span>
+
+  <span class="t-ok">✓</span> runtime_selection = qemu-professional
+  <span class="t-ok">✓</span> auth_mode = jwt
+  <span class="t-ok">✓</span> transport = direct-tls
+  <span class="t-ok">✓</span> trusted_docker_runtime = false
+  <span class="t-ok">✓</span> guest image verified: sha256:a8f3…
+
+  <span class="t-ok">▶ sandboxd started (production-qemu-core)</span>
+
+<span style="color:var(--error)">Rejected Configuration Example</span>
+
+  <span style="color:var(--error)">✗ SANDBOX_MODE=production</span>
+  <span style="color:var(--error)">✗ SANDBOX_RUNTIME=docker</span>
+  <span style="color:var(--error)">ERROR: production mode requires</span>
+  <span style="color:var(--error)">       VM-backed default runtime</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ HOW IT WORKS ═══ -->
+<section id="how-it-works">
+  <div class="container">
+    <div class="section-head center sr">
+      <h2 class="display-medium">Three steps to production</h2>
+      <p class="body-large">From zero to running sandboxes in under five minutes.</p>
+    </div>
+    <div class="steps-grid">
+      <div class="step-card sr sr-d1">
+        <div class="step-num">1</div>
+        <h3 class="title-large">Deploy the Daemon</h3>
+        <p>A single Go binary. Point it at storage, set auth tokens, choose your runtime. Done.</p>
+      </div>
+      <div class="step-card sr sr-d2">
+        <div class="step-num">2</div>
+        <h3 class="title-large">Provision via API</h3>
+        <p>One POST request creates a fully isolated environment with CPU, memory, and disk limits.</p>
+      </div>
+      <div class="step-card sr sr-d3">
+        <div class="step-num">3</div>
+        <h3 class="title-large">Execute &amp; Expose</h3>
+        <p>Run commands, stream terminals, upload files, expose ports through tunnels — all via API.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ USE CASES ═══ -->
+<section id="use-cases" class="surface-tinted">
+  <div class="container">
+    <div class="section-head center sr">
+      <div class="overline" style="color:var(--tertiary)">Built For</div>
+      <h2 class="display-medium">Every team that runs<br>code they didn't write</h2>
+    </div>
+    <div class="use-grid">
+      <div class="card card-elevated use-card sr sr-d1">
+        <span class="material-symbols-rounded">smart_toy</span>
+        <h3 class="title-large">AI Agent Platforms</h3>
+        <p>Give coding agents a real workspace — shell, file system, network — without risking your host.</p>
+      </div>
+      <div class="card card-elevated use-card sr sr-d2">
+        <span class="material-symbols-rounded">terminal</span>
+        <h3 class="title-large">Developer Environments</h3>
+        <p>Personal cloud workspaces that persist for weeks. Interactive TTY, file sync, port forwarding.</p>
+      </div>
+      <div class="card card-elevated use-card sr sr-d3">
+        <span class="material-symbols-rounded">science</span>
+        <h3 class="title-large">CI / CD Isolation</h3>
+        <p>Run untrusted builds and tests in sandboxes with hard limits. Snapshot passing environments.</p>
+      </div>
+      <div class="card card-elevated use-card sr sr-d4">
+        <span class="material-symbols-rounded">school</span>
+        <h3 class="title-large">Education &amp; Playgrounds</h3>
+        <p>Safe coding environments with browser TTY access. Quota enforcement prevents abuse automatically.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ COMPARISON ═══ -->
+<section id="compare">
+  <div class="container">
+    <div class="section-head center sr">
+      <h2 class="display-medium">Why not just use Docker?</h2>
+      <p class="body-large">Docker is great for packaging. It was never designed as an isolation boundary for adversarial workloads.</p>
+    </div>
+    <div class="table-wrap sr">
+      <table>
+        <thead>
+          <tr>
+            <th>Capability</th>
+            <th>Raw Docker</th>
+            <th>Kubernetes</th>
+            <th>or3-sandbox</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>VM-level isolation</td>
+            <td><span class="tbl-cross">✗</span> Shared kernel</td>
+            <td><span class="tbl-cross">✗</span> Needs gVisor/Kata</td>
+            <td><span class="tbl-check">✓</span> Built-in QEMU + Kata</td>
+          </tr>
+          <tr>
+            <td>Durable workspaces</td>
+            <td><span class="tbl-cross">✗</span> Manual volumes</td>
+            <td><span class="tbl-cross">✗</span> PVC complexity</td>
+            <td><span class="tbl-check">✓</span> Automatic persistence</td>
+          </tr>
+          <tr>
+            <td>Per-tenant quotas</td>
+            <td><span class="tbl-cross">✗</span> None</td>
+            <td>Partial (ResourceQuota)</td>
+            <td><span class="tbl-check">✓</span> CPU, mem, disk, tunnels</td>
+          </tr>
+          <tr>
+            <td>Exec + TTY streaming</td>
+            <td>Basic docker exec</td>
+            <td>kubectl exec</td>
+            <td><span class="tbl-check">✓</span> REST + WS + detach</td>
+          </tr>
+          <tr>
+            <td>HTTP tunnel exposure</td>
+            <td><span class="tbl-cross">✗</span> None</td>
+            <td>Ingress controllers</td>
+            <td><span class="tbl-check">✓</span> One call + signed URLs</td>
+          </tr>
+          <tr>
+            <td>Snapshot &amp; restore</td>
+            <td>docker commit (fragile)</td>
+            <td><span class="tbl-cross">✗</span> None</td>
+            <td><span class="tbl-check">✓</span> Workspace + image bundled</td>
+          </tr>
+          <tr>
+            <td>Audit trail</td>
+            <td><span class="tbl-cross">✗</span> None</td>
+            <td>Complex logging</td>
+            <td><span class="tbl-check">✓</span> Every action recorded</td>
+          </tr>
+          <tr>
+            <td>Setup complexity</td>
+            <td>Low</td>
+            <td>Very high</td>
+            <td><span class="tbl-check">✓</span> Single binary + SQLite</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ CTA ═══ -->
+<section class="cta-section" id="get-started">
+  <div class="container">
+    <div class="cta-box sr">
+      <h2 class="display-medium">Stop building plumbing.<br>Start shipping product.</h2>
+      <p class="body-large">Get a production-grade sandbox control plane running in under five minutes. One binary. Zero dependencies beyond Go.</p>
+      <a href="https://github.com/or3-sandbox/or3-sandbox" target="_blank" class="btn btn-filled btn-xl">
+        <span class="material-symbols-rounded icon-24">open_in_new</span>
+        View on GitHub
+      </a>
+      <div class="cta-note"><span class="dot"></span> Self-hosted &middot; No vendor lock-in &middot; Your infra, your rules</div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ FOOTER ═══ -->
+<footer>
+  <div class="container">
+    <div class="footer-links">
+      <a href="#">Documentation</a>
+      <a href="#">Architecture</a>
+      <a href="#">Tutorials</a>
+      <a href="#">Security</a>
+    </div>
+    <p class="body-medium">or3-sandbox — Single-node sandbox control plane for durable tenant environments.</p>
+  </div>
+</footer>
+
+<!-- ═══ JS ═══ -->
+<script>
+// Top bar scroll elevation
+const bar = document.getElementById('topbar');
+addEventListener('scroll', () => bar.classList.toggle('scrolled', scrollY > 40), { passive: true });
+
+// Scroll reveal with IntersectionObserver
+const io = new IntersectionObserver(entries => {
+  entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('visible'); io.unobserve(e.target); } });
+}, { threshold: 0.08, rootMargin: '0px 0px -40px 0px' });
+document.querySelectorAll('.sr').forEach(el => io.observe(el));
+
+// Smooth scroll for anchor links
+document.querySelectorAll('a[href^="#"]').forEach(a => {
+  a.addEventListener('click', e => {
+    const t = document.querySelector(a.getAttribute('href'));
+    if (t) { e.preventDefault(); t.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+  });
+});
+</script>
+</body>
+</html>
