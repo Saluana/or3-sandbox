@@ -7,84 +7,132 @@ import (
 )
 
 const (
+	// DefaultWorkspaceFileTransferMaxBytes is the default per-request limit for
+	// workspace file read and write APIs.
 	DefaultWorkspaceFileTransferMaxBytes = 64 * 1024 * 1024
 	MaxWorkspaceFileTransferBytes        = DefaultWorkspaceFileTransferMaxBytes
 	MaxWorkspaceFileTransferCeilingBytes = 1024 * 1024 * 1024
 )
 
+// ErrFileTransferTooLarge reports that a workspace file operation exceeded the
+// configured transfer limit.
 var ErrFileTransferTooLarge = errors.New("workspace file transfer too large")
 
+// FileTransferTooLargeError wraps [ErrFileTransferTooLarge] with the effective
+// byte limit for the rejected request.
 func FileTransferTooLargeError(limit int64) error {
 	return fmt.Errorf("%w: workspace file exceeds maximum transfer size of %d bytes", ErrFileTransferTooLarge, limit)
 }
 
+// SandboxStatus describes the lifecycle state of a sandbox.
 type SandboxStatus string
 
 const (
-	SandboxStatusCreating   SandboxStatus = "creating"
-	SandboxStatusBooting    SandboxStatus = "booting"
-	SandboxStatusDegraded   SandboxStatus = "degraded"
-	SandboxStatusStopped    SandboxStatus = "stopped"
-	SandboxStatusStarting   SandboxStatus = "starting"
-	SandboxStatusRunning    SandboxStatus = "running"
+	// SandboxStatusCreating reports that sandbox provisioning has started.
+	SandboxStatusCreating SandboxStatus = "creating"
+	// SandboxStatusBooting reports that the guest is booting.
+	SandboxStatusBooting SandboxStatus = "booting"
+	// SandboxStatusDegraded reports that the sandbox exists but runtime health is degraded.
+	SandboxStatusDegraded SandboxStatus = "degraded"
+	// SandboxStatusStopped reports that the sandbox exists but is not running.
+	SandboxStatusStopped SandboxStatus = "stopped"
+	// SandboxStatusStarting reports that runtime start has been requested.
+	SandboxStatusStarting SandboxStatus = "starting"
+	// SandboxStatusRunning reports that the sandbox is actively running.
+	SandboxStatusRunning SandboxStatus = "running"
+	// SandboxStatusSuspending reports that runtime suspend is in progress.
 	SandboxStatusSuspending SandboxStatus = "suspending"
-	SandboxStatusSuspended  SandboxStatus = "suspended"
-	SandboxStatusStopping   SandboxStatus = "stopping"
-	SandboxStatusDeleting   SandboxStatus = "deleting"
-	SandboxStatusDeleted    SandboxStatus = "deleted"
-	SandboxStatusError      SandboxStatus = "error"
+	// SandboxStatusSuspended reports that the sandbox is paused in a suspended state.
+	SandboxStatusSuspended SandboxStatus = "suspended"
+	// SandboxStatusStopping reports that runtime stop is in progress.
+	SandboxStatusStopping SandboxStatus = "stopping"
+	// SandboxStatusDeleting reports that sandbox teardown is in progress.
+	SandboxStatusDeleting SandboxStatus = "deleting"
+	// SandboxStatusDeleted reports that the sandbox has been deleted.
+	SandboxStatusDeleted SandboxStatus = "deleted"
+	// SandboxStatusError reports that the sandbox entered a terminal error state.
+	SandboxStatusError SandboxStatus = "error"
 )
 
+// NetworkMode describes the network posture requested for a sandbox.
 type NetworkMode string
 
 const (
-	NetworkModeInternetEnabled  NetworkMode = "internet-enabled"
+	// NetworkModeInternetEnabled allows the sandbox to reach external networks.
+	NetworkModeInternetEnabled NetworkMode = "internet-enabled"
+	// NetworkModeInternetDisabled restricts the sandbox to loopback-only access.
 	NetworkModeInternetDisabled NetworkMode = "internet-disabled"
 )
 
+// TunnelProtocol identifies the protocol exposed through a published tunnel.
 type TunnelProtocol string
 
 const (
+	// TunnelProtocolHTTP exposes the tunnel as an HTTP endpoint.
 	TunnelProtocolHTTP TunnelProtocol = "http"
-	TunnelProtocolTCP  TunnelProtocol = "tcp"
+	// TunnelProtocolTCP exposes the tunnel as a raw TCP endpoint.
+	TunnelProtocolTCP TunnelProtocol = "tcp"
 )
 
+// SnapshotStatus describes the lifecycle state of a persisted snapshot.
 type SnapshotStatus string
 
 const (
+	// SnapshotStatusCreating reports that snapshot export is still running.
 	SnapshotStatusCreating SnapshotStatus = "creating"
-	SnapshotStatusReady    SnapshotStatus = "ready"
-	SnapshotStatusError    SnapshotStatus = "error"
+	// SnapshotStatusReady reports that the snapshot is ready for use.
+	SnapshotStatusReady SnapshotStatus = "ready"
+	// SnapshotStatusError reports that snapshot creation failed.
+	SnapshotStatusError SnapshotStatus = "error"
 )
 
+// ExecutionStatus describes the outcome of an exec request.
 type ExecutionStatus string
 
 const (
-	ExecutionStatusRunning   ExecutionStatus = "running"
-	ExecutionStatusDetached  ExecutionStatus = "detached"
+	// ExecutionStatusRunning reports that the command is still executing.
+	ExecutionStatusRunning ExecutionStatus = "running"
+	// ExecutionStatusDetached reports that the command was launched without waiting.
+	ExecutionStatusDetached ExecutionStatus = "detached"
+	// ExecutionStatusSucceeded reports that the command exited successfully.
 	ExecutionStatusSucceeded ExecutionStatus = "succeeded"
-	ExecutionStatusFailed    ExecutionStatus = "failed"
-	ExecutionStatusTimedOut  ExecutionStatus = "timed_out"
-	ExecutionStatusCanceled  ExecutionStatus = "canceled"
+	// ExecutionStatusFailed reports that the command exited unsuccessfully.
+	ExecutionStatusFailed ExecutionStatus = "failed"
+	// ExecutionStatusTimedOut reports that the command exceeded its timeout.
+	ExecutionStatusTimedOut ExecutionStatus = "timed_out"
+	// ExecutionStatusCanceled reports that the command was canceled by the caller.
+	ExecutionStatusCanceled ExecutionStatus = "canceled"
 )
 
+// GuestProfile identifies the curated workload profile associated with an
+// image or guest contract.
 type GuestProfile string
 
 const (
-	GuestProfileCore      GuestProfile = "core"
-	GuestProfileRuntime   GuestProfile = "runtime"
-	GuestProfileBrowser   GuestProfile = "browser"
+	// GuestProfileCore is the minimal shell-oriented guest profile.
+	GuestProfileCore GuestProfile = "core"
+	// GuestProfileRuntime is the general-purpose runtime workload profile.
+	GuestProfileRuntime GuestProfile = "runtime"
+	// GuestProfileBrowser is the browser-automation workload profile.
+	GuestProfileBrowser GuestProfile = "browser"
+	// GuestProfileContainer is the nested-container workload profile.
 	GuestProfileContainer GuestProfile = "container"
-	GuestProfileDebug     GuestProfile = "debug"
+	// GuestProfileDebug is the debugging-oriented guest profile.
+	GuestProfileDebug GuestProfile = "debug"
 )
 
+// GuestControlMode identifies how the daemon communicates with a guest.
 type GuestControlMode string
 
 const (
-	GuestControlModeAgent     GuestControlMode = "agent"
+	// GuestControlModeAgent uses the in-guest agent protocol.
+	GuestControlModeAgent GuestControlMode = "agent"
+	// GuestControlModeSSHCompat uses SSH-based compatibility shims.
 	GuestControlModeSSHCompat GuestControlMode = "ssh-compat"
 )
 
+// IsValid reports whether p is a curated guest profile understood by the
+// control plane.
 func (p GuestProfile) IsValid() bool {
 	switch p {
 	case GuestProfileCore, GuestProfileRuntime, GuestProfileBrowser, GuestProfileContainer, GuestProfileDebug:
@@ -94,6 +142,7 @@ func (p GuestProfile) IsValid() bool {
 	}
 }
 
+// IsValid reports whether m is a supported guest control mode.
 func (m GuestControlMode) IsValid() bool {
 	switch m {
 	case GuestControlModeAgent, GuestControlModeSSHCompat:
@@ -344,6 +393,7 @@ type RuntimeSandboxHealth struct {
 	Error            string           `json:"error,omitempty"`
 }
 
+// Tenant identifies the caller's tenancy boundary and authentication record.
 type Tenant struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
@@ -366,6 +416,7 @@ type TenantQuota struct {
 	DefaultTunnelVisibility string      `json:"default_tunnel_visibility"`
 }
 
+// AuditEvent records a policy or lifecycle event emitted by the service layer.
 type AuditEvent struct {
 	ID         string    `json:"id"`
 	TenantID   string    `json:"tenant_id"`
@@ -377,6 +428,7 @@ type AuditEvent struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// ServiceAccount describes a named service principal bound to a tenant.
 type ServiceAccount struct {
 	ID        string     `json:"id"`
 	TenantID  string     `json:"tenant_id"`
@@ -388,6 +440,8 @@ type ServiceAccount struct {
 	RevokedAt *time.Time `json:"revoked_at,omitempty"`
 }
 
+// PromotedGuestImage records a guest image that has passed promotion checks
+// for production use.
 type PromotedGuestImage struct {
 	ImageRef               string           `json:"image_ref"`
 	ImageSHA256            string           `json:"image_sha256"`
@@ -402,6 +456,7 @@ type PromotedGuestImage struct {
 	PromotedBy             string           `json:"promoted_by,omitempty"`
 }
 
+// ReleaseEvidence stores operator-supplied evidence for a named release gate.
 type ReleaseEvidence struct {
 	ID               string           `json:"id"`
 	GateName         string           `json:"gate_name"`
@@ -415,6 +470,8 @@ type ReleaseEvidence struct {
 	CompletedAt      *time.Time       `json:"completed_at,omitempty"`
 }
 
+// TunnelCapability is a one-time capability used to authorize tunnel access
+// flows such as signed bootstrap links.
 type TunnelCapability struct {
 	ID         string     `json:"id"`
 	TunnelID   string     `json:"tunnel_id"`

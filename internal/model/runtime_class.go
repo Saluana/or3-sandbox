@@ -2,12 +2,16 @@ package model
 
 import "strings"
 
+// RuntimeSelection names a user-visible runtime option.
 type RuntimeSelection string
 
 const (
-	RuntimeSelectionDockerDev                  RuntimeSelection = "docker-dev"
+	// RuntimeSelectionDockerDev selects the trusted Docker development backend.
+	RuntimeSelectionDockerDev RuntimeSelection = "docker-dev"
+	// RuntimeSelectionContainerdKataProfessional selects the Kata-backed VM runtime.
 	RuntimeSelectionContainerdKataProfessional RuntimeSelection = "containerd-kata-professional"
-	RuntimeSelectionQEMUProfessional           RuntimeSelection = "qemu-professional"
+	// RuntimeSelectionQEMUProfessional selects the QEMU-backed VM runtime.
+	RuntimeSelectionQEMUProfessional RuntimeSelection = "qemu-professional"
 )
 
 // RuntimeClass describes the isolation posture of a runtime backend.
@@ -50,6 +54,8 @@ func BackendToRuntimeClass(backend string) RuntimeClass {
 	}
 }
 
+// RuntimeSelectionFromBackend returns the canonical runtime selection for a
+// legacy backend name.
 func RuntimeSelectionFromBackend(backend string) RuntimeSelection {
 	switch strings.ToLower(strings.TrimSpace(backend)) {
 	case "docker":
@@ -63,6 +69,8 @@ func RuntimeSelectionFromBackend(backend string) RuntimeSelection {
 	}
 }
 
+// ParseRuntimeSelection normalizes value and returns an empty selection for
+// unknown names.
 func ParseRuntimeSelection(value string) RuntimeSelection {
 	selection := RuntimeSelection(strings.ToLower(strings.TrimSpace(value)))
 	if !selection.IsValid() {
@@ -71,6 +79,8 @@ func ParseRuntimeSelection(value string) RuntimeSelection {
 	return selection
 }
 
+// ResolveRuntimeSelection prefers an explicit valid selection and otherwise
+// falls back to the legacy backend name.
 func ResolveRuntimeSelection(selection RuntimeSelection, backend string) RuntimeSelection {
 	if selection.IsValid() {
 		return selection
@@ -78,6 +88,7 @@ func ResolveRuntimeSelection(selection RuntimeSelection, backend string) Runtime
 	return RuntimeSelectionFromBackend(backend)
 }
 
+// IsValid reports whether s is a supported runtime selection.
 func (s RuntimeSelection) IsValid() bool {
 	switch s {
 	case RuntimeSelectionDockerDev, RuntimeSelectionContainerdKataProfessional, RuntimeSelectionQEMUProfessional:
@@ -87,6 +98,7 @@ func (s RuntimeSelection) IsValid() bool {
 	}
 }
 
+// Backend returns the runtime backend name associated with s.
 func (s RuntimeSelection) Backend() string {
 	switch s {
 	case RuntimeSelectionDockerDev:
@@ -100,10 +112,12 @@ func (s RuntimeSelection) Backend() string {
 	}
 }
 
+// RuntimeClass returns the isolation class associated with s.
 func (s RuntimeSelection) RuntimeClass() RuntimeClass {
 	return BackendToRuntimeClass(s.Backend())
 }
 
+// IsVMBacked reports whether s resolves to a VM-backed runtime class.
 func (s RuntimeSelection) IsVMBacked() bool {
 	return s.RuntimeClass().IsVMBacked()
 }

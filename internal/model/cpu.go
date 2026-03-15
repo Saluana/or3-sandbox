@@ -10,16 +10,20 @@ import (
 
 const milliCPUPerCore = 1000
 
+// CPUQuantity stores CPU capacity in milli-CPU units.
 type CPUQuantity int64
 
+// CPUCores converts a whole-core count into a [CPUQuantity].
 func CPUCores(value int) CPUQuantity {
 	return CPUQuantity(int64(value) * milliCPUPerCore)
 }
 
+// MilliCPU converts a raw milli-CPU value into a [CPUQuantity].
 func MilliCPU(value int64) CPUQuantity {
 	return CPUQuantity(value)
 }
 
+// ParseCPUQuantity parses values like "2", "0.5", or "500m".
 func ParseCPUQuantity(value string) (CPUQuantity, error) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
@@ -61,6 +65,7 @@ func ParseCPUQuantity(value string) (CPUQuantity, error) {
 	return CPUQuantity(millis + fractionalMillis), nil
 }
 
+// MustParseCPUQuantity parses value and panics on error.
 func MustParseCPUQuantity(value string) CPUQuantity {
 	parsed, err := ParseCPUQuantity(value)
 	if err != nil {
@@ -69,6 +74,7 @@ func MustParseCPUQuantity(value string) CPUQuantity {
 	return parsed
 }
 
+// MarshalJSON encodes q as a JSON number using core units when possible.
 func (q CPUQuantity) MarshalJSON() ([]byte, error) {
 	if q%milliCPUPerCore == 0 {
 		return []byte(strconv.FormatInt(int64(q/milliCPUPerCore), 10)), nil
@@ -77,6 +83,7 @@ func (q CPUQuantity) MarshalJSON() ([]byte, error) {
 	return []byte(value), nil
 }
 
+// UnmarshalJSON decodes q from a JSON number or string.
 func (q *CPUQuantity) UnmarshalJSON(data []byte) error {
 	trimmed := strings.TrimSpace(string(data))
 	if trimmed == "" || trimmed == "null" {
@@ -103,6 +110,7 @@ func (q *CPUQuantity) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// String formats q as a core value using up to three decimal places.
 func (q CPUQuantity) String() string {
 	if q%milliCPUPerCore == 0 {
 		return strconv.FormatInt(int64(q/milliCPUPerCore), 10)
@@ -120,10 +128,13 @@ func (q CPUQuantity) String() string {
 	return fmt.Sprintf("%s%d.%s", sign, whole, decimal)
 }
 
+// MilliValue returns q in milli-CPU units.
 func (q CPUQuantity) MilliValue() int64 {
 	return int64(q)
 }
 
+// VCPUCount returns the whole-vCPU ceiling used by runtimes that only accept
+// integer CPU counts.
 func (q CPUQuantity) VCPUCount() int {
 	if q <= 0 {
 		return 1

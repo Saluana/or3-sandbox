@@ -10,17 +10,21 @@ import (
 	"strings"
 )
 
+// Limits bounds tar.gz extraction to reduce zip-bomb and archive-escape risk.
 type Limits struct {
 	MaxBytes          int64
 	MaxFiles          int
 	MaxExpansionRatio int
 }
 
+// Stats reports the files and bytes extracted from an archive.
 type Stats struct {
 	Files int
 	Bytes int64
 }
 
+// ExtractTarGz extracts source into destination while rejecting entries that
+// escape the destination or exceed the supplied limits.
 func ExtractTarGz(source, destination string, limits Limits) (Stats, error) {
 	file, err := os.Open(source)
 	if err != nil {

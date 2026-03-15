@@ -16,6 +16,8 @@ import (
 	"or3-sandbox/internal/repository"
 )
 
+// Middleware authenticates incoming HTTP requests and applies per-tenant rate
+// limiting before delegating to the API handler.
 type Middleware struct {
 	store         *repository.Store
 	authenticator Authenticator
@@ -31,6 +33,8 @@ type tenantLimiter struct {
 	lastSeen atomic.Int64
 }
 
+// New builds authentication middleware from the repository and runtime
+// configuration.
 func New(store *repository.Store, cfg config.Config, logs ...*slog.Logger) *Middleware {
 	perSecond := float64(cfg.RequestRatePerMinute) / 60.0
 	log := slog.Default()
@@ -46,6 +50,8 @@ func New(store *repository.Store, cfg config.Config, logs ...*slog.Logger) *Midd
 	}
 }
 
+// Wrap authenticates the request, attaches the resolved [TenantContext], and
+// enforces per-tenant rate limiting.
 func (m *Middleware) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" {
@@ -115,6 +121,7 @@ func (m *Middleware) limiterFor(tenantID string) *rate.Limiter {
 	return stored.limiter
 }
 
+// Prune removes stale limiter entries that have not been used within olderThan.
 func Prune(limiters *sync.Map, olderThan time.Duration) {
 	if limiters == nil || olderThan <= 0 {
 		return

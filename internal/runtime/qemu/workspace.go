@@ -13,6 +13,7 @@ import (
 	"or3-sandbox/internal/model"
 )
 
+// ReadWorkspaceFile reads a workspace file as UTF-8 text.
 func (r *Runtime) ReadWorkspaceFile(ctx context.Context, sandbox model.Sandbox, relativePath string) (model.FileReadResponse, error) {
 	output, err := r.readWorkspaceFileBytesWithLimit(ctx, sandbox, relativePath, -1)
 	if err != nil {
@@ -26,6 +27,7 @@ func (r *Runtime) ReadWorkspaceFile(ctx context.Context, sandbox model.Sandbox, 
 	}, nil
 }
 
+// ReadWorkspaceFileBytes reads a workspace file as raw bytes.
 func (r *Runtime) ReadWorkspaceFileBytes(ctx context.Context, sandbox model.Sandbox, relativePath string) ([]byte, error) {
 	limit := int64(-1)
 	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
@@ -57,10 +59,12 @@ func (r *Runtime) readWorkspaceFileBytesWithLimit(ctx context.Context, sandbox m
 	return output, nil
 }
 
+// WriteWorkspaceFile writes UTF-8 content to a workspace path.
 func (r *Runtime) WriteWorkspaceFile(ctx context.Context, sandbox model.Sandbox, relativePath string, content string) error {
 	return r.writeWorkspaceFileBytes(ctx, sandbox, relativePath, bytes.NewBufferString(content))
 }
 
+// WriteWorkspaceFileBytes writes raw bytes to a workspace path.
 func (r *Runtime) WriteWorkspaceFileBytes(ctx context.Context, sandbox model.Sandbox, relativePath string, content []byte) error {
 	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
 		return r.agentWriteWorkspaceFileBytes(ctx, layoutForSandbox(sandbox), relativePath, content)
@@ -84,6 +88,7 @@ func (r *Runtime) writeWorkspaceFileBytes(ctx context.Context, sandbox model.San
 	return nil
 }
 
+// DeleteWorkspacePath removes a workspace file or directory.
 func (r *Runtime) DeleteWorkspacePath(ctx context.Context, sandbox model.Sandbox, relativePath string) error {
 	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
 		return r.agentDeleteWorkspacePath(ctx, layoutForSandbox(sandbox), relativePath)
@@ -97,6 +102,7 @@ func (r *Runtime) DeleteWorkspacePath(ctx context.Context, sandbox model.Sandbox
 	return err
 }
 
+// MkdirWorkspace creates a workspace directory and any missing parents.
 func (r *Runtime) MkdirWorkspace(ctx context.Context, sandbox model.Sandbox, relativePath string) error {
 	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
 		return r.agentMkdirWorkspace(ctx, layoutForSandbox(sandbox), relativePath)
@@ -110,6 +116,7 @@ func (r *Runtime) MkdirWorkspace(ctx context.Context, sandbox model.Sandbox, rel
 	return err
 }
 
+// MeasureStorage reports host-side storage usage for sandbox.
 func (r *Runtime) MeasureStorage(ctx context.Context, sandbox model.Sandbox) (model.StorageUsage, error) {
 	_ = ctx
 	layout := layoutForSandbox(sandbox)

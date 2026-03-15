@@ -11,6 +11,8 @@ import (
 	"or3-sandbox/internal/model"
 )
 
+// RecordAuditEvent records and logs an audit event emitted by the service
+// layer.
 func (s *Service) RecordAuditEvent(ctx context.Context, tenantID, sandboxID, action, resourceID, outcome, detail string, attrs ...any) {
 	s.recordAudit(ctx, tenantID, sandboxID, action, resourceID, outcome, detail, attrs...)
 }

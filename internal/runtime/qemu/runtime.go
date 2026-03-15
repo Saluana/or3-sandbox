@@ -51,6 +51,7 @@ type sshProbe func(ctx context.Context, target sshTarget) error
 
 type processArgsReader func(pid int) (string, error)
 
+// Options configures the QEMU runtime adapter.
 type Options struct {
 	Binary                        string
 	Accel                         string
@@ -65,6 +66,7 @@ type Options struct {
 	WorkspaceFileTransferMaxBytes int64
 }
 
+// Runtime implements [model.RuntimeManager] using QEMU virtual machines.
 type Runtime struct {
 	qemuBinary                    string
 	qemuImgBinary                 string
@@ -117,6 +119,7 @@ type sshTarget struct {
 	hostKeyAlias   string
 }
 
+// New validates host support and constructs a QEMU runtime adapter.
 func New(opts Options) (*Runtime, error) {
 	if strings.TrimSpace(opts.SSHBinary) == "" {
 		opts.SSHBinary = defaultSSHBinary
@@ -167,6 +170,7 @@ func workspaceFileTransferLimit(limit int64) int64 {
 	return limit
 }
 
+// Create prepares host-side state and boots the guest when required.
 func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.RuntimeState, error) {
 	layout := layoutForSpec(spec)
 	if err := ensureLayout(layout); err != nil {
@@ -202,6 +206,7 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 	}, nil
 }
 
+// Start boots an existing QEMU sandbox.
 func (r *Runtime) Start(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
 	if state, err := r.Inspect(ctx, sandbox); err == nil && state.Status == model.SandboxStatusRunning {
 		return state, nil
@@ -228,6 +233,7 @@ func (r *Runtime) Start(ctx context.Context, sandbox model.Sandbox) (model.Runti
 	return r.Inspect(ctx, sandboxWithRuntimeID(sandbox, runtimeID))
 }
 
+// Stop shuts down a QEMU sandbox.
 func (r *Runtime) Stop(ctx context.Context, sandbox model.Sandbox, force bool) (model.RuntimeState, error) {
 	_ = ctx
 	layout := layoutForSandbox(sandbox)
@@ -252,6 +258,7 @@ func (r *Runtime) Stop(ctx context.Context, sandbox model.Sandbox, force bool) (
 	return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
 }
 
+// Suspend saves a QEMU sandbox into a suspended state.
 func (r *Runtime) Suspend(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
 	_ = ctx
 	layout := layoutForSandbox(sandbox)
@@ -271,6 +278,7 @@ func (r *Runtime) Suspend(ctx context.Context, sandbox model.Sandbox) (model.Run
 	return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusSuspended, Running: false, Pid: pid}, nil
 }
 
+// Resume resumes a previously suspended QEMU sandbox.
 func (r *Runtime) Resume(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
 	layout := layoutForSandbox(sandbox)
 	pid, err := r.liveSandboxPID(layout)
@@ -292,11 +300,13 @@ func (r *Runtime) Resume(ctx context.Context, sandbox model.Sandbox) (model.Runt
 	return r.Inspect(ctx, sandbox)
 }
 
+// Destroy tears down the guest process and related runtime state.
 func (r *Runtime) Destroy(ctx context.Context, sandbox model.Sandbox) error {
 	_, _ = r.Stop(ctx, sandbox, true)
 	return os.RemoveAll(layoutForSandbox(sandbox).baseDir)
 }
 
+// Inspect probes the current guest state for sandbox.
 func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
 	layout := layoutForSandbox(sandbox)
 	pid, err := r.liveSandboxPID(layout)
@@ -358,6 +368,7 @@ func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.Run
 	}, nil
 }
 
+// CreateSnapshot exports a snapshot artifact for sandbox.
 func (r *Runtime) CreateSnapshot(ctx context.Context, sandbox model.Sandbox, snapshotID string) (model.SnapshotInfo, error) {
 	state, err := r.Inspect(ctx, sandbox)
 	if err != nil {
@@ -385,6 +396,7 @@ func (r *Runtime) CreateSnapshot(ctx context.Context, sandbox model.Sandbox, sna
 	}, nil
 }
 
+// RestoreSnapshot restores sandbox from snapshot.
 func (r *Runtime) RestoreSnapshot(ctx context.Context, sandbox model.Sandbox, snapshot model.Snapshot) (model.RuntimeState, error) {
 	_ = ctx
 	layout := layoutForSandbox(sandbox)

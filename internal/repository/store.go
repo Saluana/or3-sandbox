@@ -12,12 +12,15 @@ import (
 	"or3-sandbox/internal/model"
 )
 
+// ErrNotFound reports that a requested record does not exist.
 var ErrNotFound = errors.New("not found")
 
+// Store wraps the control-plane database.
 type Store struct {
 	db *sql.DB
 }
 
+// New returns a Store backed by db.
 func New(db *sql.DB) *Store {
 	return &Store{db: db}
 }
@@ -29,6 +32,8 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
+// WithTx executes fn inside a database transaction and commits when fn returns
+// nil.
 func (s *Store) WithTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -41,6 +46,7 @@ func (s *Store) WithTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	return tx.Commit()
 }
 
+// SeedTenants upserts the configured static tenants and their default quota.
 func (s *Store) SeedTenants(ctx context.Context, tenants []config.TenantConfig, quota model.TenantQuota) error {
 	return s.WithTx(ctx, func(tx *sql.Tx) error {
 		for _, tenant := range tenants {
@@ -79,6 +85,8 @@ func (s *Store) SeedTenants(ctx context.Context, tenants []config.TenantConfig, 
 	})
 }
 
+// EnsureTenantQuota ensures that tenant and its quota row exist, creating them
+// when necessary.
 func (s *Store) EnsureTenantQuota(ctx context.Context, tenant model.Tenant, quota model.TenantQuota, tokenHash string) error {
 	return s.WithTx(ctx, func(tx *sql.Tx) error {
 		name := tenant.Name
@@ -111,6 +119,7 @@ func (s *Store) EnsureTenantQuota(ctx context.Context, tenant model.Tenant, quot
 	})
 }
 
+// AuthenticateTenant looks up a tenant and quota by hashed bearer token.
 func (s *Store) AuthenticateTenant(ctx context.Context, tokenHash string) (model.Tenant, model.TenantQuota, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT t.tenant_id, t.name, t.token_hash, t.created_at,
@@ -148,6 +157,7 @@ func (s *Store) AuthenticateTenant(ctx context.Context, tokenHash string) (model
 	return tenant, quota, nil
 }
 
+// GetQuota returns the persisted quota for tenantID.
 func (s *Store) GetQuota(ctx context.Context, tenantID string) (model.TenantQuota, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT max_sandboxes, max_running_sandboxes, max_concurrent_execs, max_tunnels,
@@ -175,6 +185,7 @@ func (s *Store) GetQuota(ctx context.Context, tenantID string) (model.TenantQuot
 	return quota, nil
 }
 
+// CreateSandbox inserts a new sandbox row and its initial runtime state.
 func (s *Store) CreateSandbox(ctx context.Context, sandbox model.Sandbox) error {
 	now := sandbox.CreatedAt.UTC().Format(time.RFC3339Nano)
 	return s.WithTx(ctx, func(tx *sql.Tx) error {
@@ -211,6 +222,8 @@ func (s *Store) CreateSandbox(ctx context.Context, sandbox model.Sandbox) error 
 	})
 }
 
+// UpdateSandboxState updates the persisted lifecycle and configuration state of
+// sandbox.
 func (s *Store) UpdateSandboxState(ctx context.Context, sandbox model.Sandbox) error {
 	return s.WithTx(ctx, func(tx *sql.Tx) error {
 		var deletedAt interface{}
@@ -238,6 +251,7 @@ func (s *Store) UpdateSandboxState(ctx context.Context, sandbox model.Sandbox) e
 	})
 }
 
+// UpdateRuntimeState updates the persisted backend runtime state for sandboxID.
 func (s *Store) UpdateRuntimeState(ctx context.Context, sandboxID string, state model.RuntimeState) error {
 	var startedAt interface{}
 	if state.StartedAt != nil {
@@ -251,6 +265,7 @@ func (s *Store) UpdateRuntimeState(ctx context.Context, sandboxID string, state 
 	return err
 }
 
+// GetSandbox returns the sandbox identified by tenantID and sandboxID.
 func (s *Store) GetSandbox(ctx context.Context, tenantID, sandboxID string) (model.Sandbox, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_selection, s.runtime_backend, s.runtime_class, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
@@ -269,6 +284,7 @@ func (s *Store) GetSandbox(ctx context.Context, tenantID, sandboxID string) (mod
 	return sandbox, nil
 }
 
+// ListSandboxes returns all sandboxes for tenantID ordered by creation time.
 func (s *Store) ListSandboxes(ctx context.Context, tenantID string) ([]model.Sandbox, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT s.sandbox_id, s.tenant_id, s.status, s.runtime_selection, s.runtime_backend, s.runtime_class, s.base_image_ref, s.profile, s.feature_set, s.capability_set, s.control_mode, s.control_protocol_version, s.workspace_contract_version, s.image_contract_version, s.cpu_limit_millis,
@@ -296,10 +312,12 @@ func (s *Store) ListSandboxes(ctx context.Context, tenantID string) ([]model.San
 	return sandboxes, rows.Err()
 }
 
+// ListNonDeletedSandboxes returns all sandboxes whose status is not deleted.
 func (s *Store) ListNonDeletedSandboxes(ctx context.Context) ([]model.Sandbox, error) {
 	return s.listNonDeletedSandboxes(ctx, "")
 }
 
+// ListNonDeletedSandboxesByTenant returns non-deleted sandboxes for tenantID.
 func (s *Store) ListNonDeletedSandboxesByTenant(ctx context.Context, tenantID string) ([]model.Sandbox, error) {
 	return s.listNonDeletedSandboxes(ctx, tenantID)
 }
@@ -335,6 +353,8 @@ func (s *Store) listNonDeletedSandboxes(ctx context.Context, tenantID string) ([
 	return sandboxes, rows.Err()
 }
 
+// StorageUsageUpdatedAt returns the last time sandbox storage metrics were
+// refreshed.
 func (s *Store) StorageUsageUpdatedAt(ctx context.Context, sandboxID string) (time.Time, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT updated_at
@@ -351,6 +371,7 @@ func (s *Store) StorageUsageUpdatedAt(ctx context.Context, sandboxID string) (ti
 	return parseTime(updated)
 }
 
+// UpdateStorageUsage persists measured storage consumption for sandboxID.
 func (s *Store) UpdateStorageUsage(ctx context.Context, sandboxID string, rootfsBytes, workspaceBytes, cacheBytes, snapshotBytes, rootfsEntries, workspaceEntries, cacheEntries, snapshotEntries int64) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE sandbox_storage
@@ -360,6 +381,7 @@ func (s *Store) UpdateStorageUsage(ctx context.Context, sandboxID string, rootfs
 	return err
 }
 
+// TenantUsage summarizes quota-relevant usage for a tenant.
 type TenantUsage struct {
 	Sandboxes            int               `json:"sandboxes"`
 	RunningSandboxes     int               `json:"running_sandboxes"`
@@ -372,6 +394,7 @@ type TenantUsage struct {
 	ActualStorageEntries int64             `json:"actual_storage_entries"`
 }
 
+// TenantUsage returns the current quota-relevant usage for tenantID.
 func (s *Store) TenantUsage(ctx context.Context, tenantID string) (TenantUsage, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT
@@ -402,6 +425,7 @@ func (s *Store) TenantUsage(ctx context.Context, tenantID string) (TenantUsage, 
 	return usage, nil
 }
 
+// CreateExecution inserts a new execution record.
 func (s *Store) CreateExecution(ctx context.Context, execution model.Execution) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO executions(
@@ -413,6 +437,7 @@ func (s *Store) CreateExecution(ctx context.Context, execution model.Execution) 
 	return err
 }
 
+// UpdateExecution updates the terminal state and previews for execution.
 func (s *Store) UpdateExecution(ctx context.Context, execution model.Execution) error {
 	var completed interface{}
 	var duration interface{}
@@ -431,6 +456,7 @@ func (s *Store) UpdateExecution(ctx context.Context, execution model.Execution) 
 	return err
 }
 
+// CreateTTYSession inserts a new terminal session record.
 func (s *Store) CreateTTYSession(ctx context.Context, session model.TTYSession) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO tty_sessions(tty_session_id, sandbox_id, tenant_id, command, connected, last_resize, created_at, closed_at)
@@ -439,6 +465,7 @@ func (s *Store) CreateTTYSession(ctx context.Context, session model.TTYSession) 
 	return err
 }
 
+// CloseTTYSession marks the terminal session as disconnected and closed.
 func (s *Store) CloseTTYSession(ctx context.Context, tenantID, sessionID string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE tty_sessions SET connected=0, closed_at=? WHERE tty_session_id=? AND tenant_id=?
@@ -446,6 +473,7 @@ func (s *Store) CloseTTYSession(ctx context.Context, tenantID, sessionID string)
 	return err
 }
 
+// UpdateTTYResize records the most recent resize event for a terminal session.
 func (s *Store) UpdateTTYResize(ctx context.Context, tenantID, sessionID, resize string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE tty_sessions SET last_resize=? WHERE tty_session_id=? AND tenant_id=?
@@ -453,6 +481,7 @@ func (s *Store) UpdateTTYResize(ctx context.Context, tenantID, sessionID, resize
 	return err
 }
 
+// CreateTunnel inserts a new tunnel record.
 func (s *Store) CreateTunnel(ctx context.Context, tunnel model.Tunnel) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO tunnels(tunnel_id, sandbox_id, tenant_id, target_port, protocol, auth_mode, auth_secret_hash, visibility, endpoint, created_at, revoked_at)
@@ -461,6 +490,7 @@ func (s *Store) CreateTunnel(ctx context.Context, tunnel model.Tunnel) error {
 	return err
 }
 
+// ListTunnels returns the tunnels for sandboxID belonging to tenantID.
 func (s *Store) ListTunnels(ctx context.Context, tenantID, sandboxID string) ([]model.Tunnel, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT tunnel_id, sandbox_id, tenant_id, target_port, protocol, auth_mode, auth_secret_hash, visibility, endpoint, created_at, revoked_at
@@ -483,6 +513,7 @@ func (s *Store) ListTunnels(ctx context.Context, tenantID, sandboxID string) ([]
 	return tunnels, rows.Err()
 }
 
+// GetTunnel returns a tenant-scoped tunnel by ID.
 func (s *Store) GetTunnel(ctx context.Context, tenantID, tunnelID string) (model.Tunnel, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT tunnel_id, sandbox_id, tenant_id, target_port, protocol, auth_mode, auth_secret_hash, visibility, endpoint, created_at, revoked_at
@@ -491,6 +522,7 @@ func (s *Store) GetTunnel(ctx context.Context, tenantID, tunnelID string) (model
 	return scanTunnel(row)
 }
 
+// GetTunnelByID returns a tunnel without applying tenant scoping.
 func (s *Store) GetTunnelByID(ctx context.Context, tunnelID string) (model.Tunnel, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT tunnel_id, sandbox_id, tenant_id, target_port, protocol, auth_mode, auth_secret_hash, visibility, endpoint, created_at, revoked_at
@@ -499,6 +531,7 @@ func (s *Store) GetTunnelByID(ctx context.Context, tunnelID string) (model.Tunne
 	return scanTunnel(row)
 }
 
+// RevokeTunnel marks the tunnel as revoked when it is still active.
 func (s *Store) RevokeTunnel(ctx context.Context, tenantID, tunnelID string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE tunnels SET revoked_at=? WHERE tenant_id=? AND tunnel_id=? AND revoked_at IS NULL
@@ -506,6 +539,7 @@ func (s *Store) RevokeTunnel(ctx context.Context, tenantID, tunnelID string) err
 	return err
 }
 
+// CreateTunnelCapability inserts a one-time tunnel capability.
 func (s *Store) CreateTunnelCapability(ctx context.Context, capability model.TunnelCapability) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO tunnel_capabilities(capability_id, tunnel_id, nonce_hash, path, expires_at, consumed_at, revoked_at, created_at)
@@ -514,6 +548,7 @@ func (s *Store) CreateTunnelCapability(ctx context.Context, capability model.Tun
 	return err
 }
 
+// GetTunnelCapability returns a tunnel capability by ID.
 func (s *Store) GetTunnelCapability(ctx context.Context, capabilityID string) (model.TunnelCapability, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT capability_id, tunnel_id, nonce_hash, path, expires_at, consumed_at, revoked_at, created_at
@@ -522,6 +557,7 @@ func (s *Store) GetTunnelCapability(ctx context.Context, capabilityID string) (m
 	return scanTunnelCapability(row)
 }
 
+// ConsumeTunnelCapability marks a tunnel capability as consumed.
 func (s *Store) ConsumeTunnelCapability(ctx context.Context, capabilityID string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE tunnel_capabilities SET consumed_at=? WHERE capability_id=? AND consumed_at IS NULL AND revoked_at IS NULL
@@ -529,6 +565,7 @@ func (s *Store) ConsumeTunnelCapability(ctx context.Context, capabilityID string
 	return err
 }
 
+// RevokeTunnelCapabilities revokes all active capabilities for tunnelID.
 func (s *Store) RevokeTunnelCapabilities(ctx context.Context, tunnelID string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE tunnel_capabilities SET revoked_at=? WHERE tunnel_id=? AND revoked_at IS NULL
@@ -536,6 +573,7 @@ func (s *Store) RevokeTunnelCapabilities(ctx context.Context, tunnelID string) e
 	return err
 }
 
+// CreateSnapshot inserts a snapshot record.
 func (s *Store) CreateSnapshot(ctx context.Context, snapshot model.Snapshot) error {
 	var completed interface{}
 	if snapshot.CompletedAt != nil {
@@ -548,6 +586,7 @@ func (s *Store) CreateSnapshot(ctx context.Context, snapshot model.Snapshot) err
 	return err
 }
 
+// UpdateSnapshot updates the persisted state of snapshot.
 func (s *Store) UpdateSnapshot(ctx context.Context, snapshot model.Snapshot) error {
 	var completed interface{}
 	if snapshot.CompletedAt != nil {
@@ -561,6 +600,7 @@ func (s *Store) UpdateSnapshot(ctx context.Context, snapshot model.Snapshot) err
 	return err
 }
 
+// GetSnapshot returns a tenant-scoped snapshot by ID.
 func (s *Store) GetSnapshot(ctx context.Context, tenantID, snapshotID string) (model.Snapshot, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, bundle_sha256, export_location, created_at, completed_at
@@ -569,6 +609,7 @@ func (s *Store) GetSnapshot(ctx context.Context, tenantID, snapshotID string) (m
 	return scanSnapshot(row)
 }
 
+// ListSnapshots returns snapshots for sandboxID ordered from newest to oldest.
 func (s *Store) ListSnapshots(ctx context.Context, tenantID, sandboxID string) ([]model.Snapshot, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, bundle_sha256, export_location, created_at, completed_at
@@ -591,6 +632,7 @@ func (s *Store) ListSnapshots(ctx context.Context, tenantID, sandboxID string) (
 	return snapshots, rows.Err()
 }
 
+// AddAuditEvent inserts an audit record and updates aggregate counts.
 func (s *Store) AddAuditEvent(ctx context.Context, event model.AuditEvent) error {
 	return s.WithTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
@@ -608,6 +650,7 @@ func (s *Store) AddAuditEvent(ctx context.Context, event model.AuditEvent) error
 	})
 }
 
+// ListRunningExecutions returns all executions that are still marked running.
 func (s *Store) ListRunningExecutions(ctx context.Context) ([]model.Execution, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT execution_id, sandbox_id, tenant_id, command, cwd, timeout_seconds, status, started_at
@@ -635,6 +678,7 @@ func (s *Store) ListRunningExecutions(ctx context.Context) ([]model.Execution, e
 	return executions, rows.Err()
 }
 
+// ListSnapshotsByStatus returns snapshots matching status.
 func (s *Store) ListSnapshotsByStatus(ctx context.Context, status model.SnapshotStatus) ([]model.Snapshot, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT snapshot_id, sandbox_id, tenant_id, name, status, image_ref, runtime_selection, runtime_backend, profile, image_contract_version, control_protocol_version, workspace_contract_version, workspace_tar, bundle_sha256, export_location, created_at, completed_at
@@ -657,6 +701,7 @@ func (s *Store) ListSnapshotsByStatus(ctx context.Context, status model.Snapshot
 	return snapshots, rows.Err()
 }
 
+// ExecutionCounts returns execution totals keyed by status.
 func (s *Store) ExecutionCounts(ctx context.Context, tenantID string) (map[model.ExecutionStatus]int, error) {
 	query := `SELECT status, COUNT(*) FROM executions`
 	args := []any{}
@@ -682,6 +727,7 @@ func (s *Store) ExecutionCounts(ctx context.Context, tenantID string) (map[model
 	return counts, rows.Err()
 }
 
+// SnapshotCounts returns snapshot totals keyed by status.
 func (s *Store) SnapshotCounts(ctx context.Context, tenantID string) (map[model.SnapshotStatus]int, error) {
 	query := `SELECT status, COUNT(*) FROM snapshots`
 	args := []any{}
@@ -707,6 +753,7 @@ func (s *Store) SnapshotCounts(ctx context.Context, tenantID string) (map[model.
 	return counts, rows.Err()
 }
 
+// ListAuditEvents returns audit events for tenantID ordered by creation time.
 func (s *Store) ListAuditEvents(ctx context.Context, tenantID string) ([]model.AuditEvent, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT audit_event_id, tenant_id, sandbox_id, action, resource_id, outcome, message, created_at
@@ -734,6 +781,8 @@ func (s *Store) ListAuditEvents(ctx context.Context, tenantID string) ([]model.A
 	return events, rows.Err()
 }
 
+// AuditEventCounts returns aggregated audit totals grouped by action and
+// outcome.
 func (s *Store) AuditEventCounts(ctx context.Context, tenantID string) (map[string]map[string]int, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT action, outcome, total
@@ -759,6 +808,7 @@ func (s *Store) AuditEventCounts(ctx context.Context, tenantID string) (map[stri
 	return counts, rows.Err()
 }
 
+// UpsertServiceAccount creates or updates a service account record.
 func (s *Store) UpsertServiceAccount(ctx context.Context, account model.ServiceAccount) error {
 	scopeJSON, err := json.Marshal(account.Scopes)
 	if err != nil {
@@ -779,6 +829,7 @@ func (s *Store) UpsertServiceAccount(ctx context.Context, account model.ServiceA
 	return err
 }
 
+// GetServiceAccount returns a service account by ID.
 func (s *Store) GetServiceAccount(ctx context.Context, serviceAccountID string) (model.ServiceAccount, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT service_account_id, tenant_id, name, scope_json, disabled, expires_at, created_at, revoked_at
@@ -787,6 +838,7 @@ func (s *Store) GetServiceAccount(ctx context.Context, serviceAccountID string) 
 	return scanServiceAccount(row)
 }
 
+// UpsertPromotedGuestImage creates or updates a promoted guest image record.
 func (s *Store) UpsertPromotedGuestImage(ctx context.Context, image model.PromotedGuestImage) error {
 	var promotedAt any
 	if image.PromotedAt != nil {
@@ -800,6 +852,7 @@ func (s *Store) UpsertPromotedGuestImage(ctx context.Context, image model.Promot
 	return err
 }
 
+// GetPromotedGuestImage returns the promoted guest image record for imageRef.
 func (s *Store) GetPromotedGuestImage(ctx context.Context, imageRef string) (model.PromotedGuestImage, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT image_ref, image_sha256, profile, control_mode, control_protocol_version, contract_version, provenance_json, verification_status, promotion_status, promoted_at, promoted_by
@@ -808,6 +861,7 @@ func (s *Store) GetPromotedGuestImage(ctx context.Context, imageRef string) (mod
 	return scanPromotedGuestImage(row)
 }
 
+// ListPromotedGuestImages returns all promoted guest image records.
 func (s *Store) ListPromotedGuestImages(ctx context.Context) ([]model.PromotedGuestImage, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT image_ref, image_sha256, profile, control_mode, control_protocol_version, contract_version, provenance_json, verification_status, promotion_status, promoted_at, promoted_by
@@ -828,6 +882,7 @@ func (s *Store) ListPromotedGuestImages(ctx context.Context) ([]model.PromotedGu
 	return images, rows.Err()
 }
 
+// CreateReleaseEvidence inserts a release-evidence record.
 func (s *Store) CreateReleaseEvidence(ctx context.Context, evidence model.ReleaseEvidence) error {
 	var completedAt any
 	if evidence.CompletedAt != nil {
@@ -840,6 +895,8 @@ func (s *Store) CreateReleaseEvidence(ctx context.Context, evidence model.Releas
 	return err
 }
 
+// ListReleaseEvidence returns release-evidence records, optionally filtered by
+// gate name.
 func (s *Store) ListReleaseEvidence(ctx context.Context, gateName string) ([]model.ReleaseEvidence, error) {
 	query := `
 		SELECT evidence_id, gate_name, host_fingerprint, runtime_selection, image_ref, profile, outcome, artifact_path, started_at, completed_at

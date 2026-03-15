@@ -473,6 +473,8 @@ type sandboxLocalConnHandle struct {
 	writeDeadline time.Time
 }
 
+// OpenSandboxLocalConn opens an agent-backed TCP bridge to targetPort inside
+// sandbox.
 func (r *Runtime) OpenSandboxLocalConn(ctx context.Context, sandbox model.Sandbox, targetPort int) (net.Conn, error) {
 	if targetPort < 1 || targetPort > 65535 {
 		return nil, fmt.Errorf("target port must be between 1 and 65535")

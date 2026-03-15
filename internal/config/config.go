@@ -17,12 +17,19 @@ import (
 	"or3-sandbox/internal/model"
 )
 
+// TenantConfig configures a statically provisioned tenant for static-token
+// authentication mode.
 type TenantConfig struct {
 	ID    string
 	Name  string
 	Token string
 }
 
+// Config contains the fully resolved daemon configuration.
+//
+// Callers should use [Load] followed by [Config.Validate] rather than building
+// Config values manually so derived defaults and environment parsing stay
+// consistent.
 type Config struct {
 	DeploymentMode                  string
 	DeploymentProfile               string
@@ -105,6 +112,7 @@ type Config struct {
 	KataContainerdSocket            string
 }
 
+// Load parses command-line arguments and environment variables into a Config.
 func Load(args []string) (Config, error) {
 	fs := flag.NewFlagSet("sandboxd", flag.ContinueOnError)
 	cfg := Config{}
@@ -272,6 +280,8 @@ func Load(args []string) (Config, error) {
 	return cfg, cfg.Validate()
 }
 
+// Validate checks cross-field configuration invariants and normalizes values
+// that depend on deployment mode and runtime selection.
 func (c Config) Validate() error {
 	c.applyDeploymentProfile()
 	c.applyRuntimeSelectionCompatibility()
@@ -645,6 +655,8 @@ func (c Config) RuntimeClass() model.RuntimeClass {
 	return c.DefaultRuntimeSelection.RuntimeClass()
 }
 
+// IsRuntimeSelectionEnabled reports whether selection is available for tenant
+// requests and lifecycle operations.
 func (c Config) IsRuntimeSelectionEnabled(selection model.RuntimeSelection) bool {
 	for _, enabled := range c.EnabledRuntimeSelections {
 		if enabled == selection {
@@ -723,6 +735,8 @@ func flagValue(args []string, name string) string {
 	return ""
 }
 
+// EffectiveQEMUAllowedBaseImagePaths returns the normalized list of guest image
+// paths tenants may request for QEMU sandboxes.
 func (c Config) EffectiveQEMUAllowedBaseImagePaths() []string {
 	return appendDefaultQEMUBaseImagePath(c.QEMUAllowedBaseImagePaths, c.QEMUBaseImagePath)
 }
@@ -744,6 +758,7 @@ func appendDefaultQEMUBaseImagePath(paths []string, defaultPath string) []string
 	return result
 }
 
+// NormalizeQEMUBaseImagePath cleans path for policy comparisons.
 func NormalizeQEMUBaseImagePath(path string) string {
 	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
@@ -752,10 +767,13 @@ func NormalizeQEMUBaseImagePath(path string) string {
 	return filepath.Clean(trimmed)
 }
 
+// IsAllowedQEMUProfile reports whether profile is allowed for QEMU sandboxes.
 func (c Config) IsAllowedQEMUProfile(profile model.GuestProfile) bool {
 	return c.IsAllowedGuestProfile("qemu", profile)
 }
 
+// IsAllowedGuestProfile reports whether profile is allowed for the selected
+// runtime backend.
 func (c Config) IsAllowedGuestProfile(runtimeBackend string, profile model.GuestProfile) bool {
 	for _, allowed := range c.effectiveAllowedGuestProfiles(runtimeBackend) {
 		if allowed == profile {
@@ -765,10 +783,14 @@ func (c Config) IsAllowedGuestProfile(runtimeBackend string, profile model.Guest
 	return false
 }
 
+// IsDangerousQEMUProfile reports whether profile is treated as dangerous for
+// QEMU policy checks.
 func (c Config) IsDangerousQEMUProfile(profile model.GuestProfile) bool {
 	return c.IsDangerousGuestProfile("qemu", profile)
 }
 
+// IsDangerousGuestProfile reports whether profile is treated as dangerous for
+// the selected runtime backend.
 func (c Config) IsDangerousGuestProfile(runtimeBackend string, profile model.GuestProfile) bool {
 	for _, dangerous := range c.effectiveDangerousGuestProfiles(runtimeBackend) {
 		if dangerous == profile {
@@ -778,6 +800,8 @@ func (c Config) IsDangerousGuestProfile(runtimeBackend string, profile model.Gue
 	return false
 }
 
+// AllowsDangerousGuestProfiles reports whether dangerous profiles are permitted
+// for the selected runtime backend.
 func (c Config) AllowsDangerousGuestProfiles(runtimeBackend string) bool {
 	return c.AllowDangerousProfiles || (runtimeBackend == "qemu" && c.QEMUAllowDangerousProfiles)
 }
@@ -958,6 +982,8 @@ func requireHVF() error {
 	return nil
 }
 
+// HashToken returns the stable SHA-256 hex digest used for stored bearer token
+// comparisons.
 func HashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])

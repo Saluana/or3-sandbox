@@ -8,10 +8,13 @@ import (
 	"or3-sandbox/internal/model"
 )
 
+// ErrForbidden reports that the authenticated caller lacks the requested
+// permission.
 var ErrForbidden = errors.New("forbidden")
 
 type tenantContextKey struct{}
 
+// Identity describes the authenticated caller.
 type Identity struct {
 	Subject          string
 	TenantID         string
@@ -22,6 +25,8 @@ type Identity struct {
 	AuthMethod       string
 }
 
+// TenantContext is the request-scoped authentication payload stored in a
+// [context.Context].
 type TenantContext struct {
 	Tenant   model.Tenant
 	Quota    model.TenantQuota
@@ -29,24 +34,38 @@ type TenantContext struct {
 }
 
 const (
-	PermissionSandboxRead      = "sandbox.read"
+	// PermissionSandboxRead allows reading sandbox metadata.
+	PermissionSandboxRead = "sandbox.read"
+	// PermissionSandboxLifecycle allows lifecycle mutations such as start and stop.
 	PermissionSandboxLifecycle = "sandbox.lifecycle"
-	PermissionExecRun          = "exec.run"
-	PermissionTTYAttach        = "tty.attach"
-	PermissionFilesRead        = "files.read"
-	PermissionFilesWrite       = "files.write"
-	PermissionSnapshotsRead    = "snapshots.read"
-	PermissionSnapshotsWrite   = "snapshots.write"
-	PermissionTunnelsRead      = "tunnels.read"
-	PermissionTunnelsWrite     = "tunnels.write"
-	PermissionAdminInspect     = "admin.inspect"
+	// PermissionExecRun allows running commands in sandboxes.
+	PermissionExecRun = "exec.run"
+	// PermissionTTYAttach allows opening interactive terminal sessions.
+	PermissionTTYAttach = "tty.attach"
+	// PermissionFilesRead allows reading sandbox workspace files.
+	PermissionFilesRead = "files.read"
+	// PermissionFilesWrite allows writing sandbox workspace files.
+	PermissionFilesWrite = "files.write"
+	// PermissionSnapshotsRead allows listing and reading snapshots.
+	PermissionSnapshotsRead = "snapshots.read"
+	// PermissionSnapshotsWrite allows creating and restoring snapshots.
+	PermissionSnapshotsWrite = "snapshots.write"
+	// PermissionTunnelsRead allows reading tunnel metadata.
+	PermissionTunnelsRead = "tunnels.read"
+	// PermissionTunnelsWrite allows creating and revoking tunnels.
+	PermissionTunnelsWrite = "tunnels.write"
+	// PermissionAdminInspect allows administrative inspection endpoints.
+	PermissionAdminInspect = "admin.inspect"
 )
 
+// FromContext extracts the current [TenantContext] from ctx.
 func FromContext(ctx context.Context) (TenantContext, bool) {
 	value, ok := ctx.Value(tenantContextKey{}).(TenantContext)
 	return value, ok
 }
 
+// Require reports nil when the current caller has at least one of the supplied
+// permissions.
 func Require(ctx context.Context, permissions ...string) error {
 	tenantCtx, ok := FromContext(ctx)
 	if !ok {
@@ -60,6 +79,7 @@ func Require(ctx context.Context, permissions ...string) error {
 	return ErrForbidden
 }
 
+// HasPermission reports whether t grants permission.
 func (t TenantContext) HasPermission(permission string) bool {
 	if t.Identity.IsService && len(t.Identity.Scopes) > 0 && !containsPermission(t.Identity.Scopes, permission) {
 		return false
@@ -74,6 +94,8 @@ func (t TenantContext) HasPermission(permission string) bool {
 	return false
 }
 
+// AllPermissions returns the complete set of permission names understood by the
+// control plane.
 func AllPermissions() []string {
 	return []string{
 		PermissionSandboxRead,

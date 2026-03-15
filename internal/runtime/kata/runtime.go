@@ -182,6 +182,7 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 	}, nil
 }
 
+// Start boots a previously created Kata task.
 func (r *Runtime) Start(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
 	name := containerName(sandbox.ID)
 	args := r.baseArgs("task", "start", name)
@@ -209,6 +210,7 @@ func (r *Runtime) Start(ctx context.Context, sandbox model.Sandbox) (model.Runti
 	}, nil
 }
 
+// Stop stops a running Kata task.
 func (r *Runtime) Stop(ctx context.Context, sandbox model.Sandbox, force bool) (model.RuntimeState, error) {
 	name := containerName(sandbox.ID)
 
@@ -238,14 +240,17 @@ func (r *Runtime) Stop(ctx context.Context, sandbox model.Sandbox, force bool) (
 	}, nil
 }
 
+// Suspend is not supported by the Kata runtime adapter.
 func (r *Runtime) Suspend(_ context.Context, _ model.Sandbox) (model.RuntimeState, error) {
 	return model.RuntimeState{}, errors.New("kata runtime does not support suspend")
 }
 
+// Resume is not supported by the Kata runtime adapter.
 func (r *Runtime) Resume(_ context.Context, _ model.Sandbox) (model.RuntimeState, error) {
 	return model.RuntimeState{}, errors.New("kata runtime does not support resume")
 }
 
+// Destroy removes the Kata task, container, and persisted runtime state.
 func (r *Runtime) Destroy(ctx context.Context, sandbox model.Sandbox) error {
 	name := containerName(sandbox.ID)
 
@@ -275,6 +280,7 @@ func (r *Runtime) Destroy(ctx context.Context, sandbox model.Sandbox) error {
 	return nil
 }
 
+// Inspect returns the current Kata task state for sandbox.
 func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
 	name := containerName(sandbox.ID)
 
@@ -386,6 +392,7 @@ func (r *Runtime) Exec(ctx context.Context, sandbox model.Sandbox, req model.Exe
 	return handle, nil
 }
 
+// AttachTTY opens an interactive terminal inside sandbox.
 func (r *Runtime) AttachTTY(ctx context.Context, sandbox model.Sandbox, req model.TTYRequest) (model.TTYHandle, error) {
 	command := req.Command
 	if len(command) == 0 {
@@ -446,6 +453,7 @@ func (r *Runtime) CreateSnapshot(ctx context.Context, sandbox model.Sandbox, sna
 	}, nil
 }
 
+// RestoreSnapshot restores sandbox from a previously exported snapshot.
 func (r *Runtime) RestoreSnapshot(ctx context.Context, sandbox model.Sandbox, snapshot model.Snapshot) (model.RuntimeState, error) {
 	if sandbox.WorkspaceRoot == "" {
 		return model.RuntimeState{}, errors.New("kata restore: workspace root not set")

@@ -24,6 +24,7 @@ const execPreviewLimit = 64 * 1024
 
 var envVarKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// Exec runs a command inside sandbox using the active guest control mode.
 func (r *Runtime) Exec(ctx context.Context, sandbox model.Sandbox, req model.ExecRequest, streams model.ExecStreams) (model.ExecHandle, error) {
 	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
 		return r.agentExec(ctx, layoutForSandbox(sandbox), req, streams)
@@ -84,6 +85,7 @@ func (r *Runtime) Exec(ctx context.Context, sandbox model.Sandbox, req model.Exe
 	return handle, nil
 }
 
+// AttachTTY opens an interactive terminal inside sandbox.
 func (r *Runtime) AttachTTY(ctx context.Context, sandbox model.Sandbox, req model.TTYRequest) (model.TTYHandle, error) {
 	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
 		return r.agentAttachTTY(ctx, layoutForSandbox(sandbox), req)

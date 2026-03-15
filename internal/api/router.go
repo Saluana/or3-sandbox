@@ -30,6 +30,7 @@ import (
 	"or3-sandbox/internal/service"
 )
 
+// Router wires HTTP routes to the service layer and request helpers.
 type Router struct {
 	log                          *slog.Logger
 	service                      *service.Service
@@ -50,6 +51,8 @@ const (
 	tunnelAuthCookieName         = "or3_tunnel_auth"
 )
 
+// New returns the API handler configured with the supplied service and daemon
+// settings.
 func New(log *slog.Logger, svc *service.Service, cfg config.Config) http.Handler {
 	workspaceFileTransferMaxBytes := cfg.WorkspaceFileTransferMaxBytes
 	if workspaceFileTransferMaxBytes <= 0 {

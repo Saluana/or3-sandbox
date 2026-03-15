@@ -20,6 +20,8 @@ const workspaceArchiveCommandTimeout = 2 * time.Minute
 
 var _ model.WorkspaceArchiveExporter = (*Runtime)(nil)
 
+// ExportWorkspaceArchive exports selected workspace paths into a host-side
+// tar.gz archive.
 func (r *Runtime) ExportWorkspaceArchive(ctx context.Context, sandbox model.Sandbox, paths []string, maxBytes int64) (string, error) {
 	localArchive, err := os.CreateTemp(filepath.Dir(sandbox.WorkspaceRoot), "workspace-export-*.tar.gz")
 	if err != nil {

@@ -11,12 +11,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Summary is the lightweight manifest view returned by preset discovery.
 type Summary struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Path        string `json:"path"`
 }
 
+// DiscoverExamplesDir finds the repository examples directory, honoring
+// SANDBOX_EXAMPLES_DIR when it is set.
 func DiscoverExamplesDir(startDir string) (string, error) {
 	if explicit := strings.TrimSpace(os.Getenv("SANDBOX_EXAMPLES_DIR")); explicit != "" {
 		info, err := os.Stat(explicit)
@@ -50,6 +53,7 @@ func DiscoverExamplesDir(startDir string) (string, error) {
 	return "", fmt.Errorf("could not find examples directory from %s", startDir)
 }
 
+// List returns the valid preset manifests found under exampleDir.
 func List(exampleDir string) ([]Summary, error) {
 	entries, err := os.ReadDir(exampleDir)
 	if err != nil {
@@ -77,11 +81,13 @@ func List(exampleDir string) ([]Summary, error) {
 	return summaries, nil
 }
 
+// Load reads a named preset from exampleDir.
 func Load(exampleDir, name string) (Manifest, error) {
 	manifestPath := filepath.Join(exampleDir, name, ManifestFileName)
 	return LoadManifest(manifestPath)
 }
 
+// LoadManifest reads, normalizes, and validates a manifest file.
 func LoadManifest(path string) (Manifest, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

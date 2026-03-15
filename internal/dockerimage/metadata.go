@@ -14,11 +14,16 @@ import (
 )
 
 const (
-	LabelProfile      = "org.or3.profile"
+	// LabelProfile stores the curated guest profile label for an image.
+	LabelProfile = "org.or3.profile"
+	// LabelCapabilities stores the curated capability list for an image.
 	LabelCapabilities = "org.or3.capabilities"
-	LabelDangerous    = "org.or3.dangerous"
+	// LabelDangerous marks an image as dangerous for policy checks.
+	LabelDangerous = "org.or3.dangerous"
 )
 
+// Metadata describes the guest profile and capability hints associated with a
+// Docker image.
 type Metadata struct {
 	Ref          string
 	Profile      model.GuestProfile
@@ -52,10 +57,14 @@ var curatedRules = []rule{
 	{repository: "mcr.microsoft.com/playwright", profile: model.GuestProfileBrowser, capabilities: []string{"browser"}},
 }
 
+// ErrMetadataUnavailable reports that an image could not be mapped to curated
+// metadata or label-based metadata.
 var ErrMetadataUnavailable = errors.New("docker image metadata unavailable")
 
+// LabelProvider resolves labels for ref.
 type LabelProvider func(context.Context, string) (map[string]string, error)
 
+// Resolve returns curated metadata for ref without shelling out to Docker.
 func Resolve(ref string) (Metadata, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -67,6 +76,8 @@ func Resolve(ref string) (Metadata, error) {
 	return Metadata{}, missingMetadataError(ref)
 }
 
+// ResolveWithLabelProvider resolves metadata using curated mappings first and a
+// label provider fallback when needed.
 func ResolveWithLabelProvider(ctx context.Context, ref string, provider LabelProvider) (Metadata, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -87,10 +98,13 @@ func ResolveWithLabelProvider(ctx context.Context, ref string, provider LabelPro
 	return Metadata{}, missingMetadataError(ref)
 }
 
+// ResolveWithDockerLabels resolves metadata using curated mappings and Docker
+// image labels when available.
 func ResolveWithDockerLabels(ctx context.Context, ref string) (Metadata, error) {
 	return ResolveWithLabelProvider(ctx, ref, DockerLabelProvider("docker"))
 }
 
+// ParseLabels converts image labels into curated metadata.
 func ParseLabels(ref string, labels map[string]string) (Metadata, error) {
 	profile := model.GuestProfile(strings.ToLower(strings.TrimSpace(labels[LabelProfile])))
 	if !profile.IsValid() {
@@ -165,6 +179,7 @@ func missingMetadataError(ref string) error {
 	return fmt.Errorf("%w: docker image %q is missing curated profile metadata; use a mapped image or add %s/%s/%s labels", ErrMetadataUnavailable, ref, LabelProfile, LabelCapabilities, LabelDangerous)
 }
 
+// DockerLabelProvider returns a label provider backed by `docker image inspect`.
 func DockerLabelProvider(binary string) LabelProvider {
 	return func(ctx context.Context, ref string) (map[string]string, error) {
 		if strings.TrimSpace(binary) == "" {

@@ -13,6 +13,8 @@ import (
 
 const schemaVersion = 7
 
+// Open opens the SQLite database at path, applies connection pragmas, and runs
+// schema migrations before returning.
 func Open(ctx context.Context, path string) (*sql.DB, error) {
 	dsn, err := sqliteDSN(path)
 	if err != nil {

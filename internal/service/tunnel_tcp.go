@@ -20,6 +20,8 @@ type sandboxLocalConnRuntime interface {
 
 const sandboxLocalBridgeReady = "__OR3_TUNNEL_BRIDGE_READY__"
 
+// OpenSandboxLocalConn opens a daemon-side connection to targetPort inside a
+// running sandbox.
 func (s *Service) OpenSandboxLocalConn(ctx context.Context, sandbox model.Sandbox, targetPort int) (net.Conn, error) {
 	if sandbox.Status != model.SandboxStatusRunning {
 		return nil, fmt.Errorf("sandbox %s is not running", sandbox.ID)

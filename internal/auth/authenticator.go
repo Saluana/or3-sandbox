@@ -15,6 +15,7 @@ import (
 	"or3-sandbox/internal/repository"
 )
 
+// Authenticator resolves a bearer token into an identity, tenant, and quota.
 type Authenticator interface {
 	Authenticate(ctx context.Context, token string) (Identity, model.Tenant, model.TenantQuota, error)
 }

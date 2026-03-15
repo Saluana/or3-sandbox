@@ -88,6 +88,8 @@ func buildNodePressureView(cfg config.Config, snapshot admissionSnapshot) model.
 	return view
 }
 
+// CapacityReport returns the tenant and node capacity view used by operator
+// inspection endpoints.
 func (s *Service) CapacityReport(ctx context.Context, tenantID string) (model.CapacityReport, error) {
 	if err := s.enforceAdminInspectionPolicy(ctx, tenantID, "capacity.inspect"); err != nil {
 		return model.CapacityReport{}, err
@@ -167,6 +169,7 @@ func (s *Service) CapacityReport(ctx context.Context, tenantID string) (model.Ca
 	return report, nil
 }
 
+// MetricsReport renders a Prometheus-style metrics snapshot for tenantID.
 func (s *Service) MetricsReport(ctx context.Context, tenantID string) (string, error) {
 	if err := s.enforceAdminInspectionPolicy(ctx, tenantID, "metrics.inspect"); err != nil {
 		return "", err

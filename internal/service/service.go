@@ -59,6 +59,7 @@ type storageMeasurer interface {
 	MeasureStorage(ctx context.Context, sandbox model.Sandbox) (model.StorageUsage, error)
 }
 
+// New constructs the application service layer.
 func New(cfg config.Config, store *repository.Store, runtime model.RuntimeManager, logs ...*slog.Logger) *Service {
 	log := slog.Default()
 	if len(logs) > 0 && logs[0] != nil {
@@ -77,6 +78,8 @@ func New(cfg config.Config, store *repository.Store, runtime model.RuntimeManage
 	}
 }
 
+// CreateSandbox validates the request, provisions storage, creates the runtime,
+// and persists the resulting sandbox.
 func (s *Service) CreateSandbox(ctx context.Context, tenant model.Tenant, quota model.TenantQuota, req model.CreateSandboxRequest) (model.Sandbox, error) {
 	req = s.applyCreateDefaults(req)
 	selection := s.resolveRuntimeSelection(req)
@@ -240,30 +243,38 @@ func (s *Service) rollbackFailedCreate(ctx context.Context, tenantID string, san
 	return cause
 }
 
+// GetSandbox returns a tenant-scoped sandbox by ID.
 func (s *Service) GetSandbox(ctx context.Context, tenantID, sandboxID string) (model.Sandbox, error) {
 	return s.store.GetSandbox(ctx, tenantID, sandboxID)
 }
 
+// RuntimeBackend returns the backend name of the configured default runtime.
 func (s *Service) RuntimeBackend() string {
 	return s.cfg.DefaultRuntimeSelection.Backend()
 }
 
+// RuntimeClass returns the isolation class of the configured default runtime.
 func (s *Service) RuntimeClass() model.RuntimeClass {
 	return s.cfg.RuntimeClass()
 }
 
+// DefaultRuntimeSelection returns the daemon's default runtime selection.
 func (s *Service) DefaultRuntimeSelection() model.RuntimeSelection {
 	return s.cfg.DefaultRuntimeSelection
 }
 
+// EnabledRuntimeSelections returns the runtime selections currently available
+// for use.
 func (s *Service) EnabledRuntimeSelections() []model.RuntimeSelection {
 	return append([]model.RuntimeSelection(nil), s.cfg.EnabledRuntimeSelections...)
 }
 
+// ListSandboxes returns all sandboxes owned by tenantID.
 func (s *Service) ListSandboxes(ctx context.Context, tenantID string) ([]model.Sandbox, error) {
 	return s.store.ListSandboxes(ctx, tenantID)
 }
 
+// GetTenantQuotaView returns the current quota and usage view for tenantID.
 func (s *Service) GetTenantQuotaView(ctx context.Context, tenantID string) (model.TenantQuotaView, error) {
 	quota, err := s.store.GetQuota(ctx, tenantID)
 	if err != nil {
@@ -276,6 +287,7 @@ func (s *Service) GetTenantQuotaView(ctx context.Context, tenantID string) (mode
 	return buildTenantQuotaView(s.cfg, quota, usage), nil
 }
 
+// RuntimeHealth returns the health view exposed by runtime inspection APIs.
 func (s *Service) RuntimeHealth(ctx context.Context, tenantID string) (model.RuntimeHealth, error) {
 	if err := s.enforceAdminInspectionPolicy(ctx, tenantID, "runtime.inspect"); err != nil {
 		return model.RuntimeHealth{}, err
@@ -345,6 +357,7 @@ func (s *Service) resolveRuntimeSelection(req model.CreateSandboxRequest) model.
 	return s.cfg.DefaultRuntimeSelection
 }
 
+// StartSandbox starts a stopped sandbox after re-checking quota and policy.
 func (s *Service) StartSandbox(ctx context.Context, tenantID, sandboxID string, quota model.TenantQuota) (model.Sandbox, error) {
 	sandbox, err := s.reserveLifecycleTransition(ctx, tenantID, sandboxID, "start", &quota, model.SandboxStatusStarting, admissionDelta{
 		nodeRunning:  1,
@@ -359,6 +372,7 @@ func (s *Service) StartSandbox(ctx context.Context, tenantID, sandboxID string, 
 	})
 }
 
+// StopSandbox stops a sandbox and persists the updated runtime state.
 func (s *Service) StopSandbox(ctx context.Context, tenantID, sandboxID string, force bool) (model.Sandbox, error) {
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {
@@ -406,6 +420,7 @@ func (s *Service) StopSandbox(ctx context.Context, tenantID, sandboxID string, f
 	return s.store.GetSandbox(ctx, tenantID, sandbox.ID)
 }
 
+// SuspendSandbox suspends a running sandbox when the backend supports it.
 func (s *Service) SuspendSandbox(ctx context.Context, tenantID, sandboxID string) (model.Sandbox, error) {
 	return s.transitionSandbox(ctx, tenantID, sandboxID, "sandbox.suspend", model.SandboxStatusSuspending, func(sandbox model.Sandbox) (model.RuntimeState, model.SandboxStatus, error) {
 		state, err := s.runtime.Suspend(ctx, sandbox)
@@ -413,6 +428,7 @@ func (s *Service) SuspendSandbox(ctx context.Context, tenantID, sandboxID string
 	}, model.SandboxStatusSuspended)
 }
 
+// ResumeSandbox resumes a suspended sandbox after re-checking quota and policy.
 func (s *Service) ResumeSandbox(ctx context.Context, tenantID, sandboxID string, quota model.TenantQuota) (model.Sandbox, error) {
 	sandbox, err := s.reserveLifecycleTransition(ctx, tenantID, sandboxID, "resume", &quota, model.SandboxStatusStarting, admissionDelta{
 		nodeRunning:  1,
@@ -427,6 +443,7 @@ func (s *Service) ResumeSandbox(ctx context.Context, tenantID, sandboxID string,
 	})
 }
 
+// DeleteSandbox tears down a sandbox and optionally preserves its snapshots.
 func (s *Service) DeleteSandbox(ctx context.Context, tenantID, sandboxID string, preserveSnapshots bool) error {
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {
@@ -481,6 +498,8 @@ func (s *Service) DeleteSandbox(ctx context.Context, tenantID, sandboxID string,
 	return nil
 }
 
+// ExecSandbox runs a command inside a sandbox and persists the execution
+// record.
 func (s *Service) ExecSandbox(ctx context.Context, tenant model.Tenant, quota model.TenantQuota, sandboxID string, req model.ExecRequest, stdout, stderr io.Writer) (model.Execution, error) {
 	sandbox, err := s.store.GetSandbox(ctx, tenant.ID, sandboxID)
 	if err != nil {
@@ -564,6 +583,7 @@ func (s *Service) ExecSandbox(ctx context.Context, tenant model.Tenant, quota mo
 	return execution, nil
 }
 
+// CreateTTYSession opens an interactive terminal session for a sandbox.
 func (s *Service) CreateTTYSession(ctx context.Context, tenantID, sandboxID string, req model.TTYRequest) (model.Sandbox, model.TTYSession, model.TTYHandle, error) {
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {
@@ -601,6 +621,7 @@ func (s *Service) CreateTTYSession(ctx context.Context, tenantID, sandboxID stri
 	return sandbox, session, handle, nil
 }
 
+// CloseTTYSession marks a terminal session closed in persistent state.
 func (s *Service) CloseTTYSession(ctx context.Context, tenantID, sessionID string) error {
 	if err := s.store.CloseTTYSession(ctx, tenantID, sessionID); err != nil {
 		return err
@@ -609,10 +630,12 @@ func (s *Service) CloseTTYSession(ctx context.Context, tenantID, sessionID strin
 	return nil
 }
 
+// UpdateTTYResize records the latest terminal size for a session.
 func (s *Service) UpdateTTYResize(ctx context.Context, tenantID, sessionID string, rows, cols int) error {
 	return s.store.UpdateTTYResize(ctx, tenantID, sessionID, fmt.Sprintf("%dx%d", cols, rows))
 }
 
+// ReadFile reads a file from a sandbox workspace using the requested encoding.
 func (s *Service) ReadFile(ctx context.Context, tenantID, sandboxID, path, encoding string) (model.FileReadResponse, error) {
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {
@@ -652,10 +675,12 @@ func (s *Service) ReadFile(ctx context.Context, tenantID, sandboxID, path, encod
 	return model.FileReadResponse{Path: relativePath, Content: string(data), Size: int64(len(data)), Encoding: "utf-8"}, nil
 }
 
+// WriteFile writes UTF-8 content into a sandbox workspace path.
 func (s *Service) WriteFile(ctx context.Context, tenantID, sandboxID, path string, content string) error {
 	return s.WriteFileBytes(ctx, tenantID, sandboxID, path, []byte(content))
 }
 
+// WriteFileBytes writes raw bytes into a sandbox workspace path.
 func (s *Service) WriteFileBytes(ctx context.Context, tenantID, sandboxID, path string, content []byte) error {
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {
@@ -741,6 +766,7 @@ func workspaceFileResponseSize(file model.FileReadResponse) int64 {
 	return sizeBytes
 }
 
+// DeleteFile removes a workspace path from a sandbox.
 func (s *Service) DeleteFile(ctx context.Context, tenantID, sandboxID, path string) error {
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {
@@ -768,6 +794,7 @@ func (s *Service) DeleteFile(ctx context.Context, tenantID, sandboxID, path stri
 	return s.refreshStorage(ctx, sandbox)
 }
 
+// Mkdir creates a workspace directory inside a sandbox.
 func (s *Service) Mkdir(ctx context.Context, tenantID, sandboxID, path string) error {
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {
@@ -795,6 +822,7 @@ func (s *Service) Mkdir(ctx context.Context, tenantID, sandboxID, path string) e
 	return s.refreshStorage(ctx, sandbox)
 }
 
+// ImportWorkspaceArchive extracts a workspace archive into a sandbox.
 func (s *Service) ImportWorkspaceArchive(ctx context.Context, tenantID, sandboxID string, archive io.Reader) error {
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {
@@ -840,6 +868,8 @@ func (s *Service) ImportWorkspaceArchive(ctx context.Context, tenantID, sandboxI
 	return s.refreshStorage(ctx, sandbox)
 }
 
+// ExportWorkspaceArchive exports selected workspace paths into a tar.gz file on
+// the host.
 func (s *Service) ExportWorkspaceArchive(ctx context.Context, tenantID, sandboxID string, paths []string) (string, error) {
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {
@@ -1137,6 +1167,7 @@ func (s *Service) applyWorkspaceArchiveTree(ctx context.Context, sandbox model.S
 	})
 }
 
+// CreateTunnel creates and persists a tunnel for sandboxID.
 func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, req model.CreateTunnelRequest) (model.Tunnel, error) {
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {
@@ -1189,10 +1220,12 @@ func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, 
 	return tunnel, nil
 }
 
+// ListTunnels returns the tunnels attached to sandboxID.
 func (s *Service) ListTunnels(ctx context.Context, tenantID, sandboxID string) ([]model.Tunnel, error) {
 	return s.store.ListTunnels(ctx, tenantID, sandboxID)
 }
 
+// RevokeTunnel revokes a previously created tunnel.
 func (s *Service) RevokeTunnel(ctx context.Context, tenantID, tunnelID string) error {
 	tunnel, err := s.store.GetTunnel(ctx, tenantID, tunnelID)
 	if err != nil {
@@ -1208,18 +1241,22 @@ func (s *Service) RevokeTunnel(ctx context.Context, tenantID, tunnelID string) e
 	return nil
 }
 
+// CreateTunnelCapability persists a one-time tunnel capability.
 func (s *Service) CreateTunnelCapability(ctx context.Context, capability model.TunnelCapability) error {
 	return s.store.CreateTunnelCapability(ctx, capability)
 }
 
+// GetTunnelCapability returns a tunnel capability by ID.
 func (s *Service) GetTunnelCapability(ctx context.Context, capabilityID string) (model.TunnelCapability, error) {
 	return s.store.GetTunnelCapability(ctx, capabilityID)
 }
 
+// ConsumeTunnelCapability marks a tunnel capability as used.
 func (s *Service) ConsumeTunnelCapability(ctx context.Context, capabilityID string) error {
 	return s.store.ConsumeTunnelCapability(ctx, capabilityID)
 }
 
+// GetTunnel returns a tenant-scoped tunnel and its sandbox.
 func (s *Service) GetTunnel(ctx context.Context, tenantID, tunnelID string) (model.Tunnel, model.Sandbox, error) {
 	tunnel, err := s.store.GetTunnel(ctx, tenantID, tunnelID)
 	if err != nil {
@@ -1232,6 +1269,7 @@ func (s *Service) GetTunnel(ctx context.Context, tenantID, tunnelID string) (mod
 	return tunnel, sandbox, nil
 }
 
+// GetTunnelForProxy returns the tunnel and sandbox used by proxy requests.
 func (s *Service) GetTunnelForProxy(ctx context.Context, tunnelID string) (model.Tunnel, model.Sandbox, error) {
 	tunnel, err := s.store.GetTunnelByID(ctx, tunnelID)
 	if err != nil {
@@ -1244,6 +1282,7 @@ func (s *Service) GetTunnelForProxy(ctx context.Context, tunnelID string) (model
 	return tunnel, sandbox, nil
 }
 
+// CreateSnapshot creates and persists a sandbox snapshot.
 func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string, req model.CreateSnapshotRequest) (model.Snapshot, error) {
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {
@@ -1365,6 +1404,7 @@ func (s *Service) CreateSnapshot(ctx context.Context, tenantID, sandboxID string
 	return snapshot, nil
 }
 
+// ListSnapshots returns snapshots for sandboxID.
 func (s *Service) ListSnapshots(ctx context.Context, tenantID, sandboxID string) ([]model.Snapshot, error) {
 	if _, err := s.store.GetSandbox(ctx, tenantID, sandboxID); err != nil {
 		return nil, err
@@ -1372,10 +1412,12 @@ func (s *Service) ListSnapshots(ctx context.Context, tenantID, sandboxID string)
 	return s.store.ListSnapshots(ctx, tenantID, sandboxID)
 }
 
+// GetSnapshot returns a tenant-scoped snapshot by ID.
 func (s *Service) GetSnapshot(ctx context.Context, tenantID, snapshotID string) (model.Snapshot, error) {
 	return s.store.GetSnapshot(ctx, tenantID, snapshotID)
 }
 
+// RestoreSnapshot restores a snapshot into a newly created sandbox.
 func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID string, req model.RestoreSnapshotRequest) (model.Sandbox, error) {
 	snapshot, err := s.store.GetSnapshot(ctx, tenantID, snapshotID)
 	if err != nil {
@@ -1460,6 +1502,7 @@ func (s *Service) RestoreSnapshot(ctx context.Context, tenantID, snapshotID stri
 	return s.store.GetSandbox(ctx, tenantID, sandbox.ID)
 }
 
+// Reconcile refreshes runtime and storage state for persisted sandboxes.
 func (s *Service) Reconcile(ctx context.Context) error {
 	var reconcileErr error
 	if err := s.reconcileOrphanedExecutions(ctx); err != nil {

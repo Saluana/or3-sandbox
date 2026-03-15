@@ -13,14 +13,17 @@ import (
 	"or3-sandbox/internal/model"
 )
 
+// SidecarSuffix is appended to a guest image path to locate its contract file.
 const SidecarSuffix = ".or3.json"
 
+// ControlContract describes how the daemon can communicate with a guest image.
 type ControlContract struct {
 	Mode                model.GuestControlMode `json:"mode"`
 	ProtocolVersion     string                 `json:"protocol_version"`
 	SupportedTransports []string               `json:"supported_transports,omitempty"`
 }
 
+// ProvenanceContract records optional build provenance for a guest image.
 type ProvenanceContract struct {
 	BaseImageSource         string `json:"base_image_source,omitempty"`
 	BaseImageSHA256         string `json:"base_image_sha256,omitempty"`
@@ -29,6 +32,7 @@ type ProvenanceContract struct {
 	PackageInventorySHA256  string `json:"package_inventory_sha256,omitempty"`
 }
 
+// Contract is the signed-off metadata sidecar associated with a guest image.
 type Contract struct {
 	ContractVersion          string             `json:"contract_version"`
 	ImagePath                string             `json:"image_path,omitempty"`
@@ -47,6 +51,7 @@ type Contract struct {
 	Provenance               ProvenanceContract `json:"provenance,omitempty"`
 }
 
+// SidecarPath returns the sidecar contract path for imagePath.
 func SidecarPath(imagePath string) string {
 	trimmed := strings.TrimSpace(imagePath)
 	if trimmed == "" {
@@ -55,6 +60,7 @@ func SidecarPath(imagePath string) string {
 	return trimmed + SidecarSuffix
 }
 
+// Load reads and normalizes the contract sidecar for imagePath.
 func Load(imagePath string) (Contract, error) {
 	sidecarPath := SidecarPath(imagePath)
 	if sidecarPath == "" {
@@ -76,6 +82,8 @@ func Load(imagePath string) (Contract, error) {
 	return contract, nil
 }
 
+// Validate verifies that contract is internally consistent and matches the
+// bytes at imagePath.
 func Validate(imagePath string, contract Contract) error {
 	if strings.TrimSpace(contract.ContractVersion) == "" {
 		return fmt.Errorf("image contract is missing contract_version")
@@ -108,6 +116,7 @@ func Validate(imagePath string, contract Contract) error {
 	return nil
 }
 
+// ComputeSHA256 returns the SHA-256 digest of the file at path.
 func ComputeSHA256(path string) (string, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -121,6 +130,8 @@ func ComputeSHA256(path string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
+// RequestedFeaturesAllowed reports whether requested features are permitted by
+// the guest contract.
 func RequestedFeaturesAllowed(contract Contract, requested []string) error {
 	requested = model.NormalizeFeatures(requested)
 	if len(requested) == 0 {

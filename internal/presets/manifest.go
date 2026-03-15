@@ -10,10 +10,11 @@ import (
 	"or3-sandbox/internal/model"
 )
 
-// YAML is used for preset manifests because these files are intended to be
-// human-maintained example definitions under examples/, not machine-generated payloads.
+// ManifestFileName is the canonical filename for preset manifests under the
+// examples tree.
 const ManifestFileName = "preset.yaml"
 
+// Manifest is the top-level preset manifest schema.
 type Manifest struct {
 	Name        string          `json:"name" yaml:"name"`
 	Description string          `json:"description,omitempty" yaml:"description,omitempty"`
@@ -31,11 +32,13 @@ type Manifest struct {
 	BaseDir string `json:"-" yaml:"-"`
 }
 
+// RuntimeSelector constrains which runtimes a preset may use.
 type RuntimeSelector struct {
 	Allowed []string `json:"allowed,omitempty" yaml:"allowed,omitempty"`
 	Profile string   `json:"profile,omitempty" yaml:"profile,omitempty"`
 }
 
+// SandboxPreset describes the sandbox to create before running steps.
 type SandboxPreset struct {
 	Image        string `json:"image" yaml:"image"`
 	CPULimit     string `json:"cpu,omitempty" yaml:"cpu,omitempty"`
@@ -47,6 +50,7 @@ type SandboxPreset struct {
 	Start        *bool  `json:"start,omitempty" yaml:"start,omitempty"`
 }
 
+// Input declares a user-supplied preset parameter.
 type Input struct {
 	Name        string `json:"name" yaml:"name"`
 	Required    bool   `json:"required,omitempty" yaml:"required,omitempty"`
@@ -55,6 +59,7 @@ type Input struct {
 	Default     string `json:"default,omitempty" yaml:"default,omitempty"`
 }
 
+// FileAsset writes inline or source-backed content into the sandbox.
 type FileAsset struct {
 	Path    string `json:"path" yaml:"path"`
 	Content string `json:"content,omitempty" yaml:"content,omitempty"`
@@ -62,6 +67,7 @@ type FileAsset struct {
 	Binary  bool   `json:"binary,omitempty" yaml:"binary,omitempty"`
 }
 
+// Step describes a command executed during bootstrap or startup.
 type Step struct {
 	Name            string            `json:"name,omitempty" yaml:"name,omitempty"`
 	Command         []string          `json:"command" yaml:"command"`
@@ -72,6 +78,7 @@ type Step struct {
 	ContinueOnError bool              `json:"continue_on_error,omitempty" yaml:"continue_on_error,omitempty"`
 }
 
+// ReadinessCheck defines how a preset waits for the workload to become ready.
 type ReadinessCheck struct {
 	Type           string        `json:"type" yaml:"type"`
 	Command        []string      `json:"command,omitempty" yaml:"command,omitempty"`
@@ -82,6 +89,7 @@ type ReadinessCheck struct {
 	Interval       time.Duration `json:"interval,omitempty" yaml:"interval,omitempty"`
 }
 
+// Tunnel configures an optional published tunnel for the preset workload.
 type Tunnel struct {
 	Port       int    `json:"port" yaml:"port"`
 	Protocol   string `json:"protocol,omitempty" yaml:"protocol,omitempty"`
@@ -89,20 +97,27 @@ type Tunnel struct {
 	Visibility string `json:"visibility,omitempty" yaml:"visibility,omitempty"`
 }
 
+// Artifact describes a file copied back from the sandbox after execution.
 type Artifact struct {
 	RemotePath string `json:"remote_path" yaml:"remote_path"`
 	LocalPath  string `json:"local_path" yaml:"local_path"`
 	Binary     bool   `json:"binary,omitempty" yaml:"binary,omitempty"`
 }
 
+// CleanupPolicy controls when preset-created sandboxes are deleted.
 type CleanupPolicy string
 
 const (
+	// CleanupOnSuccess removes the sandbox only when the preset run succeeds.
 	CleanupOnSuccess CleanupPolicy = "on-success"
-	CleanupAlways    CleanupPolicy = "always"
-	CleanupNever     CleanupPolicy = "never"
+	// CleanupAlways removes the sandbox regardless of run outcome.
+	CleanupAlways CleanupPolicy = "always"
+	// CleanupNever keeps the sandbox after the preset run finishes.
+	CleanupNever CleanupPolicy = "never"
 )
 
+// Normalize fills in implied defaults so the manifest can be executed
+// consistently.
 func (m *Manifest) Normalize() {
 	if strings.TrimSpace(m.Name) == "" && strings.TrimSpace(m.BaseDir) != "" {
 		m.Name = filepath.Base(m.BaseDir)
@@ -174,6 +189,8 @@ func normalizeStep(step *Step, fallbackName string) {
 	}
 }
 
+// Validate checks manifest invariants and returns an error for invalid or
+// ambiguous configuration.
 func (m Manifest) Validate() error {
 	if strings.TrimSpace(m.Name) == "" {
 		return fmt.Errorf("name is required")
@@ -262,6 +279,7 @@ func (m Manifest) Validate() error {
 	return nil
 }
 
+// AllowsRuntime reports whether runtimeName is allowed by the manifest.
 func (m Manifest) AllowsRuntime(runtimeName string) bool {
 	if len(m.Runtime.Allowed) == 0 {
 		return true

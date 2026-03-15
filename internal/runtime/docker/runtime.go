@@ -35,6 +35,7 @@ const (
 	dockerCapabilityExtraCapPrefix = "docker.extra-cap:"
 )
 
+// Options configures the Docker runtime adapter.
 type Options struct {
 	Binary                    string
 	HostOS                    string
@@ -49,6 +50,7 @@ type Options struct {
 	SnapshotMaxExpansionRatio int
 }
 
+// Runtime implements [model.RuntimeManager] using the Docker CLI.
 type Runtime struct {
 	binary                  string
 	hostOS                  string
@@ -69,6 +71,7 @@ func defaultRestoreLimits() archiveutil.Limits {
 	}
 }
 
+// New constructs a Docker runtime adapter.
 func New(options ...Options) *Runtime {
 	resolved := Options{
 		Binary:      "docker",
@@ -119,10 +122,13 @@ func New(options ...Options) *Runtime {
 	}
 }
 
+// NewWithBinary constructs a Docker runtime adapter that shells out through
+// binary.
 func NewWithBinary(binary string) *Runtime {
 	return New(Options{Binary: binary})
 }
 
+// Create creates the container and its backing directories without starting it.
 func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.RuntimeState, error) {
 	if err := os.MkdirAll(spec.StorageRoot, 0o755); err != nil {
 		return model.RuntimeState{}, err
@@ -318,6 +324,7 @@ func normalizeDockerLinuxCapability(value string) string {
 	return value
 }
 
+// Start starts an existing Docker-backed sandbox.
 func (r *Runtime) Start(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
 	if _, err := r.run(ctx, "start", containerName(sandbox.ID)); err != nil {
 		return model.RuntimeState{}, err
@@ -325,6 +332,7 @@ func (r *Runtime) Start(ctx context.Context, sandbox model.Sandbox) (model.Runti
 	return r.Inspect(ctx, sandbox)
 }
 
+// Stop stops a running Docker-backed sandbox.
 func (r *Runtime) Stop(ctx context.Context, sandbox model.Sandbox, force bool) (model.RuntimeState, error) {
 	args := []string{"stop"}
 	if force {
@@ -337,6 +345,7 @@ func (r *Runtime) Stop(ctx context.Context, sandbox model.Sandbox, force bool) (
 	return r.Inspect(ctx, sandbox)
 }
 
+// Suspend pauses a running Docker-backed sandbox.
 func (r *Runtime) Suspend(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
 	if _, err := r.run(ctx, "pause", containerName(sandbox.ID)); err != nil {
 		return model.RuntimeState{}, err
@@ -350,6 +359,7 @@ func (r *Runtime) Suspend(ctx context.Context, sandbox model.Sandbox) (model.Run
 	return state, nil
 }
 
+// Resume unpauses a suspended Docker-backed sandbox.
 func (r *Runtime) Resume(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
 	if _, err := r.run(ctx, "unpause", containerName(sandbox.ID)); err != nil {
 		return model.RuntimeState{}, err
@@ -357,6 +367,7 @@ func (r *Runtime) Resume(ctx context.Context, sandbox model.Sandbox) (model.Runt
 	return r.Inspect(ctx, sandbox)
 }
 
+// Destroy removes the container and related runtime state for sandbox.
 func (r *Runtime) Destroy(ctx context.Context, sandbox model.Sandbox) error {
 	if _, err := r.run(ctx, "rm", "-f", containerName(sandbox.ID)); err != nil && !isNoSuchContainer(err) {
 		return err
@@ -378,6 +389,7 @@ func (r *Runtime) Destroy(ctx context.Context, sandbox model.Sandbox) error {
 	return nil
 }
 
+// Inspect returns the current runtime state for sandbox.
 func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
 	out, err := r.run(ctx, "inspect", containerName(sandbox.ID))
 	if err != nil {
@@ -430,6 +442,7 @@ func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.Run
 	return result, nil
 }
 
+// Exec runs a command inside sandbox.
 func (r *Runtime) Exec(ctx context.Context, sandbox model.Sandbox, req model.ExecRequest, streams model.ExecStreams) (model.ExecHandle, error) {
 	command := req.Command
 	if len(command) == 0 {
@@ -491,6 +504,7 @@ wait "$child"
 	return handle, nil
 }
 
+// AttachTTY opens an interactive terminal attached to sandbox.
 func (r *Runtime) AttachTTY(ctx context.Context, sandbox model.Sandbox, req model.TTYRequest) (model.TTYHandle, error) {
 	command := req.Command
 	if len(command) == 0 {
@@ -520,6 +534,7 @@ func (r *Runtime) AttachTTY(ctx context.Context, sandbox model.Sandbox, req mode
 	return &ttyHandle{cmd: cmd, pty: ptmx}, nil
 }
 
+// CreateSnapshot captures a snapshot artifact for sandbox.
 func (r *Runtime) CreateSnapshot(ctx context.Context, sandbox model.Sandbox, snapshotID string) (model.SnapshotInfo, error) {
 	imageRef := snapshotImage(snapshotID)
 	if _, err := r.run(ctx, "commit", containerName(sandbox.ID), imageRef); err != nil {
@@ -539,6 +554,7 @@ func (r *Runtime) CreateSnapshot(ctx context.Context, sandbox model.Sandbox, sna
 	}, nil
 }
 
+// RestoreSnapshot restores sandbox from a previously exported snapshot.
 func (r *Runtime) RestoreSnapshot(ctx context.Context, sandbox model.Sandbox, snapshot model.Snapshot) (model.RuntimeState, error) {
 	if _, err := r.run(ctx, "rm", "-f", containerName(sandbox.ID)); err != nil && !isNoSuchContainer(err) {
 		return model.RuntimeState{}, err

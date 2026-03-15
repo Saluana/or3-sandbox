@@ -5,10 +5,20 @@ import (
 	"strings"
 )
 
+// DefaultGuestControlProtocolVersion is the default guest control protocol
+// version emitted in sandbox metadata.
 const DefaultGuestControlProtocolVersion = "2"
+
+// DefaultWorkspaceContractVersion is the default workspace contract version
+// expected by the daemon and guest tooling.
 const DefaultWorkspaceContractVersion = "1"
+
+// DefaultImageContractVersion is the default guest image sidecar schema
+// version.
 const DefaultImageContractVersion = "1"
 
+// NormalizeFeatures normalizes, deduplicates, and sorts feature-like string
+// lists.
 func NormalizeFeatures(values []string) []string {
 	if len(values) == 0 {
 		return nil
@@ -33,6 +43,8 @@ func NormalizeFeatures(values []string) []string {
 	return result
 }
 
+// NormalizeCapabilities normalizes capability names using the same rules as
+// [NormalizeFeatures].
 func NormalizeCapabilities(values []string) []string {
 	return NormalizeFeatures(values)
 }

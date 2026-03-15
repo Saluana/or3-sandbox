@@ -14,35 +14,57 @@ import (
 	"or3-sandbox/internal/model"
 )
 
+// ProtocolVersion is the current guest-agent protocol version.
 const ProtocolVersion = "2"
 
 const (
-	MaxMessageSize      = 16 * 1024 * 1024
-	MaxRequestIDLength  = 128
+	// MaxMessageSize is the maximum encoded size of a single agent message.
+	MaxMessageSize = 16 * 1024 * 1024
+	// MaxRequestIDLength is the maximum length of a request correlation ID.
+	MaxRequestIDLength = 128
+	// MaxFileTransferSize is the maximum file transfer size supported by the protocol.
 	MaxFileTransferSize = model.MaxWorkspaceFileTransferCeilingBytes
-	MaxFileChunkSize    = 256 * 1024
-	MaxBridgeChunkSize  = 32 * 1024
+	// MaxFileChunkSize is the maximum file payload size carried in one request.
+	MaxFileChunkSize = 256 * 1024
+	// MaxBridgeChunkSize is the maximum bridged TCP payload size per message.
+	MaxBridgeChunkSize = 32 * 1024
 )
 
 const (
-	OpHello         = "hello"
-	OpReady         = "ready"
-	OpExec          = "exec"
-	OpPTYOpen       = "pty_open"
-	OpPTYData       = "pty_data"
-	OpPTYResize     = "pty_resize"
-	OpPTYClose      = "pty_close"
-	OpFileRead      = "file_read"
-	OpFileWrite     = "file_write"
-	OpFileDelete    = "file_delete"
-	OpMkdir         = "mkdir"
+	// OpHello performs the initial guest-agent handshake.
+	OpHello = "hello"
+	// OpReady queries the guest agent readiness state.
+	OpReady = "ready"
+	// OpExec executes a command in the guest.
+	OpExec = "exec"
+	// OpPTYOpen opens a PTY session in the guest.
+	OpPTYOpen = "pty_open"
+	// OpPTYData carries PTY byte stream data.
+	OpPTYData = "pty_data"
+	// OpPTYResize resizes an active PTY session.
+	OpPTYResize = "pty_resize"
+	// OpPTYClose closes an active PTY session.
+	OpPTYClose = "pty_close"
+	// OpFileRead reads a file chunk from the guest workspace.
+	OpFileRead = "file_read"
+	// OpFileWrite writes a file chunk into the guest workspace.
+	OpFileWrite = "file_write"
+	// OpFileDelete deletes a path in the guest workspace.
+	OpFileDelete = "file_delete"
+	// OpMkdir creates a directory in the guest workspace.
+	OpMkdir = "mkdir"
+	// OpTCPBridgeOpen opens a guest-local TCP bridge session.
 	OpTCPBridgeOpen = "tcp_bridge_open"
+	// OpTCPBridgeData carries bridged TCP payload data.
 	OpTCPBridgeData = "tcp_bridge_data"
-	OpShutdown      = "shutdown"
+	// OpShutdown asks the guest to shut down or reboot.
+	OpShutdown = "shutdown"
 )
 
+// ErrProtocol reports malformed or invalid guest-agent messages.
 var ErrProtocol = errors.New("guest agent protocol error")
 
+// Message is the common envelope exchanged over the guest-agent transport.
 type Message struct {
 	ID     string          `json:"id,omitempty"`
 	Op     string          `json:"op"`
@@ -51,6 +73,7 @@ type Message struct {
 	Result json.RawMessage `json:"result,omitempty"`
 }
 
+// HelloResult is returned by the guest agent hello handshake.
 type HelloResult struct {
 	ProtocolVersion          string   `json:"protocol_version"`
 	WorkspaceContractVersion string   `json:"workspace_contract_version"`
@@ -59,11 +82,13 @@ type HelloResult struct {
 	Ready                    bool     `json:"ready"`
 }
 
+// ReadyResult reports whether the guest agent is ready to serve requests.
 type ReadyResult struct {
 	Ready  bool   `json:"ready"`
 	Reason string `json:"reason,omitempty"`
 }
 
+// ExecRequest describes a guest-agent exec request.
 type ExecRequest struct {
 	Command  []string          `json:"command"`
 	Cwd      string            `json:"cwd,omitempty"`
@@ -72,6 +97,7 @@ type ExecRequest struct {
 	Detached bool              `json:"detached,omitempty"`
 }
 
+// ExecResult reports the result of a guest-agent exec request.
 type ExecResult struct {
 	ExitCode        int       `json:"exit_code"`
 	Status          string    `json:"status"`
@@ -83,6 +109,7 @@ type ExecResult struct {
 	StderrTruncated bool      `json:"stderr_truncated,omitempty"`
 }
 
+// PTYOpenRequest opens a new PTY session.
 type PTYOpenRequest struct {
 	Command []string          `json:"command"`
 	Cwd     string            `json:"cwd,omitempty"`
@@ -91,10 +118,12 @@ type PTYOpenRequest struct {
 	Cols    int               `json:"cols,omitempty"`
 }
 
+// PTYOpenResult reports the opened PTY session ID.
 type PTYOpenResult struct {
 	SessionID string `json:"session_id"`
 }
 
+// PTYData carries PTY byte stream messages.
 type PTYData struct {
 	SessionID string `json:"session_id"`
 	Data      string `json:"data,omitempty"`
@@ -102,18 +131,21 @@ type PTYData struct {
 	ExitCode  *int   `json:"exit_code,omitempty"`
 }
 
+// PTYResizeRequest resizes an existing PTY session.
 type PTYResizeRequest struct {
 	SessionID string `json:"session_id"`
 	Rows      int    `json:"rows"`
 	Cols      int    `json:"cols"`
 }
 
+// FileReadRequest requests a chunk of a guest file.
 type FileReadRequest struct {
 	Path     string `json:"path"`
 	Offset   int64  `json:"offset,omitempty"`
 	MaxBytes int    `json:"max_bytes,omitempty"`
 }
 
+// FileReadResult returns a chunk of guest file content.
 type FileReadResult struct {
 	Path    string `json:"path"`
 	Content string `json:"content,omitempty"`
@@ -122,6 +154,7 @@ type FileReadResult struct {
 	EOF     bool   `json:"eof,omitempty"`
 }
 
+// FileWriteRequest writes a chunk of a guest file.
 type FileWriteRequest struct {
 	Path      string `json:"path"`
 	Content   string `json:"content"`
@@ -131,22 +164,27 @@ type FileWriteRequest struct {
 	EOF       bool   `json:"eof,omitempty"`
 }
 
+// PathRequest names a guest path for delete and mkdir operations.
 type PathRequest struct {
 	Path string `json:"path"`
 }
 
+// ShutdownRequest asks the guest agent to shut down or reboot the guest.
 type ShutdownRequest struct {
 	Reboot bool `json:"reboot,omitempty"`
 }
 
+// TCPBridgeOpenRequest opens a TCP bridge to a guest-local port.
 type TCPBridgeOpenRequest struct {
 	TargetPort int `json:"target_port"`
 }
 
+// TCPBridgeOpenResult returns the opened TCP bridge session ID.
 type TCPBridgeOpenResult struct {
 	SessionID string `json:"session_id"`
 }
 
+// TCPBridgeData carries bridged TCP payloads.
 type TCPBridgeData struct {
 	SessionID string `json:"session_id"`
 	Data      string `json:"data,omitempty"`
@@ -154,14 +192,17 @@ type TCPBridgeData struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// EncodeBytes encodes binary payloads for JSON transport.
 func EncodeBytes(data []byte) string {
 	return base64.StdEncoding.EncodeToString(data)
 }
 
+// DecodeBytes decodes JSON-transported binary payloads.
 func DecodeBytes(value string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(value)
 }
 
+// WriteMessage validates and writes a length-prefixed agent message.
 func WriteMessage(w io.Writer, message Message) error {
 	if err := ValidateEnvelope(message); err != nil {
 		return err
@@ -182,6 +223,7 @@ func WriteMessage(w io.Writer, message Message) error {
 	return err
 }
 
+// ReadMessage reads and validates a single length-prefixed agent message.
 func ReadMessage(r io.Reader) (Message, error) {
 	var header [4]byte
 	if _, err := io.ReadFull(r, header[:]); err != nil {
@@ -208,6 +250,8 @@ func ReadMessage(r io.Reader) (Message, error) {
 	return message, nil
 }
 
+// ValidateEnvelope checks the message envelope fields shared by requests and
+// responses.
 func ValidateEnvelope(message Message) error {
 	if strings.TrimSpace(message.Op) == "" {
 		return fmt.Errorf("%w: agent message op is required", ErrProtocol)
@@ -218,6 +262,7 @@ func ValidateEnvelope(message Message) error {
 	return nil
 }
 
+// ValidateRequest validates a guest-agent request message.
 func ValidateRequest(message Message) error {
 	if err := ValidateEnvelope(message); err != nil {
 		return err
@@ -231,6 +276,7 @@ func ValidateRequest(message Message) error {
 	return nil
 }
 
+// ValidateResponse validates a guest-agent response message.
 func ValidateResponse(message Message, expectedOp, expectedID string) error {
 	if err := ValidateEnvelope(message); err != nil {
 		return err
@@ -247,6 +293,8 @@ func ValidateResponse(message Message, expectedOp, expectedID string) error {
 	return nil
 }
 
+// RequiresRequestID reports whether op participates in request-response
+// correlation.
 func RequiresRequestID(op string) bool {
 	switch op {
 	case OpPTYData, OpPTYResize, OpPTYClose, OpTCPBridgeData:
@@ -256,6 +304,8 @@ func RequiresRequestID(op string) bool {
 	}
 }
 
+// NewBufferedReadWriter wraps conn with a buffered read writer tuned for agent
+// message exchange.
 func NewBufferedReadWriter(conn io.ReadWriter) *bufio.ReadWriter {
 	return bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 }

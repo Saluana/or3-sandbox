@@ -8,11 +8,13 @@ import (
 	"or3-sandbox/internal/model"
 )
 
+// AdmissionError reports that an operation was denied by admission control.
 type AdmissionError struct {
 	Message   string
 	Retryable bool
 }
 
+// Error returns the human-readable admission failure message.
 func (e AdmissionError) Error() string {
 	return e.Message
 }
