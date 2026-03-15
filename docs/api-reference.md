@@ -335,6 +335,7 @@ Limits and safety:
 - Paths stay inside the workspace root; traversal and symlink escapes are rejected.
 - The daemon returns `413 payload_too_large` when the requested file exceeds the configured workspace file transfer limit.
 - The daemon limit defaults to 64 MiB and can be changed with `SANDBOX_WORKSPACE_FILE_TRANSFER_MAX_MB`.
+- These workspace files are staged runtime state inside the sandbox; the canonical host workspace remains outside `sandboxd` ownership.
 
 Text response example:
 
@@ -399,6 +400,39 @@ Example request:
 ```json
 { "path": "dist/assets" }
 ```
+
+### `POST /v1/sandboxes/{id}/workspace-import`
+
+Import a gzip-compressed tar archive into the sandbox workspace.
+
+Limits and safety:
+
+- Paths in the archive stay inside the workspace root; traversal entries are rejected.
+- Symlink, hard-link, device, FIFO, and extended-header tar entries are rejected.
+- Extracted bytes are capped at the configured workspace transfer limit and oversized imports fail with `413 payload_too_large`.
+- Imports merge into the existing workspace tree; they do not delete paths that are absent from the archive.
+
+Request body:
+
+- Raw `application/gzip` or `application/octet-stream` tar.gz payload.
+
+### `POST /v1/sandboxes/{id}/workspace-export`
+
+Export selected workspace paths as a gzip-compressed tar archive.
+
+Example request:
+
+```json
+{
+  "paths": ["README.md", "src"]
+}
+```
+
+Notes:
+
+- When `paths` is omitted or empty, the daemon exports the full workspace root.
+- Export rejects workspace symlinks rather than following them.
+- Successful responses stream binary tar.gz content with `Content-Type: application/gzip`.
 
 Static preview guidance:
 

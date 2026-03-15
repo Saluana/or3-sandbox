@@ -14,19 +14,7 @@ import (
 )
 
 func (r *Runtime) ReadWorkspaceFile(ctx context.Context, sandbox model.Sandbox, relativePath string) (model.FileReadResponse, error) {
-	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
-		output, err := r.agentReadWorkspaceFileBytes(ctx, layoutForSandbox(sandbox), relativePath)
-		if err != nil {
-			return model.FileReadResponse{}, err
-		}
-		return model.FileReadResponse{Path: relativePath, Content: string(output), Size: int64(len(output)), Encoding: "utf-8"}, nil
-	}
-	target, err := workspaceGuestPath(relativePath)
-	if err != nil {
-		return model.FileReadResponse{}, err
-	}
-	args := append(r.baseSSHArgs(r.sshTarget(sandbox, layoutForSandbox(sandbox)), false), "sh", "-lc", "cat "+shellQuote(target))
-	output, err := r.runCommand(ctx, r.sshBinary, args...)
+	output, err := r.readWorkspaceFileBytesWithLimit(ctx, sandbox, relativePath, -1)
 	if err != nil {
 		return model.FileReadResponse{}, err
 	}
@@ -39,15 +27,34 @@ func (r *Runtime) ReadWorkspaceFile(ctx context.Context, sandbox model.Sandbox, 
 }
 
 func (r *Runtime) ReadWorkspaceFileBytes(ctx context.Context, sandbox model.Sandbox, relativePath string) ([]byte, error) {
+	limit := int64(-1)
 	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
-		return r.agentReadWorkspaceFileBytes(ctx, layoutForSandbox(sandbox), relativePath)
+		maxBytes, err := r.effectiveWorkspaceFileTransferMaxBytes(ctx, layoutForSandbox(sandbox))
+		if err != nil {
+			return nil, err
+		}
+		limit = maxBytes
+	}
+	return r.readWorkspaceFileBytesWithLimit(ctx, sandbox, relativePath, limit)
+}
+
+func (r *Runtime) readWorkspaceFileBytesWithLimit(ctx context.Context, sandbox model.Sandbox, relativePath string, maxBytes int64) ([]byte, error) {
+	if r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
+		return r.agentReadWorkspaceFileBytesWithLimit(ctx, layoutForSandbox(sandbox), relativePath, maxBytes)
 	}
 	target, err := workspaceGuestPath(relativePath)
 	if err != nil {
 		return nil, err
 	}
 	args := append(r.baseSSHArgs(r.sshTarget(sandbox, layoutForSandbox(sandbox)), false), "sh", "-lc", "cat "+shellQuote(target))
-	return r.runCommand(ctx, r.sshBinary, args...)
+	output, err := r.runCommand(ctx, r.sshBinary, args...)
+	if err != nil {
+		return nil, err
+	}
+	if maxBytes > 0 && int64(len(output)) > maxBytes {
+		return nil, model.FileTransferTooLargeError(maxBytes)
+	}
+	return output, nil
 }
 
 func (r *Runtime) WriteWorkspaceFile(ctx context.Context, sandbox model.Sandbox, relativePath string, content string) error {

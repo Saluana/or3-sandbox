@@ -236,6 +236,11 @@ type MkdirRequest struct {
 	Path string `json:"path"`
 }
 
+// WorkspaceExportRequest selects workspace paths to include in an archive export.
+type WorkspaceExportRequest struct {
+	Paths []string `json:"paths"`
+}
+
 // CreateTunnelRequest is the JSON payload accepted by tunnel creation endpoints.
 type CreateTunnelRequest struct {
 	TargetPort int            `json:"target_port"`

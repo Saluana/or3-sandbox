@@ -795,6 +795,348 @@ func (s *Service) Mkdir(ctx context.Context, tenantID, sandboxID, path string) e
 	return s.refreshStorage(ctx, sandbox)
 }
 
+func (s *Service) ImportWorkspaceArchive(ctx context.Context, tenantID, sandboxID string, archive io.Reader) error {
+	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
+	if err != nil {
+		return err
+	}
+	workspaceRoot, err := resolveWorkspacePath(sandbox.WorkspaceRoot, "")
+	if err != nil {
+		return err
+	}
+	tempArchive, err := os.CreateTemp(filepath.Dir(workspaceRoot), "workspace-import-*.tar.gz")
+	if err != nil {
+		return err
+	}
+	tempArchivePath := tempArchive.Name()
+	defer os.Remove(tempArchivePath)
+	if _, err := io.Copy(tempArchive, archive); err != nil {
+		tempArchive.Close()
+		return err
+	}
+	if err := tempArchive.Close(); err != nil {
+		return err
+	}
+	stagingRoot, err := os.MkdirTemp(filepath.Dir(workspaceRoot), "workspace-import-staging-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stagingRoot)
+	if _, err := archiveutil.ExtractTarGz(tempArchivePath, stagingRoot, archiveutil.Limits{
+		MaxBytes:          s.workspaceFileTransferMaxBytes,
+		MaxFiles:          10000,
+		MaxExpansionRatio: 20,
+	}); err != nil {
+		if strings.Contains(err.Error(), "maximum extracted bytes") {
+			return model.FileTransferTooLargeError(s.workspaceFileTransferMaxBytes)
+		}
+		return err
+	}
+	if err := s.applyWorkspaceArchiveTree(ctx, sandbox, stagingRoot, workspaceRoot); err != nil {
+		return err
+	}
+	s.recordAudit(ctx, tenantID, sandboxID, "workspace.import", sandboxID, "ok", "workspace archive imported")
+	_ = s.touchSandboxActivity(ctx, sandbox)
+	return s.refreshStorage(ctx, sandbox)
+}
+
+func (s *Service) ExportWorkspaceArchive(ctx context.Context, tenantID, sandboxID string, paths []string) (string, error) {
+	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
+	if err != nil {
+		return "", err
+	}
+	exportPaths, err := normalizeWorkspaceExportPaths(paths)
+	if err != nil {
+		return "", err
+	}
+	if archiveRuntime, ok := s.runtime.(model.WorkspaceArchiveExporter); ok {
+		archivePath, err := archiveRuntime.ExportWorkspaceArchive(ctx, sandbox, exportPaths, s.workspaceFileTransferMaxBytes)
+		if err != nil {
+			return "", err
+		}
+		s.recordAudit(ctx, tenantID, sandboxID, "workspace.export", sandboxID, "ok", "workspace archive exported")
+		_ = s.touchSandboxActivity(ctx, sandbox)
+		return archivePath, nil
+	}
+	if _, fileRuntime := s.runtime.(workspaceFileRuntime); fileRuntime {
+		return "", errors.New("runtime-backed workspace export is unsupported for the active runtime")
+	}
+	if _, binaryRuntime := s.runtime.(workspaceBinaryFileRuntime); binaryRuntime {
+		return "", errors.New("runtime-backed workspace export is unsupported for the active runtime")
+	}
+	workspaceRoot, err := resolveWorkspacePath(sandbox.WorkspaceRoot, "")
+	if err != nil {
+		return "", err
+	}
+	tempArchive, err := os.CreateTemp(filepath.Dir(workspaceRoot), "workspace-export-*.tar.gz")
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tempArchive.Name())
+		}
+	}()
+	if err := writeWorkspaceTarGz(tempArchive, workspaceRoot, exportPaths, s.workspaceFileTransferMaxBytes); err != nil {
+		_ = tempArchive.Close()
+		return "", err
+	}
+	if err := tempArchive.Close(); err != nil {
+		return "", err
+	}
+	s.recordAudit(ctx, tenantID, sandboxID, "workspace.export", sandboxID, "ok", "workspace archive exported")
+	_ = s.touchSandboxActivity(ctx, sandbox)
+	return tempArchive.Name(), nil
+}
+
+func normalizeWorkspaceExportPaths(paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return []string{""}, nil
+	}
+	seen := make(map[string]struct{}, len(paths))
+	normalized := make([]string, 0, len(paths))
+	for _, requested := range paths {
+		cleaned, err := cleanWorkspaceRelativePath(requested)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[cleaned]; ok {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		normalized = append(normalized, cleaned)
+	}
+	if len(normalized) == 0 {
+		return []string{""}, nil
+	}
+	return normalized, nil
+}
+
+func writeWorkspaceTarGz(out io.Writer, workspaceRoot string, exportPaths []string, maxBytes int64) error {
+	gzipWriter := gzip.NewWriter(out)
+	defer gzipWriter.Close()
+	tarWriter := tar.NewWriter(gzipWriter)
+	defer tarWriter.Close()
+	seen := map[string]struct{}{}
+	var totalBytes int64
+	for _, requested := range exportPaths {
+		cleaned, target, info, err := resolveWorkspaceArchiveExportTarget(workspaceRoot, requested)
+		if err != nil {
+			return err
+		}
+		archiveRoot := filepath.ToSlash(cleaned)
+		if archiveRoot == "" {
+			archiveRoot = "."
+		}
+		if err := filepath.WalkDir(target, func(current string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			rel, err := filepath.Rel(target, current)
+			if err != nil {
+				return err
+			}
+			archiveName := archiveRoot
+			if rel != "." {
+				archiveName = filepath.ToSlash(filepath.Join(cleaned, rel))
+			}
+			if rel == "." && cleaned == "" && entry.IsDir() {
+				return nil
+			}
+			if archiveName == "." {
+				archiveName = filepath.Base(target)
+			}
+			if _, ok := seen[archiveName]; ok {
+				if entry.IsDir() {
+					return nil
+				}
+				return nil
+			}
+			entryInfo, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if entryInfo.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("workspace path contains unsupported symlink: %s", archiveName)
+			}
+			header, err := tar.FileInfoHeader(entryInfo, "")
+			if err != nil {
+				return err
+			}
+			header.Name = archiveName
+			if entry.IsDir() && !strings.HasSuffix(header.Name, "/") {
+				header.Name += "/"
+			}
+			if err := tarWriter.WriteHeader(header); err != nil {
+				return err
+			}
+			seen[archiveName] = struct{}{}
+			if entry.IsDir() {
+				return nil
+			}
+			totalBytes += entryInfo.Size()
+			if err := ensureWorkspaceTransferSize(totalBytes, maxBytes); err != nil {
+				return err
+			}
+			file, err := os.Open(current)
+			if err != nil {
+				return err
+			}
+			_, err = io.Copy(tarWriter, file)
+			closeErr := file.Close()
+			if err != nil {
+				return err
+			}
+			return closeErr
+		}); err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			continue
+		}
+	}
+	return nil
+}
+
+func resolveWorkspaceArchiveExportTarget(workspaceRoot, requested string) (string, string, os.FileInfo, error) {
+	cleaned, err := cleanWorkspaceRelativePath(requested)
+	if err != nil {
+		return "", "", nil, err
+	}
+	root, err := resolveWorkspacePath(workspaceRoot, "")
+	if err != nil {
+		return "", "", nil, err
+	}
+	target := root
+	if cleaned != "" {
+		current := root
+		for _, part := range strings.Split(cleaned, string(filepath.Separator)) {
+			next := filepath.Join(current, part)
+			info, err := os.Lstat(next)
+			if err != nil {
+				return "", "", nil, err
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return "", "", nil, fmt.Errorf("workspace path contains unsupported symlink: %s", cleaned)
+			}
+			current = next
+		}
+		target = current
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return "", "", nil, err
+	}
+	return cleaned, target, info, nil
+}
+
+func copyWorkspaceTree(sourceRoot, destinationRoot string) error {
+	return filepath.WalkDir(sourceRoot, func(current string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if current == sourceRoot {
+			return nil
+		}
+		rel, err := filepath.Rel(sourceRoot, current)
+		if err != nil {
+			return err
+		}
+		target, err := resolveWorkspacePath(destinationRoot, rel)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("workspace archive contains unsupported symlink: %s", filepath.ToSlash(rel))
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		source, err := os.Open(current)
+		if err != nil {
+			return err
+		}
+		mode := os.FileMode(0o644)
+		if info.Mode()&0o111 != 0 {
+			mode = 0o755
+		}
+		destination, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+		if err != nil {
+			_ = source.Close()
+			return err
+		}
+		_, copyErr := io.Copy(destination, source)
+		closeDestinationErr := destination.Close()
+		closeSourceErr := source.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeDestinationErr != nil {
+			return closeDestinationErr
+		}
+		return closeSourceErr
+	})
+}
+
+func (s *Service) applyWorkspaceArchiveTree(ctx context.Context, sandbox model.Sandbox, sourceRoot, destinationRoot string) error {
+	fileRuntime, hasFileRuntime := s.runtime.(workspaceFileRuntime)
+	binaryRuntime, hasBinaryRuntime := s.runtime.(workspaceBinaryFileRuntime)
+	if !hasFileRuntime && !hasBinaryRuntime {
+		return copyWorkspaceTree(sourceRoot, destinationRoot)
+	}
+	return filepath.WalkDir(sourceRoot, func(current string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if current == sourceRoot {
+			return nil
+		}
+		rel, err := filepath.Rel(sourceRoot, current)
+		if err != nil {
+			return err
+		}
+		relativePath := filepath.ToSlash(rel)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("workspace archive contains unsupported symlink: %s", relativePath)
+		}
+		if entry.IsDir() {
+			if !hasFileRuntime {
+				return fmt.Errorf("runtime-backed workspace import requires directory creation support")
+			}
+			return fileRuntime.MkdirWorkspace(ctx, sandbox, relativePath)
+		}
+		if hasBinaryRuntime {
+			data, err := os.ReadFile(current)
+			if err != nil {
+				return err
+			}
+			return binaryRuntime.WriteWorkspaceFileBytes(ctx, sandbox, relativePath, data)
+		}
+		if !hasFileRuntime {
+			return fmt.Errorf("runtime-backed workspace import requires file write support")
+		}
+		data, err := os.ReadFile(current)
+		if err != nil {
+			return err
+		}
+		if !utf8.Valid(data) {
+			return fmt.Errorf("binary file write is unsupported for runtime %q", sandbox.RuntimeBackend)
+		}
+		return fileRuntime.WriteWorkspaceFile(ctx, sandbox, relativePath, string(data))
+	})
+}
+
 func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, req model.CreateTunnelRequest) (model.Tunnel, error) {
 	sandbox, err := s.store.GetSandbox(ctx, tenantID, sandboxID)
 	if err != nil {

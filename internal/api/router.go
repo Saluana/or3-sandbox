@@ -375,6 +375,16 @@ func (rt *Router) handleSandboxRoutes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	case "workspace-import":
+		if !requirePermission(w, r, auth.PermissionFilesWrite) {
+			return
+		}
+		rt.handleWorkspaceImport(w, r, tenantCtx.Tenant.ID, sandboxID)
+	case "workspace-export":
+		if !requirePermission(w, r, auth.PermissionFilesRead) {
+			return
+		}
+		rt.handleWorkspaceExport(w, r, tenantCtx.Tenant.ID, sandboxID)
 	case "tunnels":
 		if len(parts) > 2 {
 			if !requirePermission(w, r, auth.PermissionTunnelsWrite) {
@@ -628,6 +638,58 @@ func (rt *Router) handleFiles(w http.ResponseWriter, r *http.Request, tenantID, 
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeMethodNotAllowed(w)
+	}
+}
+
+func (rt *Router) handleWorkspaceImport(w http.ResponseWriter, r *http.Request, tenantID, sandboxID string) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, rt.workspaceFileUploadBodyBytes)
+	if err := rt.service.ImportWorkspaceArchive(r.Context(), tenantID, sandboxID, r.Body); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, errorCodeForStatus(http.StatusRequestEntityTooLarge), fmt.Sprintf("workspace archive upload exceeds maximum size of %d bytes", rt.workspaceFileUploadBodyBytes))
+			return
+		}
+		handleError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (rt *Router) handleWorkspaceExport(w http.ResponseWriter, r *http.Request, tenantID, sandboxID string) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w)
+		return
+	}
+	var req model.WorkspaceExportRequest
+	if err := decodeJSONLimited(w, r, 1024*1024, &req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, errorCodeForStatus(http.StatusRequestEntityTooLarge), "workspace export request exceeds maximum size of 1048576 bytes")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	archivePath, err := rt.service.ExportWorkspaceArchive(r.Context(), tenantID, sandboxID, req.Paths)
+	if err != nil {
+		handleError(w, err)
+		return
+	}
+	defer os.Remove(archivePath)
+	archiveFile, err := os.Open(archivePath)
+	if err != nil {
+		handleError(w, err)
+		return
+	}
+	defer archiveFile.Close()
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", sandboxID+"-workspace.tar.gz"))
+	if _, err := io.Copy(w, archiveFile); err != nil {
+		rt.log.Warn("workspace export response copy failed", "sandbox_id", sandboxID, "error", err)
 	}
 }
 

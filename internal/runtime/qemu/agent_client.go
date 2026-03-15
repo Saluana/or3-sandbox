@@ -112,11 +112,15 @@ func (r *Runtime) agentExec(ctx context.Context, layout sandboxLayout, req model
 }
 
 func (r *Runtime) agentReadWorkspaceFileBytes(ctx context.Context, layout sandboxLayout, relativePath string) ([]byte, error) {
-	target, err := workspaceGuestPath(relativePath)
+	maxBytes, err := r.effectiveWorkspaceFileTransferMaxBytes(ctx, layout)
 	if err != nil {
 		return nil, err
 	}
-	maxBytes, err := r.effectiveWorkspaceFileTransferMaxBytes(ctx, layout)
+	return r.agentReadWorkspaceFileBytesWithLimit(ctx, layout, relativePath, maxBytes)
+}
+
+func (r *Runtime) agentReadWorkspaceFileBytesWithLimit(ctx context.Context, layout sandboxLayout, relativePath string, maxBytes int64) ([]byte, error) {
+	target, err := workspaceGuestPath(relativePath)
 	if err != nil {
 		return nil, err
 	}
@@ -134,14 +138,14 @@ func (r *Runtime) agentReadWorkspaceFileBytes(ctx context.Context, layout sandbo
 		if result.Offset != offset {
 			return nil, fmt.Errorf("guest agent returned unexpected file offset: host=%d guest=%d", offset, result.Offset)
 		}
-		if result.Size > maxBytes {
+		if maxBytes > 0 && result.Size > maxBytes {
 			return nil, model.FileTransferTooLargeError(maxBytes)
 		}
 		chunk, err := agentproto.DecodeBytes(result.Content)
 		if err != nil {
 			return nil, err
 		}
-		if int64(len(output)+len(chunk)) > maxBytes {
+		if maxBytes > 0 && int64(len(output)+len(chunk)) > maxBytes {
 			return nil, model.FileTransferTooLargeError(maxBytes)
 		}
 		output = append(output, chunk...)

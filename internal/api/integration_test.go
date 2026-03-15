@@ -1,7 +1,9 @@
 package api_test
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/base64"
@@ -260,6 +262,71 @@ func TestCreateSandboxRejectsFractionalCPUOnQEMU(t *testing.T) {
 		"allow_tunnels":   false,
 		"start":           false,
 	}, http.StatusBadRequest)
+}
+
+func TestWorkspaceArchiveImportExportEndpoints(t *testing.T) {
+	h := newStubHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+
+	archiveBody := mustWorkspaceArchiveBytes(t, map[string]string{
+		"src/index.ts": "export const ok = true;\n",
+		"README.md":    "hello\n",
+	})
+	request, err := http.NewRequest(http.MethodPost, h.server.URL+"/v1/sandboxes/"+sandbox.ID+"/workspace-import", bytes.NewReader(archiveBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer token-a")
+	request.Header.Set("Content-Type", "application/gzip")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("workspace import returned %d: %s", response.StatusCode, body)
+	}
+
+	stored, err := h.store.GetSandbox(context.Background(), "tenant-a", sandbox.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(stored.WorkspaceRoot, "src", "index.ts"))
+	if err != nil {
+		t.Fatalf("read imported file: %v", err)
+	}
+	if string(content) != "export const ok = true;\n" {
+		t.Fatalf("unexpected imported file content %q", string(content))
+	}
+
+	exportResponse, exportBody := h.do(t, "token-a", http.MethodPost, "/v1/sandboxes/"+sandbox.ID+"/workspace-export", model.WorkspaceExportRequest{Paths: []string{"src", "README.md"}}, nil)
+	defer exportResponse.Body.Close()
+	if exportResponse.StatusCode != http.StatusOK {
+		t.Fatalf("workspace export returned %d: %s", exportResponse.StatusCode, exportBody)
+	}
+	exportedBytes, err := io.ReadAll(exportResponse.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := readWorkspaceArchiveBytes(t, exportedBytes)
+	if entries["src/index.ts"] != "export const ok = true;\n" {
+		t.Fatalf("unexpected exported src/index.ts content %q", entries["src/index.ts"])
+	}
+	if entries["README.md"] != "hello\n" {
+		t.Fatalf("unexpected exported README.md content %q", entries["README.md"])
+	}
 }
 
 func TestStartAdmissionDenialAppearsInMetrics(t *testing.T) {
@@ -2522,6 +2589,57 @@ func (h *harness) do(t *testing.T, token, method, endpoint string, payload any, 
 	}
 	response.Body = io.NopCloser(bytes.NewReader(data))
 	return response, string(data)
+}
+
+func mustWorkspaceArchiveBytes(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&buffer)
+	tarWriter := tar.NewWriter(gzipWriter)
+	for name, content := range files {
+		header := &tar.Header{Name: name, Mode: 0o644, Size: int64(len(content)), Typeflag: tar.TypeReg}
+		if err := tarWriter.WriteHeader(header); err != nil {
+			t.Fatalf("write tar header %s: %v", name, err)
+		}
+		if _, err := tarWriter.Write([]byte(content)); err != nil {
+			t.Fatalf("write tar content %s: %v", name, err)
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	return buffer.Bytes()
+}
+
+func readWorkspaceArchiveBytes(t *testing.T, archive []byte) map[string]string {
+	t.Helper()
+	gzipReader, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		t.Fatalf("open gzip reader: %v", err)
+	}
+	defer gzipReader.Close()
+	tarReader := tar.NewReader(gzipReader)
+	entries := make(map[string]string)
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			return entries
+		}
+		if err != nil {
+			t.Fatalf("read tar entry: %v", err)
+		}
+		if header.FileInfo().IsDir() {
+			continue
+		}
+		data, err := io.ReadAll(tarReader)
+		if err != nil {
+			t.Fatalf("read tar content %s: %v", header.Name, err)
+		}
+		entries[strings.TrimSuffix(header.Name, "/")] = string(data)
+	}
 }
 
 func (h *harness) jwtToken(t *testing.T, tenantID string, roles []string, service bool) string {

@@ -133,3 +133,7 @@ type RuntimeManager interface {
 	CreateSnapshot(ctx context.Context, sandbox Sandbox, snapshotID string) (SnapshotInfo, error)
 	RestoreSnapshot(ctx context.Context, sandbox Sandbox, snapshot Snapshot) (RuntimeState, error)
 }
+
+type WorkspaceArchiveExporter interface {
+	ExportWorkspaceArchive(ctx context.Context, sandbox Sandbox, paths []string, maxBytes int64) (string, error)
+}

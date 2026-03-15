@@ -2,6 +2,7 @@ package service
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -230,6 +232,221 @@ func TestLocalFileReadsRejectOversizeTransfers(t *testing.T) {
 
 	if _, err := svc.ReadFile(ctx, tenant.ID, sandbox.ID, "large.bin", ""); !errors.Is(err, model.ErrFileTransferTooLarge) {
 		t.Fatalf("expected oversize read rejection, got %v", err)
+	}
+}
+
+func TestWorkspaceArchiveImportExportRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	runtime := newRuntimeOnlyStub()
+	svc, _, quota, tenant, _ := newServiceHarness(t, runtime, "docker")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenant, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "alpine:3.20",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     64,
+		DiskLimitMB:   256,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	archive := mustWorkspaceArchive(t, map[string]string{
+		"README.md":      "hello workspace\n",
+		"src/main.ts":    "console.log('ok')\n",
+		"src/nested.txt": "nested\n",
+	})
+	if err := svc.ImportWorkspaceArchive(ctx, tenant.ID, sandbox.ID, bytes.NewReader(archive)); err != nil {
+		t.Fatalf("import workspace archive: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(sandbox.WorkspaceRoot, "src", "main.ts")); err != nil || string(data) != "console.log('ok')\n" {
+		t.Fatalf("expected imported file, got %q err=%v", string(data), err)
+	}
+
+	archivePath, err := svc.ExportWorkspaceArchive(ctx, tenant.ID, sandbox.ID, []string{"README.md", "src"})
+	if err != nil {
+		t.Fatalf("export workspace archive: %v", err)
+	}
+	defer os.Remove(archivePath)
+	entries := readWorkspaceArchiveEntries(t, archivePath)
+	if entries["README.md"] != "hello workspace\n" {
+		t.Fatalf("unexpected exported README.md content %q", entries["README.md"])
+	}
+	if entries["src/main.ts"] != "console.log('ok')\n" {
+		t.Fatalf("unexpected exported src/main.ts content %q", entries["src/main.ts"])
+	}
+	if entries["src/nested.txt"] != "nested\n" {
+		t.Fatalf("unexpected exported src/nested.txt content %q", entries["src/nested.txt"])
+	}
+}
+
+func TestWorkspaceArchiveImportUsesRuntimeBoundaryForGuestBackends(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	svc, _, quota, tenant, _ := newServiceHarness(t, runtime, "qemu")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenant, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     64,
+		DiskLimitMB:   256,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandbox.WorkspaceRoot, "workspace.img"), []byte("host-only"), 0o644); err != nil {
+		t.Fatalf("write qemu host sentinel: %v", err)
+	}
+
+	archive := mustWorkspaceArchive(t, map[string]string{
+		"src/main.ts": "console.log('ok')\n",
+		"README.md":   "guest-visible\n",
+	})
+	if err := svc.ImportWorkspaceArchive(ctx, tenant.ID, sandbox.ID, bytes.NewReader(archive)); err != nil {
+		t.Fatalf("import workspace archive: %v", err)
+	}
+	if len(runtime.writes) != 2 {
+		t.Fatalf("expected archive import to use runtime writes, got %#v", runtime.writes)
+	}
+	if len(runtime.mkdirs) != 1 || runtime.mkdirs[0] != "src" {
+		t.Fatalf("expected archive import mkdir via runtime, got %#v", runtime.mkdirs)
+	}
+	if _, err := os.Stat(filepath.Join(sandbox.WorkspaceRoot, "src", "main.ts")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected guest archive import to avoid host workspace writes, got %v", err)
+	}
+}
+
+func TestWorkspaceArchiveExportUsesRuntimeBoundaryForGuestBackends(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	runtime.reads["README.md"] = "guest-visible\n"
+	runtime.reads["src/main.ts"] = "console.log('ok')\n"
+	svc, _, quota, tenant, _ := newServiceHarness(t, runtime, "qemu")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenant, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "guest-base.qcow2",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     64,
+		DiskLimitMB:   256,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandbox.WorkspaceRoot, "workspace.img"), []byte("host-only"), 0o644); err != nil {
+		t.Fatalf("write qemu host sentinel: %v", err)
+	}
+
+	archivePath, err := svc.ExportWorkspaceArchive(ctx, tenant.ID, sandbox.ID, []string{"README.md", "src"})
+	if err != nil {
+		t.Fatalf("export workspace archive: %v", err)
+	}
+	defer os.Remove(archivePath)
+	entries := readWorkspaceArchiveEntries(t, archivePath)
+	if entries["README.md"] != "guest-visible\n" {
+		t.Fatalf("expected runtime-backed export README.md, got %q", entries["README.md"])
+	}
+	if entries["src/main.ts"] != "console.log('ok')\n" {
+		t.Fatalf("expected runtime-backed export src/main.ts, got %q", entries["src/main.ts"])
+	}
+	if _, ok := entries["workspace.img"]; ok {
+		t.Fatalf("expected runtime-backed export to ignore host workspace artifacts, got %#v", entries)
+	}
+}
+
+func TestWorkspaceArchiveImportRejectsTraversal(t *testing.T) {
+	ctx := context.Background()
+	runtime := newRuntimeOnlyStub()
+	svc, _, quota, tenant, _ := newServiceHarness(t, runtime, "docker")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenant, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "alpine:3.20",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     64,
+		DiskLimitMB:   256,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	archive := mustWorkspaceArchive(t, map[string]string{"../escape.txt": "nope"})
+	err = svc.ImportWorkspaceArchive(ctx, tenant.ID, sandbox.ID, bytes.NewReader(archive))
+	if err == nil || !strings.Contains(err.Error(), "escapes destination") {
+		t.Fatalf("expected traversal rejection, got %v", err)
+	}
+}
+
+func TestWorkspaceArchiveImportRejectsOversizePayload(t *testing.T) {
+	ctx := context.Background()
+	runtime := newRuntimeOnlyStub()
+	svc, _, quota, tenant, _ := newServiceHarness(t, runtime, "docker")
+	svc.workspaceFileTransferMaxBytes = 1024
+
+	sandbox, err := svc.CreateSandbox(ctx, tenant, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "alpine:3.20",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     64,
+		DiskLimitMB:   256,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	archive := mustWorkspaceArchive(t, map[string]string{"large.bin": strings.Repeat("a", 1025)})
+	err = svc.ImportWorkspaceArchive(ctx, tenant.ID, sandbox.ID, bytes.NewReader(archive))
+	if !errors.Is(err, model.ErrFileTransferTooLarge) {
+		t.Fatalf("expected oversize archive rejection, got %v", err)
+	}
+}
+
+func TestWorkspaceArchiveExportRejectsSymlinks(t *testing.T) {
+	ctx := context.Background()
+	runtime := newRuntimeOnlyStub()
+	svc, _, quota, tenant, _ := newServiceHarness(t, runtime, "docker")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenant, quota, model.CreateSandboxRequest{
+		BaseImageRef:  "alpine:3.20",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     64,
+		DiskLimitMB:   256,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	outsideDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outsideDir, "host.txt"), []byte("host"), 0o644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(sandbox.WorkspaceRoot, "escape")); err != nil {
+		t.Fatalf("create workspace symlink: %v", err)
+	}
+
+	_, err = svc.ExportWorkspaceArchive(ctx, tenant.ID, sandbox.ID, []string{"escape"})
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected symlink export rejection, got %v", err)
 	}
 }
 
@@ -2829,6 +3046,121 @@ func TestProductionQEMURestoreUsesBaseImagePromotion(t *testing.T) {
 	}
 }
 
+func mustWorkspaceArchive(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	gzipWriter := gzip.NewWriter(&buffer)
+	tarWriter := tar.NewWriter(gzipWriter)
+	for name, content := range files {
+		header := &tar.Header{
+			Name:     name,
+			Mode:     0o644,
+			Size:     int64(len(content)),
+			Typeflag: tar.TypeReg,
+		}
+		if err := tarWriter.WriteHeader(header); err != nil {
+			t.Fatalf("write tar header %s: %v", name, err)
+		}
+		if _, err := tarWriter.Write([]byte(content)); err != nil {
+			t.Fatalf("write tar entry %s: %v", name, err)
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	return buffer.Bytes()
+}
+
+func writeArchiveFixture(files map[string]string) (string, error) {
+	archivePath := filepath.Join(os.TempDir(), "or3-workspace-fixture-"+newID("test-")+".tar.gz")
+	file, err := os.Create(archivePath)
+	if err != nil {
+		return "", err
+	}
+	gzipWriter := gzip.NewWriter(file)
+	tarWriter := tar.NewWriter(gzipWriter)
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		content := files[name]
+		header := &tar.Header{
+			Name:     name,
+			Mode:     0o644,
+			Size:     int64(len(content)),
+			Typeflag: tar.TypeReg,
+		}
+		if err := tarWriter.WriteHeader(header); err != nil {
+			_ = tarWriter.Close()
+			_ = gzipWriter.Close()
+			_ = file.Close()
+			_ = os.Remove(archivePath)
+			return "", err
+		}
+		if _, err := tarWriter.Write([]byte(content)); err != nil {
+			_ = tarWriter.Close()
+			_ = gzipWriter.Close()
+			_ = file.Close()
+			_ = os.Remove(archivePath)
+			return "", err
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		_ = gzipWriter.Close()
+		_ = file.Close()
+		_ = os.Remove(archivePath)
+		return "", err
+	}
+	if err := gzipWriter.Close(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(archivePath)
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(archivePath)
+		return "", err
+	}
+	return archivePath, nil
+}
+
+func readWorkspaceArchiveEntries(t *testing.T, archivePath string) map[string]string {
+	t.Helper()
+	file, err := os.Open(archivePath)
+	if err != nil {
+		t.Fatalf("open archive: %v", err)
+	}
+	defer file.Close()
+	gzipReader, err := gzip.NewReader(file)
+	if err != nil {
+		t.Fatalf("open gzip reader: %v", err)
+	}
+	defer gzipReader.Close()
+	tarReader := tar.NewReader(gzipReader)
+	entries := make(map[string]string)
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			return entries
+		}
+		if err != nil {
+			t.Fatalf("read tar entry: %v", err)
+		}
+		if header.FileInfo().IsDir() {
+			continue
+		}
+		data, err := io.ReadAll(tarReader)
+		if err != nil {
+			t.Fatalf("read tar payload %s: %v", header.Name, err)
+		}
+		entries[strings.TrimSuffix(header.Name, "/")] = string(data)
+	}
+}
+
 func newServiceHarness(t *testing.T, runtime model.RuntimeManager, backend string) (*Service, *repository.Store, model.TenantQuota, model.Tenant, model.Tenant) {
 	t.Helper()
 	root := t.TempDir()
@@ -2970,6 +3302,7 @@ type stubRuntime struct {
 	writes        []stubWrite
 	deletes       []string
 	mkdirs        []string
+	exportCalls   [][]string
 	createBlock   chan struct{}
 	createEntered chan struct{}
 	startBlock    chan struct{}
@@ -3151,6 +3484,46 @@ func (r *stubRuntime) MeasureStorage(context.Context, model.Sandbox) (model.Stor
 	return r.storageUsage, nil
 }
 
+func (r *stubRuntime) ExportWorkspaceArchive(_ context.Context, _ model.Sandbox, paths []string, maxBytes int64) (string, error) {
+	r.exportCalls = append(r.exportCalls, append([]string(nil), paths...))
+	entries := make(map[string]string)
+	var totalBytes int64
+	for _, name := range r.exportablePaths(paths) {
+		content := r.reads[name]
+		totalBytes += int64(len(content))
+		if maxBytes > 0 && totalBytes > maxBytes {
+			return "", model.FileTransferTooLargeError(maxBytes)
+		}
+		entries[name] = content
+	}
+	return writeArchiveFixture(entries)
+}
+
+func (r *stubRuntime) exportablePaths(paths []string) []string {
+	includeAll := len(paths) == 0
+	for _, requested := range paths {
+		if strings.TrimSpace(requested) == "" {
+			includeAll = true
+			break
+		}
+	}
+	names := make([]string, 0, len(r.reads))
+	for name := range r.reads {
+		if includeAll {
+			names = append(names, name)
+			continue
+		}
+		for _, requested := range paths {
+			if requested == name || strings.HasPrefix(name, requested+"/") {
+				names = append(names, name)
+				break
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
 func withDefaultRuntimeState(state model.RuntimeState, status model.SandboxStatus, running bool) model.RuntimeState {
 	if state.RuntimeID == "" {
 		state.RuntimeID = "runtime-id"
@@ -3170,6 +3543,7 @@ func withDefaultRuntimeState(state model.RuntimeState, status model.SandboxStatu
 var _ model.RuntimeManager = (*stubRuntime)(nil)
 var _ workspaceFileRuntime = (*stubRuntime)(nil)
 var _ storageMeasurer = (*stubRuntime)(nil)
+var _ model.WorkspaceArchiveExporter = (*stubRuntime)(nil)
 
 func (r *runtimeOnlyStub) Create(context.Context, model.SandboxSpec) (model.RuntimeState, error) {
 	return withDefaultRuntimeState(r.createState, model.SandboxStatusStopped, false), nil

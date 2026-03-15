@@ -116,6 +116,21 @@ func TestSandboxErrorResponseFixtureParses(t *testing.T) {
 	}
 }
 
+func TestWorkspaceExportRequestFixtureParses(t *testing.T) {
+	var payload model.WorkspaceExportRequest
+	readFixtureJSON(t, "workspace-export-request.json", &payload)
+
+	if len(payload.Paths) != 2 {
+		t.Fatalf("expected 2 workspace export paths, got %d", len(payload.Paths))
+	}
+	if payload.Paths[0] != "README.md" {
+		t.Fatalf("expected first export path README.md, got %q", payload.Paths[0])
+	}
+	if payload.Paths[1] != "src" {
+		t.Fatalf("expected second export path src, got %q", payload.Paths[1])
+	}
+}
+
 func readFixtureJSON(t *testing.T, name string, target any) {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("fixtures", name))
