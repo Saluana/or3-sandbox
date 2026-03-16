@@ -9,12 +9,12 @@ users:
     gecos: or3 sandbox user
     groups: __SANDBOX_GROUPS__
     shell: /bin/bash
-__SANDBOX_SUDO_LINE____SSH_AUTHORIZED_KEYS_BLOCK__
+    # __SANDBOX_OPTIONAL_USER_FIELDS__
 
 package_update: true
 package_upgrade: false
 packages:
-__PROFILE_PACKAGES__
+  # __PROFILE_PACKAGES__
 
 write_files:
   - path: /usr/local/bin/or3-guest-agent
@@ -47,7 +47,8 @@ runcmd:
   - mkdir -p /var/lib/or3
   - mkdir -p /etc/or3
   - systemctl daemon-reload
-__SSH_ENABLE_COMMANDS____PROFILE_ENABLE_COMMANDS__  - systemctl enable or3-guest-agent.service
+  # __OPTIONAL_ENABLE_COMMANDS__
+  - systemctl enable or3-guest-agent.service
   - systemctl enable or3-bootstrap.service
   - systemctl start or3-guest-agent.service
   - systemctl start or3-bootstrap.service

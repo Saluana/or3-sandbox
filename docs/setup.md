@@ -84,6 +84,15 @@ docker version
 
 If Docker is not installed or not running, fix that first.
 
+On Linux, also make sure your shell can reach `/var/run/docker.sock` without `sudo`.
+If `docker version` or `docker ps` fails with a socket permission error, add your user to the `docker` group and refresh your login session before continuing:
+
+```bash
+sudo usermod -aG docker "$USER"
+newgrp docker
+docker ps
+```
+
 ## Step 3: Start the daemon with Docker runtime selection
 
 The Docker path is treated as a **trusted** mode, so you must say that on purpose.

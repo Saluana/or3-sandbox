@@ -57,6 +57,15 @@ Requirements for the shipped trusted Docker path:
 - Go 1.26+
 - Docker
 
+On Linux, your shell also needs access to Docker without `sudo`.
+If `docker ps` fails with a permission error on `/var/run/docker.sock`, run:
+
+```bash
+sudo usermod -aG docker "$USER"
+newgrp docker
+docker ps
+```
+
 Run the daemon:
 
 ```bash
@@ -183,18 +192,18 @@ The active next-step design work is focused on:
 
 Production test matrix:
 
-| Claim | Evidence |
-| --- | --- |
-| Production runtime boundary defaults to VM-backed QEMU | `go test ./internal/config ./internal/service` |
-| Explicit RBAC and service-account scope checks | `go test ./internal/auth` |
-| Runtime info / operator inspection surfaces | `go test ./internal/api -run 'Test(StartAdmissionDenialAppearsInMetrics|RuntimeHealthEndpoint)'` |
-| Promoted image enforcement | `go test ./internal/service -run TestProductionQEMUCreateRequiresPromotedImage` |
-| SQLite migrations for hardening state | `go test ./internal/db ./internal/repository` |
-| Config lint and doctor bootstrap path | `go test ./cmd/sandboxctl -run 'Test(RunConfigLint|RunDoctorRequiresProductionQEMUFlag|ProductionQEMUDoctor.*)'` |
-| Host-gated QEMU posture | `./scripts/qemu-host-verification.sh --profile core --control-mode agent` |
-| Production smoke | `./scripts/qemu-production-smoke.sh` |
-| Abuse-path behavior | `./scripts/qemu-resource-abuse.sh` |
-| Recovery / restore drill | `./scripts/qemu-recovery-drill.sh` |
+| Claim                                                  | Evidence                                                                        |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------- | ----------------------------------- | -------------------------- |
+| Production runtime boundary defaults to VM-backed QEMU | `go test ./internal/config ./internal/service`                                  |
+| Explicit RBAC and service-account scope checks         | `go test ./internal/auth`                                                       |
+| Runtime info / operator inspection surfaces            | `go test ./internal/api -run 'Test(StartAdmissionDenialAppearsInMetrics         | RuntimeHealthEndpoint)'`            |
+| Promoted image enforcement                             | `go test ./internal/service -run TestProductionQEMUCreateRequiresPromotedImage` |
+| SQLite migrations for hardening state                  | `go test ./internal/db ./internal/repository`                                   |
+| Config lint and doctor bootstrap path                  | `go test ./cmd/sandboxctl -run 'Test(RunConfigLint                              | RunDoctorRequiresProductionQEMUFlag | ProductionQEMUDoctor.\*)'` |
+| Host-gated QEMU posture                                | `./scripts/qemu-host-verification.sh --profile core --control-mode agent`       |
+| Production smoke                                       | `./scripts/qemu-production-smoke.sh`                                            |
+| Abuse-path behavior                                    | `./scripts/qemu-resource-abuse.sh`                                              |
+| Recovery / restore drill                               | `./scripts/qemu-recovery-drill.sh`                                              |
 
 For host-prepared QEMU verification, backup or restore procedures, and incident drills, use the operator docs under `docs/operations/`.
 

@@ -132,15 +132,15 @@ cp "$SYSTEMD_DIR/or3-guest-agent.service" "$WORK_DIR/or3-guest-agent.service"
 	cd "$REPO_ROOT"
 	CGO_ENABLED=0 GOOS=linux GOARCH="$GUEST_AGENT_GOARCH" go build -o "$WORK_DIR/or3-guest-agent" ./cmd/or3-guest-agent
 )
-guest_agent_binary_base64="$(base64 < "$WORK_DIR/or3-guest-agent" | tr -d '\n')"
+base64 < "$WORK_DIR/or3-guest-agent" | tr -d '\n' > "$WORK_DIR/or3-guest-agent.b64"
 
 AGENT_USER="$AGENT_USER" \
-BOOTSTRAP_SCRIPT_CONTENT="$(cat "$WORK_DIR/or3-bootstrap.sh")" \
-BOOTSTRAP_SERVICE_CONTENT="$(cat "$WORK_DIR/or3-bootstrap.service")" \
-GUEST_AGENT_BINARY_BASE64="$guest_agent_binary_base64" \
-GUEST_AGENT_SERVICE_CONTENT="$(cat "$WORK_DIR/or3-guest-agent.service")" \
+BOOTSTRAP_SCRIPT_FILE="$WORK_DIR/or3-bootstrap.sh" \
+BOOTSTRAP_SERVICE_FILE="$WORK_DIR/or3-bootstrap.service" \
+GUEST_AGENT_BINARY_BASE64_FILE="$WORK_DIR/or3-guest-agent.b64" \
+GUEST_AGENT_SERVICE_FILE="$WORK_DIR/or3-guest-agent.service" \
 PROFILE_ENABLE_COMMANDS="$profile_enable_commands" \
-PROFILE_MANIFEST_JSON="$profile_manifest_json" \
+PROFILE_MANIFEST_JSON_FILE="$WORK_DIR/profile.json" \
 PROFILE_NAME="$profile_name" \
 PROFILE_PACKAGES="$profile_packages" \
 SANDBOX_GROUPS="$sandbox_groups" \
@@ -153,23 +153,44 @@ import os
 import sys
 
 template = open(sys.argv[1], 'r', encoding='utf-8').read()
-for key in [
-    "AGENT_USER",
-    "BOOTSTRAP_SCRIPT_CONTENT",
-    "BOOTSTRAP_SERVICE_CONTENT",
-    "GUEST_AGENT_BINARY_BASE64",
-    "GUEST_AGENT_SERVICE_CONTENT",
-    "PROFILE_ENABLE_COMMANDS",
-    "PROFILE_MANIFEST_JSON",
-    "PROFILE_NAME",
-    "PROFILE_PACKAGES",
-    "SANDBOX_GROUPS",
-    "SANDBOX_SUDO_LINE",
-    "SANDBOX_USER",
-    "SSH_AUTHORIZED_KEYS_BLOCK",
-    "SSH_ENABLE_COMMANDS",
-]:
-    template = template.replace(f"__{key}__", os.environ.get(key, ""))
+
+def read_text(path, strip_newlines=False):
+  value = open(path, 'r', encoding='utf-8').read()
+  if strip_newlines:
+    value = value.replace("\n", "")
+  return value
+
+def indent_multiline(value, prefix="      "):
+  return value.replace("\n", f"\n{prefix}")
+
+replacements = {
+  "AGENT_USER": os.environ.get("AGENT_USER", ""),
+  "BOOTSTRAP_SCRIPT": indent_multiline(read_text(os.environ["BOOTSTRAP_SCRIPT_FILE"])),
+  "BOOTSTRAP_SERVICE": indent_multiline(read_text(os.environ["BOOTSTRAP_SERVICE_FILE"])),
+  "GUEST_AGENT_BINARY_BASE64": read_text(os.environ["GUEST_AGENT_BINARY_BASE64_FILE"], strip_newlines=True),
+  "GUEST_AGENT_SERVICE": indent_multiline(read_text(os.environ["GUEST_AGENT_SERVICE_FILE"])),
+  "PROFILE_ENABLE_COMMANDS": os.environ.get("PROFILE_ENABLE_COMMANDS", ""),
+  "PROFILE_MANIFEST_JSON": indent_multiline(read_text(os.environ["PROFILE_MANIFEST_JSON_FILE"])),
+  "PROFILE_NAME": os.environ.get("PROFILE_NAME", ""),
+  "PROFILE_PACKAGES": os.environ.get("PROFILE_PACKAGES", ""),
+  "SANDBOX_GROUPS": os.environ.get("SANDBOX_GROUPS", ""),
+  "SANDBOX_SUDO_LINE": os.environ.get("SANDBOX_SUDO_LINE", ""),
+  "SANDBOX_USER": os.environ.get("SANDBOX_USER", ""),
+  "SSH_AUTHORIZED_KEYS_BLOCK": os.environ.get("SSH_AUTHORIZED_KEYS_BLOCK", ""),
+  "SSH_ENABLE_COMMANDS": os.environ.get("SSH_ENABLE_COMMANDS", ""),
+}
+for key, value in replacements.items():
+  template = template.replace(f"__{key}__", value)
+
+template = template.replace(
+  "    # __SANDBOX_OPTIONAL_USER_FIELDS__",
+  (os.environ.get("SANDBOX_SUDO_LINE", "") + os.environ.get("SSH_AUTHORIZED_KEYS_BLOCK", "")).rstrip("\n"),
+)
+template = template.replace("  # __PROFILE_PACKAGES__", os.environ.get("PROFILE_PACKAGES", ""))
+template = template.replace(
+  "  # __OPTIONAL_ENABLE_COMMANDS__",
+  (os.environ.get("SSH_ENABLE_COMMANDS", "") + os.environ.get("PROFILE_ENABLE_COMMANDS", "")).rstrip("\n"),
+)
 sys.stdout.write(template)
 PY
 

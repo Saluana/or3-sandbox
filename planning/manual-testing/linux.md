@@ -13,6 +13,12 @@ Use this plan when you want to validate everything this repo expects from a Linu
 
 This is the only host plan that should be used for Linux/KVM production-readiness claims.
 
+Pass 1 status legend:
+
+- `[x]` verified in the 2026-03-15 Ubuntu 22.04 pass
+- `[ ]` not yet run or still pending
+- `[ ] BROKEN:` tested and failed in pass 1
+
 ---
 
 ## 0. Lanes
@@ -65,11 +71,11 @@ Covers:
 
 Mark these before you start:
 
-- [ ] Go is installed
-- [ ] Docker is installed and running
-- [ ] `jq` is installed, or you are comfortable copying IDs manually from JSON
-- [ ] You are in the repo root
-- [ ] You are okay creating and deleting disposable sandboxes and snapshots
+- [x] Go is installed
+- [x] Docker is installed and running
+- [x] `jq` is installed, or you are comfortable copying IDs manually from JSON
+- [x] You are in the repo root
+- [x] You are okay creating and deleting disposable sandboxes and snapshots
 - [ ] For Lane B, `ctr`, containerd, and a Kata runtime class are installed
 - [ ] For Lane C, KVM/QEMU and the guest image are prepared
 - [ ] For Lane D, needed secrets are exported
@@ -102,8 +108,8 @@ export MANUAL_LOG=$PWD/.tmp/manual-test-notes.txt
 go run ./cmd/sandboxctl config-lint
 ```
 
-- [ ] config lint passes for your intended local setup
-- [ ] failures, if any, point to a concrete config issue
+- [x] config lint passes for your intended local setup
+- [x] failures, if any, point to a concrete config issue
 
 ### 2.2 Start `sandboxd`
 
@@ -118,9 +124,9 @@ go run ./cmd/sandboxd \
   -snapshot-root ./data/snapshots
 ```
 
-- [ ] daemon starts without crashing
-- [ ] no obvious config/runtime error appears on boot
-- [ ] process stays up until stopped manually
+- [x] daemon starts without crashing
+- [x] no obvious config/runtime error appears on boot
+- [x] process stays up until stopped manually
 
 ### 2.3 Basic reachability
 
@@ -135,12 +141,12 @@ curl -fsS -H "Authorization: Bearer $SANDBOX_TOKEN" "$SANDBOX_API/v1/runtime/cap
 curl -fsS -H "Authorization: Bearer $SANDBOX_TOKEN" "$SANDBOX_API/metrics" | head -40
 ```
 
-- [ ] `/healthz` returns `{"ok":true}`
-- [ ] `/v1/runtime/info` shows the expected backend/default runtime data
-- [ ] `runtime-health` returns valid JSON
-- [ ] `quota` returns valid JSON
-- [ ] `/v1/runtime/capacity` is reachable with auth
-- [ ] `/metrics` returns Prometheus-style text
+- [x] `/healthz` returns `{"ok":true}`
+- [x] `/v1/runtime/info` shows the expected backend/default runtime data
+- [x] `runtime-health` returns valid JSON
+- [x] `quota` returns valid JSON
+- [x] `/v1/runtime/capacity` is reachable with auth
+- [x] `/metrics` returns Prometheus-style text
 
 ### 2.4 Auth sanity checks
 
@@ -150,10 +156,10 @@ curl -i -H "Authorization: Bearer bad-token" "$SANDBOX_API/v1/runtime/health"
 curl -i "$SANDBOX_API/v1/runtime/health"
 ```
 
-- [ ] `/healthz` works without auth
-- [ ] protected endpoint rejects missing auth
-- [ ] protected endpoint rejects wrong auth
-- [ ] error responses are JSON, not HTML garbage
+- [x] `/healthz` works without auth
+- [x] protected endpoint rejects missing auth
+- [x] protected endpoint rejects wrong auth
+- [ ] BROKEN: error responses are plain text `unauthorized`, not JSON
 
 ---
 
@@ -177,10 +183,10 @@ export SANDBOX_ID="$(printf '%s' "$sandbox_json" | jq -r '.id')"
 echo "SANDBOX_ID=$SANDBOX_ID"
 ```
 
-- [ ] create returns JSON
-- [ ] a sandbox ID is present
-- [ ] status is `running` or otherwise clearly healthy
-- [ ] runtime selection/backend match what you intended
+- [ ] BROKEN: `sandboxctl create` did not reliably emit usable JSON in pass 1, even though the sandbox was created
+- [x] a sandbox ID is present
+- [x] status is `running` or otherwise clearly healthy
+- [x] runtime selection/backend match what you intended
 
 ### 3.2 List and inspect it
 
@@ -189,10 +195,10 @@ go run ./cmd/sandboxctl list
 go run ./cmd/sandboxctl inspect "$SANDBOX_ID"
 ```
 
-- [ ] sandbox appears in `list`
-- [ ] `inspect` shows the same ID
-- [ ] limits and network mode look correct
-- [ ] `runtime_backend` and `runtime_selection` look correct
+- [x] sandbox appears in `list`
+- [x] `inspect` shows the same ID
+- [x] limits and network mode look correct
+- [x] `runtime_backend` and `runtime_selection` look correct
 
 ---
 
@@ -204,9 +210,9 @@ go run ./cmd/sandboxctl inspect "$SANDBOX_ID"
 go run ./cmd/sandboxctl exec "$SANDBOX_ID" sh -lc 'echo hello from sandbox && pwd && id'
 ```
 
-- [ ] command succeeds
-- [ ] stdout streams back to the terminal
-- [ ] default working directory is `/workspace`
+- [x] command succeeds
+- [x] stdout streams back to the terminal
+- [x] default working directory is `/workspace`
 
 ### 4.2 Write persistent workspace data
 
@@ -215,9 +221,9 @@ go run ./cmd/sandboxctl exec "$SANDBOX_ID" sh -lc 'echo sandbox-note > /workspac
 go run ./cmd/sandboxctl exec "$SANDBOX_ID" sh -lc 'ls -la /workspace'
 ```
 
-- [ ] file write succeeds
-- [ ] file contents are readable immediately
-- [ ] `/workspace` persists changes
+- [ ] BROKEN: writing `/workspace/note.txt` from `exec` failed with `Permission denied`
+- [ ] BROKEN: file contents were not readable immediately from the exact command above
+- [ ] BROKEN: this exact `/workspace` write path did not work in pass 1
 
 ### 4.3 Timeout behavior
 
@@ -225,9 +231,9 @@ go run ./cmd/sandboxctl exec "$SANDBOX_ID" sh -lc 'ls -la /workspace'
 go run ./cmd/sandboxctl exec --timeout 2s "$SANDBOX_ID" sh -lc 'sleep 10'
 ```
 
-- [ ] command is rejected or terminated near the timeout window
-- [ ] failure output is understandable
-- [ ] sandbox stays usable afterward
+- [x] command is rejected or terminated near the timeout window
+- [x] failure output is understandable
+- [x] sandbox stays usable afterward
 
 ### 4.4 Detached exec behavior
 
@@ -237,9 +243,9 @@ sleep 7
 go run ./cmd/sandboxctl exec "$SANDBOX_ID" sh -lc 'cat /workspace/detached.txt'
 ```
 
-- [ ] detached exec returns immediately
-- [ ] background work finishes
-- [ ] later exec sees the result
+- [ ] BROKEN: the exact detached `/workspace/detached.txt` flow did not complete successfully
+- [ ] BROKEN: the exact background write target in `/workspace` did not appear afterward
+- [ ] BROKEN: later exec did not see `/workspace/detached.txt`
 
 ### 4.5 TTY behavior
 
@@ -256,10 +262,10 @@ cat /workspace/note.txt
 exit
 ```
 
-- [ ] interactive shell opens
+- [x] interactive shell transport opens
 - [ ] keyboard input works normally
-- [ ] shell output is readable
-- [ ] exiting returns cleanly to the host terminal
+- [x] shell output is readable
+- [ ] BROKEN: scripted TTY attach ended with websocket close `1006` instead of a clean detach
 
 ---
 
@@ -272,8 +278,8 @@ go run ./cmd/sandboxctl upload "$SANDBOX_ID" "$TEST_FILE_LOCAL" /workspace/from-
 go run ./cmd/sandboxctl exec "$SANDBOX_ID" sh -lc 'cat /workspace/from-host.txt'
 ```
 
-- [ ] upload succeeds
-- [ ] sandbox sees uploaded content exactly
+- [ ] BROKEN: the exact absolute remote path `/workspace/from-host.txt` was rewritten under `/workspace/workspace/from-host.txt`
+- [ ] BROKEN: the sandbox did not see the uploaded file at the exact absolute path used in the checklist
 
 ### 5.2 Create directories
 
@@ -282,8 +288,8 @@ go run ./cmd/sandboxctl mkdir "$SANDBOX_ID" /workspace/demo/subdir
 go run ./cmd/sandboxctl exec "$SANDBOX_ID" sh -lc 'find /workspace/demo -maxdepth 2 -type d | sort'
 ```
 
-- [ ] nested directory creation succeeds
-- [ ] resulting layout looks correct
+- [ ] BROKEN: absolute `mkdir /workspace/demo/subdir` was created under `/workspace/workspace/demo/subdir`
+- [ ] BROKEN: the resulting absolute-path layout did not match the checklist expectation
 
 ### 5.3 Download back to host
 
@@ -292,8 +298,8 @@ go run ./cmd/sandboxctl download "$SANDBOX_ID" /workspace/from-host.txt ./.tmp/f
 diff "$TEST_FILE_LOCAL" ./.tmp/from-sandbox.txt
 ```
 
-- [ ] download succeeds
-- [ ] downloaded file matches the uploaded file byte-for-byte
+- [x] download succeeds
+- [x] downloaded file matches the uploaded file byte-for-byte
 
 ---
 
@@ -305,7 +311,7 @@ diff "$TEST_FILE_LOCAL" ./.tmp/from-sandbox.txt
 go run ./cmd/sandboxctl exec "$SANDBOX_ID" sh -lc 'wget -qO- https://example.com | head -5 || curl -fsS https://example.com | head -5'
 ```
 
-- [ ] outbound network access works from an `internet-enabled` sandbox
+- [x] outbound network access works from an `internet-enabled` sandbox
 
 ### 6.2 Create an `internet-disabled` sandbox
 
@@ -324,8 +330,8 @@ export BLOCKED_SANDBOX_ID="$(printf '%s' "$blocked_json" | jq -r '.id')"
 go run ./cmd/sandboxctl exec "$BLOCKED_SANDBOX_ID" sh -lc 'wget -qO- https://example.com | head -5 || curl -fsS https://example.com | head -5'
 ```
 
-- [ ] outbound network access fails or is clearly blocked
-- [ ] failure matches the disabled-network expectation
+- [x] outbound network access fails or is clearly blocked
+- [x] failure matches the disabled-network expectation
 
 ---
 
@@ -340,8 +346,8 @@ sleep 2
 go run ./cmd/sandboxctl exec "$SANDBOX_ID" sh -lc 'wget -qO- http://127.0.0.1:3000/'
 ```
 
-- [ ] service starts inside the sandbox
-- [ ] loopback access inside the sandbox works
+- [ ] BROKEN: the exact BusyBox `httpd` command in the checklist did not stay reachable in pass 1
+- [ ] BROKEN: loopback access for the exact checklist server command failed with `Connection refused`
 
 ### 7.2 Create and use a tunnel
 
@@ -356,9 +362,9 @@ go run ./cmd/sandboxctl tunnel-list "$SANDBOX_ID"
 curl -i -H "Authorization: Bearer $SANDBOX_TOKEN" -H "X-Tunnel-Token: $TUNNEL_TOKEN" "$TUNNEL_ENDPOINT/"
 ```
 
-- [ ] tunnel create succeeds
-- [ ] `tunnel-list` shows the created tunnel
-- [ ] proxied HTTP request reaches the in-sandbox service
+- [x] tunnel create succeeds
+- [x] `tunnel-list` shows the created tunnel
+- [ ] BROKEN: proxied HTTP requests returned `502 Bad Gateway`
 
 ### 7.3 Verify a browser-friendly signed URL
 
@@ -375,7 +381,7 @@ echo "$SIGNED_URL"
 
 Now test it in a browser.
 
-- [ ] signed URL loads a bootstrap/redirect flow instead of asking for a raw tunnel token
+- [x] signed URL loads a bootstrap/redirect flow instead of asking for a raw tunnel token
 - [ ] final app page renders correctly
 - [ ] refreshing within the TTL still works as expected
 - [ ] URL behaves like a short-lived capability
@@ -387,9 +393,9 @@ go run ./cmd/sandboxctl tunnel-revoke "$TUNNEL_ID"
 curl -i -H "Authorization: Bearer $SANDBOX_TOKEN" -H "X-Tunnel-Token: $TUNNEL_TOKEN" "$TUNNEL_ENDPOINT/"
 ```
 
-- [ ] revoke succeeds
-- [ ] follow-up access is denied or returns `410 Gone`
-- [ ] proxy does not keep serving after revocation
+- [x] revoke succeeds
+- [x] follow-up access is denied or returns `410 Gone`
+- [x] proxy does not keep serving after revocation
 
 ---
 
@@ -410,9 +416,9 @@ export SNAPSHOT_ID=<put-snapshot-id-here>
 go run ./cmd/sandboxctl snapshot-inspect "$SNAPSHOT_ID"
 ```
 
-- [ ] snapshot create succeeds
-- [ ] snapshot appears in the list
-- [ ] inspect shows expected snapshot metadata
+- [x] snapshot create succeeds
+- [x] snapshot appears in the list
+- [x] inspect shows expected snapshot metadata
 
 ### 8.2 Mutate the workspace after the snapshot
 
@@ -420,7 +426,7 @@ go run ./cmd/sandboxctl snapshot-inspect "$SNAPSHOT_ID"
 go run ./cmd/sandboxctl exec "$SANDBOX_ID" sh -lc 'echo changed-after-snapshot > /workspace/note.txt && cat /workspace/note.txt'
 ```
 
-- [ ] workspace now differs from the checkpoint state
+- [x] workspace now differs from the checkpoint state
 
 ### 8.3 Restore into a fresh sandbox
 
@@ -434,9 +440,9 @@ go run ./cmd/sandboxctl start "$RESTORE_TARGET_ID"
 go run ./cmd/sandboxctl exec "$RESTORE_TARGET_ID" sh -lc 'cat /workspace/note.txt'
 ```
 
-- [ ] restore succeeds
-- [ ] restored sandbox starts normally
-- [ ] restored sandbox contains the pre-mutation snapshot content
+- [x] restore succeeds
+- [x] restored sandbox starts normally
+- [x] restored sandbox contains the pre-mutation snapshot content
 
 ---
 
@@ -451,10 +457,10 @@ go run ./cmd/sandboxctl start "$SANDBOX_ID"
 go run ./cmd/sandboxctl exec "$SANDBOX_ID" sh -lc 'cat /workspace/note.txt && cat /workspace/from-host.txt'
 ```
 
-- [ ] stop succeeds
-- [ ] inspect shows a stopped state in between
-- [ ] start succeeds
-- [ ] workspace files survive stop/start
+- [x] stop succeeds
+- [x] inspect shows a stopped state in between
+- [x] start succeeds
+- [x] workspace files survive stop/start
 
 ### 9.2 Force stop
 
@@ -464,8 +470,8 @@ go run ./cmd/sandboxctl stop --force "$SANDBOX_ID"
 go run ./cmd/sandboxctl inspect "$SANDBOX_ID"
 ```
 
-- [ ] force stop succeeds even with active work
-- [ ] sandbox returns to a safe non-running state
+- [x] force stop succeeds even with active work
+- [x] sandbox returns to a safe non-running state
 
 ### 9.3 Suspend and resume
 
@@ -476,7 +482,7 @@ go run ./cmd/sandboxctl suspend "$SANDBOX_ID"
 go run ./cmd/sandboxctl resume "$SANDBOX_ID"
 ```
 
-- [ ] if supported, suspend succeeds and resume returns the sandbox to usability
+- [x] if supported, suspend succeeds and resume returns the sandbox to usability
 - [ ] if unsupported, the error is explicit and understandable
 
 ---
@@ -517,10 +523,10 @@ curl -fsS -H "Authorization: Bearer $SANDBOX_TOKEN" "$SANDBOX_API/v1/runtime/cap
 curl -fsS -H "Authorization: Bearer $SANDBOX_TOKEN" "$SANDBOX_API/metrics" | grep 'or3_sandbox_' | head -50
 ```
 
-- [ ] health output reflects current sandbox states
-- [ ] capacity output reflects current counts or pressure signals
-- [ ] metrics expose sensible counters after your activity
-- [ ] nothing looks stuck or obviously stale
+- [x] health output reflects current sandbox states
+- [x] capacity output reflects current counts or pressure signals
+- [x] metrics expose sensible counters after your activity
+- [x] nothing looks stuck or obviously stale
 
 ---
 
@@ -548,11 +554,11 @@ go run ./cmd/sandboxctl exec "$SANDBOX_ID" sh -lc 'cat /workspace/restart-check.
 curl -fsS -H "Authorization: Bearer $SANDBOX_TOKEN" "$SANDBOX_API/metrics" | grep 'or3_sandbox_' | head -50
 ```
 
-- [ ] daemon returns healthy after restart
-- [ ] sandbox metadata is still present
-- [ ] sandbox state is conservative and believable after reconcile
-- [ ] workspace data survives the restart
-- [ ] exec still works after reconcile
+- [x] daemon returns healthy after restart
+- [x] sandbox metadata is still present
+- [x] sandbox state is conservative and believable after reconcile
+- [x] workspace data survives the restart
+- [x] exec still works after reconcile
 
 ---
 
@@ -567,8 +573,8 @@ go run ./cmd/sandboxctl delete "$RESTORE_TARGET_ID"
 go run ./cmd/sandboxctl list
 ```
 
-- [ ] deletes succeed
-- [ ] remaining list is empty or only shows resources you intentionally kept
+- [x] deletes succeed
+- [ ] BROKEN: `list` still shows deleted resources with `status: deleted`
 
 Optional host cleanup:
 
@@ -588,8 +594,8 @@ go run ./cmd/sandboxctl preset inspect playwright
 go run ./cmd/sandboxctl preset inspect openclaw
 ```
 
-- [ ] presets list successfully
-- [ ] inspect output is readable and useful
+- [ ] BROKEN: `preset list` failed because `examples/qemu-service/preset.yaml` has an invalid `runtime.profile`
+- [x] inspect output is readable and useful
 
 ### 14.2 Playwright preset
 
@@ -597,9 +603,9 @@ go run ./cmd/sandboxctl preset inspect openclaw
 go run ./cmd/sandboxctl preset run playwright --cleanup on-success
 ```
 
-- [ ] preset completes without manual sandbox management
-- [ ] screenshot artifact is downloaded locally
-- [ ] output clearly tells you where the artifact went
+- [ ] BROKEN: the Playwright preset failed because the image did not provide the `playwright` Node module
+- [ ] BROKEN: no screenshot artifact was downloaded
+- [ ] BROKEN: the preset exited with module resolution failure before artifact output
 
 ### 14.3 OpenClaw preset (requires secrets)
 
@@ -679,9 +685,9 @@ go run ./cmd/sandboxctl doctor --production-qemu
 go run ./cmd/sandboxctl image list
 ```
 
-- [ ] config lint passes
-- [ ] doctor output is believable and actionable
-- [ ] image list is reachable and shows promotion state clearly
+- [ ] BROKEN: QEMU `config-lint` failed before runtime use because no valid base image was available during pass 1
+- [x] doctor output is believable and actionable
+- [ ] BROKEN: `image list` was not reachable in a useful QEMU state during pass 1 because no valid prepared guest image completed
 
 ### 16.2 Start a QEMU-capable daemon
 
