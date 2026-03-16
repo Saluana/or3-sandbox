@@ -576,6 +576,111 @@ func TestHostSandboxLocalBridge(t *testing.T) {
 	}
 }
 
+func TestHostWorkspaceMountAndSnapshotRestore(t *testing.T) {
+	cfg := requireHostIntegrationConfig(t)
+	if cfg.controlMode != model.GuestControlModeAgent {
+		t.Skip("workspace mount and snapshot restore verification requires agent control mode")
+	}
+	ctx := context.Background()
+
+	runtime, err := New(Options{
+		Binary:         cfg.binary,
+		Accel:          cfg.accel,
+		BaseImagePath:  cfg.baseImagePath,
+		ControlMode:    cfg.controlMode,
+		SSHUser:        cfg.sshUser,
+		SSHKeyPath:     cfg.sshKeyPath,
+		SSHHostKeyPath: cfg.sshHostKeyPath,
+		BootTimeout:    2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+
+	root := t.TempDir()
+	spec := model.SandboxSpec{
+		SandboxID:                "sbx-workspace-snapshot-restore",
+		TenantID:                 "tenant-workspace-snapshot-restore",
+		BaseImageRef:             cfg.baseImagePath,
+		Profile:                  cfg.contract.Profile,
+		Capabilities:             append([]string(nil), cfg.contract.Capabilities...),
+		ControlMode:              cfg.controlMode,
+		ControlProtocolVersion:   cfg.contract.Control.ProtocolVersion,
+		WorkspaceContractVersion: cfg.contract.WorkspaceContractVersion,
+		ImageContractVersion:     cfg.contract.ContractVersion,
+		CPULimit:                 model.CPUCores(1),
+		MemoryLimitMB:            1024,
+		PIDsLimit:                256,
+		DiskLimitMB:              256,
+		NetworkMode:              model.NetworkModeInternetEnabled,
+		StorageRoot:              filepath.Join(root, "rootfs"),
+		WorkspaceRoot:            filepath.Join(root, "workspace"),
+		CacheRoot:                filepath.Join(root, "cache"),
+	}
+	state, err := runtime.Create(ctx, spec)
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+	sandbox := model.Sandbox{
+		ID:                       spec.SandboxID,
+		TenantID:                 spec.TenantID,
+		RuntimeID:                state.RuntimeID,
+		BaseImageRef:             spec.BaseImageRef,
+		Profile:                  spec.Profile,
+		Capabilities:             append([]string(nil), spec.Capabilities...),
+		ControlMode:              spec.ControlMode,
+		ControlProtocolVersion:   spec.ControlProtocolVersion,
+		WorkspaceContractVersion: spec.WorkspaceContractVersion,
+		ImageContractVersion:     spec.ImageContractVersion,
+		CPULimit:                 spec.CPULimit,
+		MemoryLimitMB:            spec.MemoryLimitMB,
+		PIDsLimit:                spec.PIDsLimit,
+		DiskLimitMB:              spec.DiskLimitMB,
+		NetworkMode:              spec.NetworkMode,
+		StorageRoot:              spec.StorageRoot,
+		WorkspaceRoot:            spec.WorkspaceRoot,
+		CacheRoot:                spec.CacheRoot,
+	}
+	defer runtime.Destroy(context.Background(), sandbox)
+
+	if _, err := runtime.Start(ctx, sandbox); err != nil {
+		t.Fatalf("start sandbox: %v", err)
+	}
+	mustExecContain(t, runtime, sandbox, []string{"python3", "-c", "import os; print(os.path.ismount('/workspace'))"}, "True")
+	if err := runtime.WriteWorkspaceFile(ctx, sandbox, "snapshot.txt", "before-snapshot\n"); err != nil {
+		t.Fatalf("seed workspace file: %v", err)
+	}
+	if _, err := runtime.Stop(ctx, sandbox, false); err != nil {
+		t.Fatalf("stop sandbox before snapshot: %v", err)
+	}
+	snapshotInfo, err := runtime.CreateSnapshot(ctx, sandbox, "snap-restore")
+	if err != nil {
+		t.Fatalf("create snapshot: %v", err)
+	}
+	if _, err := runtime.Start(ctx, sandbox); err != nil {
+		t.Fatalf("restart sandbox after snapshot: %v", err)
+	}
+	if err := runtime.WriteWorkspaceFile(ctx, sandbox, "snapshot.txt", "after-snapshot\n"); err != nil {
+		t.Fatalf("mutate workspace after snapshot: %v", err)
+	}
+	if _, err := runtime.Stop(ctx, sandbox, false); err != nil {
+		t.Fatalf("stop sandbox before restore: %v", err)
+	}
+	if _, err := runtime.RestoreSnapshot(ctx, sandbox, model.Snapshot{ImageRef: snapshotInfo.ImageRef, WorkspaceTar: snapshotInfo.WorkspaceTar}); err != nil {
+		t.Fatalf("restore snapshot: %v", err)
+	}
+	if _, err := runtime.Start(ctx, sandbox); err != nil {
+		t.Fatalf("start sandbox after restore: %v", err)
+	}
+	file, err := runtime.ReadWorkspaceFile(ctx, sandbox, "snapshot.txt")
+	if err != nil {
+		t.Fatalf("read restored workspace file: %v", err)
+	}
+	if strings.TrimSpace(file.Content) != "before-snapshot" {
+		t.Fatalf("expected restored workspace content, got %q", file.Content)
+	}
+}
+
 type hostIntegrationConfig struct {
 	binary         string
 	accel          string

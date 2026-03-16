@@ -11,6 +11,9 @@ import (
 type stubRuntime struct {
 	lastSpec    model.SandboxSpec
 	lastSandbox model.Sandbox
+	lastPath    string
+	lastContent string
+	lastBytes   []byte
 }
 
 func (s *stubRuntime) Create(_ context.Context, spec model.SandboxSpec) (model.RuntimeState, error) {
@@ -66,6 +69,49 @@ func (s *stubRuntime) CreateSnapshot(_ context.Context, sandbox model.Sandbox, _
 func (s *stubRuntime) RestoreSnapshot(_ context.Context, sandbox model.Sandbox, _ model.Snapshot) (model.RuntimeState, error) {
 	s.lastSandbox = sandbox
 	return model.RuntimeState{RuntimeID: sandbox.ID, Status: sandbox.Status}, nil
+}
+
+func (s *stubRuntime) ReadWorkspaceFile(_ context.Context, sandbox model.Sandbox, relativePath string) (model.FileReadResponse, error) {
+	s.lastSandbox = sandbox
+	s.lastPath = relativePath
+	return model.FileReadResponse{Path: relativePath, Content: "workspace-content"}, nil
+}
+
+func (s *stubRuntime) WriteWorkspaceFile(_ context.Context, sandbox model.Sandbox, relativePath string, content string) error {
+	s.lastSandbox = sandbox
+	s.lastPath = relativePath
+	s.lastContent = content
+	return nil
+}
+
+func (s *stubRuntime) DeleteWorkspacePath(_ context.Context, sandbox model.Sandbox, relativePath string) error {
+	s.lastSandbox = sandbox
+	s.lastPath = relativePath
+	return nil
+}
+
+func (s *stubRuntime) MkdirWorkspace(_ context.Context, sandbox model.Sandbox, relativePath string) error {
+	s.lastSandbox = sandbox
+	s.lastPath = relativePath
+	return nil
+}
+
+func (s *stubRuntime) ReadWorkspaceFileBytes(_ context.Context, sandbox model.Sandbox, relativePath string) ([]byte, error) {
+	s.lastSandbox = sandbox
+	s.lastPath = relativePath
+	return []byte("workspace-bytes"), nil
+}
+
+func (s *stubRuntime) WriteWorkspaceFileBytes(_ context.Context, sandbox model.Sandbox, relativePath string, content []byte) error {
+	s.lastSandbox = sandbox
+	s.lastPath = relativePath
+	s.lastBytes = append([]byte(nil), content...)
+	return nil
+}
+
+func (s *stubRuntime) MeasureStorage(_ context.Context, sandbox model.Sandbox) (model.StorageUsage, error) {
+	s.lastSandbox = sandbox
+	return model.StorageUsage{WorkspaceBytes: 123}, nil
 }
 
 func TestRegistryDispatchesCreateBySelection(t *testing.T) {
@@ -149,5 +195,39 @@ func TestRegistryReturnsUnavailableError(t *testing.T) {
 	var unavailable RuntimeUnavailableError
 	if !errors.As(err, &unavailable) {
 		t.Fatalf("expected RuntimeUnavailableError, got %T (%v)", err, err)
+	}
+}
+
+func TestRegistryDelegatesWorkspaceOperations(t *testing.T) {
+	qemuRuntime := &stubRuntime{}
+	reg := New(map[model.RuntimeSelection]model.RuntimeManager{
+		model.RuntimeSelectionQEMUProfessional: qemuRuntime,
+	})
+	sandbox := model.Sandbox{ID: "sbx-workspace", RuntimeSelection: model.RuntimeSelectionQEMUProfessional, RuntimeBackend: "qemu"}
+	if err := reg.WriteWorkspaceFile(context.Background(), sandbox, "notes.txt", "hello"); err != nil {
+		t.Fatalf("write workspace file: %v", err)
+	}
+	if qemuRuntime.lastPath != "notes.txt" || qemuRuntime.lastContent != "hello" {
+		t.Fatalf("unexpected write delegation path=%q content=%q", qemuRuntime.lastPath, qemuRuntime.lastContent)
+	}
+	data, err := reg.ReadWorkspaceFileBytes(context.Background(), sandbox, "notes.txt")
+	if err != nil {
+		t.Fatalf("read workspace file bytes: %v", err)
+	}
+	if string(data) != "workspace-bytes" {
+		t.Fatalf("unexpected delegated bytes %q", string(data))
+	}
+	if err := reg.WriteWorkspaceFileBytes(context.Background(), sandbox, "blob.bin", []byte("abc")); err != nil {
+		t.Fatalf("write workspace file bytes: %v", err)
+	}
+	if string(qemuRuntime.lastBytes) != "abc" {
+		t.Fatalf("unexpected delegated binary write %q", string(qemuRuntime.lastBytes))
+	}
+	usage, err := reg.MeasureStorage(context.Background(), sandbox)
+	if err != nil {
+		t.Fatalf("measure storage: %v", err)
+	}
+	if usage.WorkspaceBytes != 123 {
+		t.Fatalf("unexpected delegated storage usage %+v", usage)
 	}
 }

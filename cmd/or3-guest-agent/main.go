@@ -100,23 +100,35 @@ func (a *guestAgent) run(ctx context.Context) error {
 	if err := a.loadCapabilities(); err != nil {
 		return err
 	}
-	for {
+	// Open the virtio-serial port once and keep it open.  Closing and
+	// re-opening between host connections creates a window where data from
+	// the next host client is lost (the QEMU chardev delivers data while
+	// the guest file descriptor is closed).
+	var file *os.File
+	for file == nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		file, err := os.OpenFile(a.portPath, os.O_RDWR, 0)
+		var err error
+		file, err = os.OpenFile(a.portPath, os.O_RDWR, 0)
 		if err != nil {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
 			case <-time.After(250 * time.Millisecond):
 			}
-			continue
 		}
-		err = a.serveConn(ctx, file)
-		_ = file.Close()
+	}
+	defer file.Close()
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		err := a.serveConn(ctx, file)
 		if err != nil && !errors.Is(err, io.EOF) && ctx.Err() == nil {
-			return err
+			// Transient read error (e.g. host disconnected).  Wait
+			// briefly then continue reading from the same fd.
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
 }

@@ -222,6 +222,7 @@ The QEMU backend:
 
 - prepares a writable root disk
 - prepares a separate workspace disk
+- mounts that workspace disk inside the guest at `/workspace` during guest bootstrap
 - boots a guest image with QEMU
 - waits for the guest agent to report readiness on agent-first images
 - checks for a readiness marker at `/var/lib/or3/bootstrap.ready`
@@ -255,6 +256,8 @@ The QEMU runtime now exposes more honest status values:
 - `error` means the daemon found a clearer failure signal, such as a guest boot failure marker
 
 That makes it easier for operators to tell the difference between "still starting" and "needs attention."
+
+For agent-mode guests, periodic health reporting uses the serial-log bootstrap marker instead of repeatedly probing the guest-agent chardev. Actual guest operations such as exec, files, PTY, and sandbox-local tunnels still use the guest agent.
 
 If you are new to the project, do **not** start here.
 
@@ -298,8 +301,16 @@ Choose `qemu` if:
 
 - root filesystem lives in a writable disk image
 - workspace lives in a separate disk image
+- `/workspace` is the mounted guest view of that separate workspace disk
 - snapshots copy both disk artifacts, but the sandbox must be stopped first
 - restart reconciliation keeps incomplete snapshots conservative instead of pretending they finished cleanly
+
+Troubleshooting missing workspace mounts:
+
+- if snapshot restore appears to succeed but files do not roll back, verify `/workspace` is actually a mount inside the guest instead of a directory on the root filesystem
+- the fastest in-guest check is `python3 -c "import os; print(os.path.ismount('/workspace'))"` or `mount | grep ' /workspace '
+- if the mount is missing, inspect the serial log for bootstrap failures around the workspace disk attach or `or3-bootstrap` mount step before investigating snapshot copy logic
+- a healthy guest should log `or3-bootstrap: ready` only after the workspace disk is mounted and persisted in `fstab`
 
 ## Network behavior
 

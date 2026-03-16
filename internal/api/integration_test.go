@@ -34,6 +34,7 @@ import (
 	"or3-sandbox/internal/model"
 	"or3-sandbox/internal/repository"
 	runtimedocker "or3-sandbox/internal/runtime/docker"
+	runtimeqemu "or3-sandbox/internal/runtime/qemu"
 	"or3-sandbox/internal/service"
 	"or3-sandbox/internal/testutil"
 )
@@ -925,6 +926,88 @@ func TestTunnelSignedURLCookieAllowsFollowUpAssetRequest(t *testing.T) {
 	}
 	if h.stubRuntime.lastProxyPath != "/app/assets/main.js" {
 		t.Fatalf("expected cookie-authorized follow-up asset path, got %q", h.stubRuntime.lastProxyPath)
+	}
+}
+
+func TestQEMUTunnelSignedURLBootstrapsBrowserSession(t *testing.T) {
+	h := newQEMUHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  h.cfg.QEMUBaseImagePath,
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 1024,
+		PIDsLimit:     256,
+		DiskLimitMB:   256,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+
+	h.exec(t, "token-a", sandbox.ID, model.ExecRequest{
+		Command: []string{"sh", "-lc", `
+set -eu
+mkdir -p /workspace/tunnel
+printf 'qemu-proxy-ok' > /workspace/tunnel/index.html
+nohup python3 -m http.server 8090 -d /workspace/tunnel >/workspace/tunnel-http.log 2>&1 &
+`},
+		Cwd:      "/workspace",
+		Timeout:  30 * time.Second,
+		Detached: false,
+	})
+	h.waitForExecContains(t, "token-a", sandbox.ID, model.ExecRequest{
+		Command: []string{"python3", "-c", "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8090').read().decode())"},
+		Cwd:     "/workspace",
+		Timeout: 5 * time.Second,
+	}, "qemu-proxy-ok", 15*time.Second)
+
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8090)
+	signed := h.createTunnelSignedURL(t, "token-a", tunnel.ID, model.CreateTunnelSignedURLRequest{Path: "/"})
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Jar: jar}
+
+	response, err := client.Get(signed.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected signed tunnel status %d: %s", response.StatusCode, string(body))
+	}
+	if !strings.Contains(string(body), "window.location.replace") {
+		t.Fatalf("expected bootstrap page with JS redirect, got %q", string(body))
+	}
+
+	proxyURL, err := url.Parse(h.server.URL + "/v1/tunnels/" + tunnel.ID + "/proxy/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jar.Cookies(proxyURL)) == 0 {
+		t.Fatal("expected tunnel auth cookie to be set")
+	}
+
+	response, err = client.Get(h.server.URL + "/v1/tunnels/" + tunnel.ID + "/proxy/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err = io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected proxied status %d: %s", response.StatusCode, string(body))
+	}
+	if !strings.Contains(string(body), "qemu-proxy-ok") {
+		t.Fatalf("unexpected proxied body %q", string(body))
 	}
 }
 
@@ -1904,7 +1987,7 @@ type harness struct {
 	db          *sql.DB
 	store       *repository.Store
 	service     *service.Service
-	runtime     *runtimedocker.Runtime
+	runtime     model.RuntimeManager
 	stubRuntime *apiStubRuntime
 	server      *httptest.Server
 	jwtSecret   string
@@ -1977,6 +2060,161 @@ func newHarness(t *testing.T) *harness {
 	svc = service.New(cfg, store, runtime)
 	server.Config.Handler = auth.New(store, cfg).Wrap(api.New(logging.New(), svc, cfg))
 	return &harness{t: t, cfg: cfg, db: sqlDB, store: store, service: svc, runtime: runtime, server: server}
+}
+
+type apiQEMUHostConfig struct {
+	binary         string
+	accel          string
+	baseImagePath  string
+	controlMode    model.GuestControlMode
+	contract       guestimage.Contract
+	sshUser        string
+	sshKeyPath     string
+	sshHostKeyPath string
+	bootTimeout    time.Duration
+}
+
+func requireAPIQEMUHostConfig(t *testing.T) apiQEMUHostConfig {
+	t.Helper()
+	baseImagePath := apiFirstEnv("SANDBOX_QEMU_BASE_IMAGE_PATH", "OR3_QEMU_BASE_IMAGE_PATH")
+	qemuBinary := apiFirstEnv("SANDBOX_QEMU_BINARY", "OR3_QEMU_BINARY")
+	if strings.TrimSpace(qemuBinary) == "" || strings.TrimSpace(baseImagePath) == "" {
+		t.Skip("real QEMU API verification requires SANDBOX_QEMU_BINARY and SANDBOX_QEMU_BASE_IMAGE_PATH")
+	}
+	contract, err := guestimage.Load(baseImagePath)
+	if err != nil {
+		t.Fatalf("load guest image contract for API QEMU verification: %v", err)
+	}
+	controlMode := model.GuestControlMode(strings.TrimSpace(apiFirstEnv("SANDBOX_QEMU_CONTROL_MODE", "OR3_QEMU_CONTROL_MODE")))
+	if !controlMode.IsValid() {
+		controlMode = contract.Control.Mode
+	}
+	if !controlMode.IsValid() {
+		controlMode = model.GuestControlModeAgent
+	}
+	bootTimeout := 2 * time.Minute
+	if raw := strings.TrimSpace(apiFirstEnv("SANDBOX_QEMU_BOOT_TIMEOUT", "OR3_QEMU_BOOT_TIMEOUT")); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			t.Fatalf("parse qemu boot timeout: %v", err)
+		}
+		bootTimeout = parsed
+	}
+	cfg := apiQEMUHostConfig{
+		binary:         qemuBinary,
+		accel:          apiFirstEnv("SANDBOX_QEMU_ACCEL", "OR3_QEMU_ACCEL"),
+		baseImagePath:  baseImagePath,
+		controlMode:    controlMode,
+		contract:       contract,
+		sshUser:        apiFirstEnv("SANDBOX_QEMU_SSH_USER", "OR3_QEMU_SSH_USER"),
+		sshKeyPath:     apiFirstEnv("SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH", "OR3_QEMU_SSH_PRIVATE_KEY_PATH"),
+		sshHostKeyPath: apiFirstEnv("SANDBOX_QEMU_SSH_HOST_KEY_PATH", "OR3_QEMU_SSH_HOST_KEY_PATH"),
+		bootTimeout:    bootTimeout,
+	}
+	if cfg.accel == "" {
+		cfg.accel = "auto"
+	}
+	if cfg.controlMode == model.GuestControlModeSSHCompat && (cfg.sshUser == "" || cfg.sshKeyPath == "" || cfg.sshHostKeyPath == "") {
+		t.Skip("ssh-compat API QEMU verification requires SANDBOX_QEMU_SSH_USER, SANDBOX_QEMU_SSH_PRIVATE_KEY_PATH, and SANDBOX_QEMU_SSH_HOST_KEY_PATH")
+	}
+	return cfg
+}
+
+func newQEMUHarness(t *testing.T) *harness {
+	t.Helper()
+	qemuCfg := requireAPIQEMUHostConfig(t)
+	root := t.TempDir()
+	cfg := config.Config{
+		DeploymentMode:            "development",
+		ListenAddress:             "127.0.0.1:0",
+		DatabasePath:              filepath.Join(root, "sandbox.db"),
+		StorageRoot:               filepath.Join(root, "storage"),
+		SnapshotRoot:              filepath.Join(root, "snapshots"),
+		BaseImageRef:              qemuCfg.baseImagePath,
+		RuntimeBackend:            "qemu",
+		EnabledRuntimeSelections:  []model.RuntimeSelection{model.RuntimeSelectionQEMUProfessional},
+		DefaultRuntimeSelection:   model.RuntimeSelectionQEMUProfessional,
+		AuthMode:                  "static",
+		DefaultCPULimit:           model.CPUCores(1),
+		DefaultMemoryLimitMB:      1024,
+		DefaultPIDsLimit:          256,
+		DefaultDiskLimitMB:        256,
+		DefaultNetworkMode:        model.NetworkModeInternetDisabled,
+		DefaultAllowTunnels:       true,
+		RequestRatePerMinute:      600,
+		RequestBurst:              120,
+		GracefulShutdown:          5 * time.Second,
+		ReconcileInterval:         30 * time.Second,
+		CleanupInterval:           30 * time.Second,
+		OperatorHost:              "http://example.invalid",
+		TunnelSigningKey:          "api-qemu-signed-url-secret",
+		QEMUBinary:                qemuCfg.binary,
+		QEMUAccel:                 qemuCfg.accel,
+		QEMUBaseImagePath:         qemuCfg.baseImagePath,
+		QEMUAllowedBaseImagePaths: []string{qemuCfg.baseImagePath},
+		QEMUControlMode:           qemuCfg.controlMode,
+		QEMUAllowedProfiles:       []model.GuestProfile{qemuCfg.contract.Profile},
+		QEMUSSHUser:               qemuCfg.sshUser,
+		QEMUSSHPrivateKeyPath:     qemuCfg.sshKeyPath,
+		QEMUSSHHostKeyPath:        qemuCfg.sshHostKeyPath,
+		QEMUBootTimeout:           qemuCfg.bootTimeout,
+		Tenants: []config.TenantConfig{
+			{ID: "tenant-a", Name: "Tenant A", Token: "token-a"},
+			{ID: "tenant-b", Name: "Tenant B", Token: "token-b"},
+		},
+		DefaultQuota: model.TenantQuota{
+			MaxSandboxes:            8,
+			MaxRunningSandboxes:     8,
+			MaxConcurrentExecs:      8,
+			MaxTunnels:              8,
+			MaxCPUCores:             model.CPUCores(16),
+			MaxMemoryMB:             8192,
+			MaxStorageMB:            16384,
+			AllowTunnels:            true,
+			DefaultTunnelAuthMode:   "token",
+			DefaultTunnelVisibility: "private",
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	sqlDB, err := db.Open(context.Background(), cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := repository.New(sqlDB)
+	if err := store.SeedTenants(context.Background(), cfg.Tenants, cfg.DefaultQuota); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := runtimeqemu.New(runtimeqemu.Options{
+		Binary:                        cfg.QEMUBinary,
+		Accel:                         cfg.QEMUAccel,
+		BaseImagePath:                 cfg.QEMUBaseImagePath,
+		ControlMode:                   cfg.QEMUControlMode,
+		SSHUser:                       cfg.QEMUSSHUser,
+		SSHKeyPath:                    cfg.QEMUSSHPrivateKeyPath,
+		SSHHostKeyPath:                cfg.QEMUSSHHostKeyPath,
+		BootTimeout:                   cfg.QEMUBootTimeout,
+		WorkspaceFileTransferMaxBytes: cfg.WorkspaceFileTransferMaxBytes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := service.New(cfg, store, runtime)
+	server := httptest.NewServer(auth.New(store, cfg).Wrap(api.New(logging.New(), svc, cfg)))
+	cfg.OperatorHost = server.URL
+	svc = service.New(cfg, store, runtime)
+	server.Config.Handler = auth.New(store, cfg).Wrap(api.New(logging.New(), svc, cfg))
+	return &harness{t: t, cfg: cfg, db: sqlDB, store: store, service: svc, runtime: runtime, server: server}
+}
+
+func apiFirstEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func newStubHarness(t *testing.T) *harness {

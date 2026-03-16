@@ -54,15 +54,17 @@ import json
 import os
 import socket
 import struct
+import time
 
 sock_path = os.environ["OR3_AGENT_SOCKET_PATH"]
 op = os.environ["OR3_AGENT_OP"]
 payload = os.environ.get("OR3_AGENT_PAYLOAD", "null")
-message = {"op": op}
+message = {"op": op, "id": f"smoke-{time.time_ns()}"}
 if payload and payload != "null":
     message["result"] = json.loads(payload)
 raw = json.dumps(message).encode("utf-8")
 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+    conn.settimeout(5)
     conn.connect(sock_path)
     conn.sendall(struct.pack(">I", len(raw)) + raw)
     header = conn.recv(4)
@@ -85,16 +87,52 @@ print(json.dumps(result))
 PY
 }
 
-for _ in $(seq 1 90); do
-  if ready_json="$(agent_rpc ready '{}' 2>/dev/null)"; then
-    if [ "$(printf '%s' "$ready_json" | jq -r '.ready // false')" = "true" ]; then
-      echo "guest image is agent reachable and bootstrap-ready"
-      agent_rpc shutdown '{"reboot":false}' >/dev/null 2>&1 || true
-      exit 0
-    fi
-  fi
-  sleep 2
-done
+wait_for_agent_ready() {
+  OR3_AGENT_SOCKET_PATH="$WORK_DIR/agent.sock" python3 - <<'PY'
+import json
+import os
+import socket
+import struct
+import sys
+import time
+
+sock_path = os.environ["OR3_AGENT_SOCKET_PATH"]
+deadline = time.time() + (120 * 2)
+
+while time.time() < deadline:
+    try:
+        request = {"op": "ready", "id": f"smoke-ready-{time.time_ns()}"}
+        raw = json.dumps(request).encode("utf-8")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(5)
+            conn.connect(sock_path)
+            conn.sendall(struct.pack(">I", len(raw)) + raw)
+            header = conn.recv(4)
+            if len(header) != 4:
+                raise RuntimeError("short guest-agent header")
+            length = struct.unpack(">I", header)[0]
+            data = b""
+            while len(data) < length:
+                chunk = conn.recv(length - len(data))
+                if not chunk:
+                    raise RuntimeError("short guest-agent body")
+                data += chunk
+        reply = json.loads(data.decode("utf-8"))
+        if reply.get("ok") and (reply.get("result") or {}).get("ready") is True:
+            sys.exit(0)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        pass
+    time.sleep(2)
+
+sys.exit(1)
+PY
+}
+
+if wait_for_agent_ready; then
+  echo "guest image is agent reachable and bootstrap-ready"
+  agent_rpc shutdown '{"reboot":false}' >/dev/null 2>&1 || true
+  exit 0
+fi
 
 echo "guest image did not become agent-ready" >&2
 if [ -f "$WORK_DIR/serial.log" ]; then

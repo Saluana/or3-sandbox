@@ -148,3 +148,108 @@ func (r *Registry) RestoreSnapshot(ctx context.Context, sandbox model.Sandbox, s
 	}
 	return runtime.RestoreSnapshot(ctx, sandbox, snapshot)
 }
+
+// ReadWorkspaceFile delegates workspace file reading to the runtime selected by sandbox.
+func (r *Registry) ReadWorkspaceFile(ctx context.Context, sandbox model.Sandbox, relativePath string) (model.FileReadResponse, error) {
+	runtime, err := r.runtimeForSandbox(sandbox, "read-workspace-file")
+	if err != nil {
+		return model.FileReadResponse{}, err
+	}
+	type reader interface {
+		ReadWorkspaceFile(ctx context.Context, sandbox model.Sandbox, relativePath string) (model.FileReadResponse, error)
+	}
+	if rt, ok := runtime.(reader); ok {
+		return rt.ReadWorkspaceFile(ctx, sandbox, relativePath)
+	}
+	return model.FileReadResponse{}, fmt.Errorf("runtime %q does not support ReadWorkspaceFile", sandbox.RuntimeSelection)
+}
+
+// WriteWorkspaceFile delegates workspace file writing to the runtime selected by sandbox.
+func (r *Registry) WriteWorkspaceFile(ctx context.Context, sandbox model.Sandbox, relativePath string, content string) error {
+	runtime, err := r.runtimeForSandbox(sandbox, "write-workspace-file")
+	if err != nil {
+		return err
+	}
+	type writer interface {
+		WriteWorkspaceFile(ctx context.Context, sandbox model.Sandbox, relativePath string, content string) error
+	}
+	if rt, ok := runtime.(writer); ok {
+		return rt.WriteWorkspaceFile(ctx, sandbox, relativePath, content)
+	}
+	return fmt.Errorf("runtime %q does not support WriteWorkspaceFile", sandbox.RuntimeSelection)
+}
+
+// DeleteWorkspacePath delegates workspace deletion to the runtime selected by sandbox.
+func (r *Registry) DeleteWorkspacePath(ctx context.Context, sandbox model.Sandbox, relativePath string) error {
+	runtime, err := r.runtimeForSandbox(sandbox, "delete-workspace-path")
+	if err != nil {
+		return err
+	}
+	type deleter interface {
+		DeleteWorkspacePath(ctx context.Context, sandbox model.Sandbox, relativePath string) error
+	}
+	if rt, ok := runtime.(deleter); ok {
+		return rt.DeleteWorkspacePath(ctx, sandbox, relativePath)
+	}
+	return fmt.Errorf("runtime %q does not support DeleteWorkspacePath", sandbox.RuntimeSelection)
+}
+
+// MkdirWorkspace delegates workspace directory creation to the runtime selected by sandbox.
+func (r *Registry) MkdirWorkspace(ctx context.Context, sandbox model.Sandbox, relativePath string) error {
+	runtime, err := r.runtimeForSandbox(sandbox, "mkdir-workspace")
+	if err != nil {
+		return err
+	}
+	type mkdirer interface {
+		MkdirWorkspace(ctx context.Context, sandbox model.Sandbox, relativePath string) error
+	}
+	if rt, ok := runtime.(mkdirer); ok {
+		return rt.MkdirWorkspace(ctx, sandbox, relativePath)
+	}
+	return fmt.Errorf("runtime %q does not support MkdirWorkspace", sandbox.RuntimeSelection)
+}
+
+// ReadWorkspaceFileBytes delegates binary workspace file reading to the runtime selected by sandbox.
+func (r *Registry) ReadWorkspaceFileBytes(ctx context.Context, sandbox model.Sandbox, relativePath string) ([]byte, error) {
+	runtime, err := r.runtimeForSandbox(sandbox, "read-workspace-file-bytes")
+	if err != nil {
+		return nil, err
+	}
+	type binaryReader interface {
+		ReadWorkspaceFileBytes(ctx context.Context, sandbox model.Sandbox, relativePath string) ([]byte, error)
+	}
+	if rt, ok := runtime.(binaryReader); ok {
+		return rt.ReadWorkspaceFileBytes(ctx, sandbox, relativePath)
+	}
+	return nil, fmt.Errorf("runtime %q does not support ReadWorkspaceFileBytes", sandbox.RuntimeSelection)
+}
+
+// WriteWorkspaceFileBytes delegates binary workspace file writing to the runtime selected by sandbox.
+func (r *Registry) WriteWorkspaceFileBytes(ctx context.Context, sandbox model.Sandbox, relativePath string, content []byte) error {
+	runtime, err := r.runtimeForSandbox(sandbox, "write-workspace-file-bytes")
+	if err != nil {
+		return err
+	}
+	type binaryWriter interface {
+		WriteWorkspaceFileBytes(ctx context.Context, sandbox model.Sandbox, relativePath string, content []byte) error
+	}
+	if rt, ok := runtime.(binaryWriter); ok {
+		return rt.WriteWorkspaceFileBytes(ctx, sandbox, relativePath, content)
+	}
+	return fmt.Errorf("runtime %q does not support WriteWorkspaceFileBytes", sandbox.RuntimeSelection)
+}
+
+// MeasureStorage delegates storage measurement to the runtime selected by sandbox.
+func (r *Registry) MeasureStorage(ctx context.Context, sandbox model.Sandbox) (model.StorageUsage, error) {
+	runtime, err := r.runtimeForSandbox(sandbox, "measure-storage")
+	if err != nil {
+		return model.StorageUsage{}, err
+	}
+	type measurer interface {
+		MeasureStorage(ctx context.Context, sandbox model.Sandbox) (model.StorageUsage, error)
+	}
+	if rt, ok := runtime.(measurer); ok {
+		return rt.MeasureStorage(ctx, sandbox)
+	}
+	return model.StorageUsage{}, fmt.Errorf("runtime %q does not support MeasureStorage", sandbox.RuntimeSelection)
+}

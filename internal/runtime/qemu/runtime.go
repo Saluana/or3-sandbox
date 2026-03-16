@@ -28,7 +28,7 @@ const (
 	defaultAgentTransport = "virtio-serial"
 	sshCompatTransport    = "ssh-port-forward"
 	readyMarkerPath       = "/var/lib/or3/bootstrap.ready"
-	readyProbeTimeout     = 10 * time.Second
+	readyProbeTimeout     = 15 * time.Second
 	defaultPollInterval   = 500 * time.Millisecond
 	qemuRuntimePrefix     = "qemu-"
 	sshPortBase           = 22000
@@ -330,6 +330,57 @@ func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.Run
 			Pid:       pid,
 		}, nil
 	}
+
+	// For agent-mode sandboxes, use the serial log bootstrap marker as the
+	// primary readiness indicator.  Probing over the QEMU virtio-serial
+	// chardev socket is unreliable for periodic health checks because the
+	// single-client socket cannot reconnect deterministically after the
+	// host disconnects.  The agent socket is still used for actual
+	// operations (exec, files, TTY, tunnels) where retry logic handles any
+	// transient chardev disruptions.
+	transport, transportErr := r.controlTransportForSandbox(sandbox)
+	if transportErr == nil && transport.mode == model.GuestControlModeAgent {
+		if reason, ok := bootFailureReason(layout.serialLogPath); ok {
+			return model.RuntimeState{
+				RuntimeID:   sandbox.RuntimeID,
+				Status:      model.SandboxStatusError,
+				Running:     false,
+				Pid:         pid,
+				ControlMode: r.controlModeForSandbox(sandbox),
+				Error:       reason,
+			}, nil
+		}
+		if serialLogShowsReady(layout.serialLogPath) {
+			return model.RuntimeState{
+				RuntimeID:   sandbox.RuntimeID,
+				Status:      model.SandboxStatusRunning,
+				Running:     true,
+				Pid:         pid,
+				IPAddress:   "127.0.0.1",
+				ControlMode: r.controlModeForSandbox(sandbox),
+			}, nil
+		}
+		if withinBootWindow(layout.pidPath, r.effectiveBootTimeout()) {
+			return model.RuntimeState{
+				RuntimeID:   sandbox.RuntimeID,
+				Status:      model.SandboxStatusBooting,
+				Running:     false,
+				Pid:         pid,
+				ControlMode: r.controlModeForSandbox(sandbox),
+				Error:       "guest is still booting",
+			}, nil
+		}
+		return model.RuntimeState{
+			RuntimeID:   sandbox.RuntimeID,
+			Status:      model.SandboxStatusDegraded,
+			Running:     false,
+			Pid:         pid,
+			ControlMode: r.controlModeForSandbox(sandbox),
+			Error:       "guest process is alive but bootstrap marker not found",
+		}, nil
+	}
+
+	// SSH-compat and fallback: probe via SSH or agent socket.
 	target := r.sshTarget(sandbox, layout)
 	probeCtx, cancel := context.WithTimeout(ctx, readyProbeTimeout)
 	defer cancel()
@@ -615,6 +666,20 @@ func bootFailureReason(serialLogPath string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// serialLogShowsReady returns true when the guest serial log contains the
+// bootstrap ready marker, indicating the guest has fully booted and the agent
+// service has started.
+func serialLogShowsReady(serialLogPath string) bool {
+	if strings.TrimSpace(serialLogPath) == "" {
+		return false
+	}
+	data, err := readFileTail(serialLogPath, serialTailLimit)
+	if err != nil || len(data) == 0 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(data)), "or3-bootstrap: ready")
 }
 
 func readFileTail(path string, limit int64) ([]byte, error) {
@@ -977,10 +1042,7 @@ func (r *Runtime) probeReady(ctx context.Context, sandbox model.Sandbox, layout 
 		return err
 	}
 	if transport.mode == model.GuestControlModeAgent {
-		if _, err := r.agentHandshakeForSandbox(ctx, layout, sandbox); err != nil {
-			return err
-		}
-		return r.agentReady(ctx, layout)
+		return r.agentProbeReadySingleConn(ctx, layout, sandbox)
 	}
 	return r.sshReady(ctx, target)
 }

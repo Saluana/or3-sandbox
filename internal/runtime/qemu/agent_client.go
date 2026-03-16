@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"or3-sandbox/internal/guestimage"
@@ -77,6 +78,138 @@ func (r *Runtime) agentReady(ctx context.Context, layout sandboxLayout) error {
 			result.Reason = "guest agent reported not ready"
 		}
 		return errors.New(result.Reason)
+	}
+	return nil
+}
+
+// agentProbeReadySingleConn performs the hello handshake and a ready check on a
+// single socket connection.  QEMU virtio-serial chardevs only accept one client
+// at a time; splitting hello and ready across two connections causes a race
+// where the guest agent hasn't re-opened the port between disconnect/reconnect.
+//
+// Because the chardev may have stale state from a previous probe's disconnect
+// (the guest agent briefly closes and re-opens the port), the first connection
+// attempt can time out.  This method retries up to the caller's context
+// deadline with short per-attempt timeouts to recover from transient chardev
+// disruptions.
+func (r *Runtime) agentProbeReadySingleConn(ctx context.Context, layout sandboxLayout, sandbox model.Sandbox) error {
+	const perAttemptTimeout = 3 * time.Second
+	var lastErr error
+	for {
+		if ctx.Err() != nil {
+			if lastErr != nil {
+				return lastErr
+			}
+			return ctx.Err()
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, perAttemptTimeout)
+		err := r.agentProbeReadyAttempt(attemptCtx, layout, sandbox)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		// Only retry on timeout-like errors; protocol mismatches are permanent.
+		if !isTimeoutError(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return lastErr
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded)
+}
+
+func (r *Runtime) agentProbeReadyAttempt(ctx context.Context, layout sandboxLayout, sandbox model.Sandbox) error {
+	conn, err := r.agentDial(ctx, layout.agentSocketPath)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if err := applyAgentConnDeadline(conn, ctx, defaultAgentRoundTripTimeout); err != nil {
+		return err
+	}
+
+	// --- hello ---
+	helloID := nextAgentRequestID()
+	if err := agentproto.WriteMessage(conn, agentproto.Message{ID: helloID, Op: agentproto.OpHello}); err != nil {
+		return err
+	}
+	helloMsg, err := agentproto.ReadMessage(conn)
+	if err != nil {
+		return err
+	}
+	if err := agentproto.ValidateResponse(helloMsg, agentproto.OpHello, helloID); err != nil {
+		return err
+	}
+	if !helloMsg.OK {
+		return fmt.Errorf("guest agent hello failed: %s", helloMsg.Error)
+	}
+	var helloResult agentproto.HelloResult
+	if err := json.Unmarshal(helloMsg.Result, &helloResult); err != nil {
+		return err
+	}
+	if helloResult.ProtocolVersion != agentproto.ProtocolVersion {
+		return fmt.Errorf("guest agent protocol mismatch: host=%s guest=%s", agentproto.ProtocolVersion, helloResult.ProtocolVersion)
+	}
+	handshake := guestHandshake{
+		ProtocolVersion:          helloResult.ProtocolVersion,
+		WorkspaceContractVersion: helloResult.WorkspaceContractVersion,
+		Capabilities:             model.NormalizeCapabilities(helloResult.Capabilities),
+		MaxFileTransferBytes:     defaultGuestFileTransferMaxBytes(helloResult.MaxFileTransferBytes),
+	}
+	if expectedProtocol := strings.TrimSpace(sandbox.ControlProtocolVersion); expectedProtocol != "" && handshake.ProtocolVersion != expectedProtocol {
+		return fmt.Errorf("guest agent protocol mismatch: host=%s guest=%s", expectedProtocol, handshake.ProtocolVersion)
+	}
+	expectedWorkspaceVersion, expectedCapabilities := expectedAgentHandshakeForSandbox(sandbox)
+	if expectedWorkspaceVersion != "" && handshake.WorkspaceContractVersion != expectedWorkspaceVersion {
+		return fmt.Errorf("guest workspace contract mismatch: host=%s guest=%s", expectedWorkspaceVersion, handshake.WorkspaceContractVersion)
+	}
+	if len(expectedCapabilities) > 0 {
+		got := strings.Join(handshake.Capabilities, ",")
+		want := strings.Join(expectedCapabilities, ",")
+		if got != want {
+			return fmt.Errorf("guest agent capabilities mismatch: host=%s guest=%s", want, got)
+		}
+	}
+
+	// --- ready ---
+	readyID := nextAgentRequestID()
+	if err := agentproto.WriteMessage(conn, agentproto.Message{ID: readyID, Op: agentproto.OpReady}); err != nil {
+		return err
+	}
+	readyMsg, err := agentproto.ReadMessage(conn)
+	if err != nil {
+		return err
+	}
+	if err := agentproto.ValidateResponse(readyMsg, agentproto.OpReady, readyID); err != nil {
+		return err
+	}
+	if !readyMsg.OK {
+		return fmt.Errorf("guest agent ready check failed: %s", readyMsg.Error)
+	}
+	var readyResult agentproto.ReadyResult
+	if err := json.Unmarshal(readyMsg.Result, &readyResult); err != nil {
+		return err
+	}
+	if !readyResult.Ready {
+		reason := readyResult.Reason
+		if reason == "" {
+			reason = "guest agent reported not ready"
+		}
+		return errors.New(reason)
 	}
 	return nil
 }
@@ -294,6 +427,10 @@ func (r *Runtime) agentAttachTTY(ctx context.Context, layout sandboxLayout, req 
 }
 
 func (r *Runtime) agentRoundTrip(ctx context.Context, socketPath string, op string, request any, out any) error {
+	return r.agentRoundTripAttempt(ctx, socketPath, op, request, out)
+}
+
+func (r *Runtime) agentRoundTripAttempt(ctx context.Context, socketPath string, op string, request any, out any) error {
 	conn, err := r.agentDial(ctx, socketPath)
 	if err != nil {
 		return err
@@ -376,7 +513,7 @@ func (r *Runtime) agentDial(ctx context.Context, socketPath string) (net.Conn, e
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if errors.Is(err, os.ErrNotExist) {
+		if isRetryableAgentDialError(err) {
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
@@ -386,6 +523,19 @@ func (r *Runtime) agentDial(ctx context.Context, socketPath string) (net.Conn, e
 		}
 		return nil, err
 	}
+}
+
+func isRetryableAgentDialError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrNotExist) || isTimeoutError(err) {
+		return true
+	}
+	return errors.Is(err, syscall.EAGAIN) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ENOENT)
 }
 
 type agentTTYHandle struct {

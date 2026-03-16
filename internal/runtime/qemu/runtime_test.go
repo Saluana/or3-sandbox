@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -293,6 +294,22 @@ func TestAgentReadyHonorsContextDeadline(t *testing.T) {
 	}
 	if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "i/o timeout") {
 		t.Fatalf("expected context deadline or i/o timeout, got %v", err)
+	}
+}
+
+func TestAgentReadyAllowsSlowGuestResponseWithinCallerDeadline(t *testing.T) {
+	socketPath := startTestAgentSocket(t, func(conn net.Conn) {
+		defer conn.Close()
+		request, _ := agentproto.ReadMessage(conn)
+		time.Sleep(3200 * time.Millisecond)
+		result, _ := json.Marshal(agentproto.ReadyResult{Ready: true})
+		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+	})
+	r := &Runtime{}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.agentReady(ctx, sandboxLayout{agentSocketPath: socketPath}); err != nil {
+		t.Fatalf("expected slow ready response to succeed within caller deadline, got %v", err)
 	}
 }
 
@@ -669,6 +686,125 @@ func TestCreateAndSnapshotArtifacts(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected snapshot artifact %s: %v", path, err)
 		}
+	}
+}
+
+func TestRestoreSnapshotCopiesRootAndWorkspaceArtifacts(t *testing.T) {
+	base := t.TempDir()
+	sandbox := model.Sandbox{
+		ID:            "sbx-restore-snapshot",
+		RuntimeID:     "qemu-sbx-restore-snapshot",
+		StorageRoot:   filepath.Join(base, "rootfs"),
+		WorkspaceRoot: filepath.Join(base, "workspace"),
+		CacheRoot:     filepath.Join(base, "cache"),
+	}
+	layout := layoutForSandbox(sandbox)
+	if err := ensureLayout(layout); err != nil {
+		t.Fatalf("ensure layout: %v", err)
+	}
+	rootSnapshot := filepath.Join(base, "snapshot-root.img")
+	workspaceSnapshot := filepath.Join(base, "snapshot-workspace.img")
+	if err := os.WriteFile(rootSnapshot, []byte("root-snapshot-bytes"), 0o644); err != nil {
+		t.Fatalf("write root snapshot: %v", err)
+	}
+	if err := os.WriteFile(workspaceSnapshot, []byte("workspace-snapshot-bytes"), 0o644); err != nil {
+		t.Fatalf("write workspace snapshot: %v", err)
+	}
+	r := &Runtime{}
+	state, err := r.RestoreSnapshot(context.Background(), sandbox, model.Snapshot{ImageRef: rootSnapshot, WorkspaceTar: workspaceSnapshot})
+	if err != nil {
+		t.Fatalf("restore snapshot: %v", err)
+	}
+	if state.Status != model.SandboxStatusStopped {
+		t.Fatalf("unexpected restore status: %s", state.Status)
+	}
+	rootBytes, err := os.ReadFile(layout.rootDiskPath)
+	if err != nil {
+		t.Fatalf("read restored root disk: %v", err)
+	}
+	if string(rootBytes) != "root-snapshot-bytes" {
+		t.Fatalf("unexpected restored root bytes %q", string(rootBytes))
+	}
+	workspaceBytes, err := os.ReadFile(layout.workspaceDiskPath)
+	if err != nil {
+		t.Fatalf("read restored workspace disk: %v", err)
+	}
+	if string(workspaceBytes) != "workspace-snapshot-bytes" {
+		t.Fatalf("unexpected restored workspace bytes %q", string(workspaceBytes))
+	}
+}
+
+func TestSerialLogShowsReadyDetectsMarker(t *testing.T) {
+	serialLogPath := filepath.Join(t.TempDir(), "serial.log")
+	if err := os.WriteFile(serialLogPath, []byte("booting...\nor3-bootstrap: ready\n"), 0o644); err != nil {
+		t.Fatalf("write serial log: %v", err)
+	}
+	if !serialLogShowsReady(serialLogPath) {
+		t.Fatal("expected ready marker in serial log")
+	}
+	if serialLogShowsReady(filepath.Join(t.TempDir(), "missing.log")) {
+		t.Fatal("did not expect missing serial log to report ready")
+	}
+}
+
+func TestInspectAgentModeUsesSerialLogReadyMarker(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	defer cmd.Process.Kill()
+
+	base := t.TempDir()
+	sandbox := model.Sandbox{
+		ID:            "sbx-agent-inspect",
+		RuntimeID:     "qemu-sbx-agent-inspect",
+		ControlMode:   model.GuestControlModeAgent,
+		StorageRoot:   filepath.Join(base, "rootfs"),
+		WorkspaceRoot: filepath.Join(base, "workspace"),
+		CacheRoot:     filepath.Join(base, "cache"),
+	}
+	layout := layoutForSandbox(sandbox)
+	if err := ensureLayout(layout); err != nil {
+		t.Fatalf("ensure layout: %v", err)
+	}
+	if err := os.WriteFile(layout.pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+	if err := os.WriteFile(layout.serialLogPath, []byte("or3-bootstrap: ready\n"), 0o644); err != nil {
+		t.Fatalf("write serial log: %v", err)
+	}
+	r := &Runtime{}
+	state, err := r.Inspect(context.Background(), sandbox)
+	if err != nil {
+		t.Fatalf("inspect failed: %v", err)
+	}
+	if state.Status != model.SandboxStatusRunning {
+		t.Fatalf("unexpected status: %s", state.Status)
+	}
+	if !state.Running {
+		t.Fatal("expected running=true for ready serial log")
+	}
+}
+
+func TestIsRetryableAgentDialError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "enoent", err: os.ErrNotExist, want: true},
+		{name: "eagain", err: syscall.EAGAIN, want: true},
+		{name: "econnrefused", err: syscall.ECONNREFUSED, want: true},
+		{name: "econnreset", err: syscall.ECONNRESET, want: true},
+		{name: "deadline", err: context.DeadlineExceeded, want: true},
+		{name: "non-retryable", err: errors.New("boom"), want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRetryableAgentDialError(tc.err); got != tc.want {
+				t.Fatalf("unexpected retryable result: got %v want %v", got, tc.want)
+			}
+		})
 	}
 }
 

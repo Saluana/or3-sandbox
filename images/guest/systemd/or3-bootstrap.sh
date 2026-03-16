@@ -6,6 +6,7 @@ WORKSPACE_MOUNT="${WORKSPACE_MOUNT:-/workspace}"
 READY_MARKER="${READY_MARKER:-/var/lib/or3/bootstrap.ready}"
 WORKSPACE_OWNER="${WORKSPACE_OWNER:-sandbox}"
 WORKSPACE_GROUP="${WORKSPACE_GROUP:-$WORKSPACE_OWNER}"
+WORKSPACE_DEVICE_WAIT_SECONDS="${WORKSPACE_DEVICE_WAIT_SECONDS:-15}"
 
 log_bootstrap() {
   local message="$1"
@@ -20,17 +21,32 @@ mkdir -p "$WORKSPACE_MOUNT"
 
 log_bootstrap "or3-bootstrap: starting"
 
-if [ -b "$WORKSPACE_DEVICE" ]; then
-  if ! blkid "$WORKSPACE_DEVICE" >/dev/null 2>&1; then
-    mkfs.ext4 -F "$WORKSPACE_DEVICE"
-  fi
+deadline=$((SECONDS + WORKSPACE_DEVICE_WAIT_SECONDS))
+while [ ! -b "$WORKSPACE_DEVICE" ] && [ "$SECONDS" -lt "$deadline" ]; do
+  sleep 1
+done
 
-  uuid="$(blkid -s UUID -o value "$WORKSPACE_DEVICE")"
-  if [ -n "$uuid" ] && ! grep -q "$uuid" /etc/fstab; then
-    echo "UUID=$uuid $WORKSPACE_MOUNT ext4 defaults,nofail 0 2" >> /etc/fstab
-  fi
+if [ ! -b "$WORKSPACE_DEVICE" ]; then
+  log_bootstrap "or3-bootstrap: workspace device $WORKSPACE_DEVICE not found"
+  exit 1
+fi
 
-  mountpoint -q "$WORKSPACE_MOUNT" || mount "$WORKSPACE_MOUNT"
+if ! blkid "$WORKSPACE_DEVICE" >/dev/null 2>&1; then
+  mkfs.ext4 -F "$WORKSPACE_DEVICE"
+fi
+
+uuid="$(blkid -s UUID -o value "$WORKSPACE_DEVICE")"
+if ! mountpoint -q "$WORKSPACE_MOUNT"; then
+  mount -t ext4 "$WORKSPACE_DEVICE" "$WORKSPACE_MOUNT"
+fi
+
+if ! mountpoint -q "$WORKSPACE_MOUNT"; then
+  log_bootstrap "or3-bootstrap: failed to mount $WORKSPACE_DEVICE on $WORKSPACE_MOUNT"
+  exit 1
+fi
+
+if [ -n "$uuid" ] && ! grep -q "$uuid" /etc/fstab; then
+  echo "UUID=$uuid $WORKSPACE_MOUNT ext4 defaults,nofail 0 2" >> /etc/fstab
 fi
 
 if id "$WORKSPACE_OWNER" >/dev/null 2>&1; then
