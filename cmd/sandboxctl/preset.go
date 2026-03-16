@@ -403,6 +403,13 @@ func (r presetRunner) buildCreateRequest(inputs map[string]string) (model.Create
 func (r presetRunner) uploadFiles(sandboxID string, vars map[string]string) error {
 	for _, asset := range r.manifest.Files {
 		printlnProgress("uploading file", asset.Path)
+		remotePath, err := normalizeWorkspaceAPIPath(asset.Path)
+		if err != nil {
+			return err
+		}
+		if remotePath == "" {
+			return fmt.Errorf("file path %q must reference a file inside /workspace", asset.Path)
+		}
 		var payload model.FileWriteRequest
 		if strings.TrimSpace(asset.Content) != "" {
 			payload = model.FileWriteRequest{Content: expandTemplate(asset.Content, vars)}
@@ -421,7 +428,7 @@ func (r presetRunner) uploadFiles(sandboxID string, vars map[string]string) erro
 				payload = model.FileWriteRequest{Content: expandTemplate(string(data), vars)}
 			}
 		}
-		if err := doJSON(r.client, http.MethodPut, "/v1/sandboxes/"+sandboxID+"/files/"+strings.TrimLeft(asset.Path, "/"), payload, nil); err != nil {
+		if err := doJSON(r.client, http.MethodPut, "/v1/sandboxes/"+sandboxID+"/files/"+remotePath, payload, nil); err != nil {
 			return err
 		}
 	}
@@ -551,7 +558,14 @@ func (r presetRunner) downloadArtifacts(sandboxID string) error {
 	for _, artifact := range r.manifest.Artifacts {
 		printlnProgress("downloading artifact", artifact.LocalPath)
 		var file model.FileReadResponse
-		endpoint := "/v1/sandboxes/" + sandboxID + "/files/" + strings.TrimLeft(artifact.RemotePath, "/")
+		remotePath, err := normalizeWorkspaceAPIPath(artifact.RemotePath)
+		if err != nil {
+			return err
+		}
+		if remotePath == "" {
+			return fmt.Errorf("artifact path %q must reference a file inside /workspace", artifact.RemotePath)
+		}
+		endpoint := "/v1/sandboxes/" + sandboxID + "/files/" + remotePath
 		if artifact.Binary {
 			endpoint += "?encoding=base64"
 		}

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,20 @@ func TestValidateRuntimeConfigDockerRequiresTrustedFlag(t *testing.T) {
 	cfg.DockerTmpfsSizeMB = 64
 	if err := validateRuntimeConfig(cfg, runtimeValidationProbe{}); err != nil {
 		t.Fatalf("expected docker config to validate, got %v", err)
+	}
+}
+
+func TestDefaultDockerUserReturnsNumericUIDGID(t *testing.T) {
+	got := defaultDockerUser()
+	parts := strings.Split(got, ":")
+	if len(parts) != 2 {
+		t.Fatalf("expected uid:gid format, got %q", got)
+	}
+	if _, err := strconv.Atoi(parts[0]); err != nil {
+		t.Fatalf("expected numeric uid in %q: %v", got, err)
+	}
+	if _, err := strconv.Atoi(parts[1]); err != nil {
+		t.Fatalf("expected numeric gid in %q: %v", got, err)
 	}
 }
 

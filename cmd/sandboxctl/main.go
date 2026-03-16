@@ -316,7 +316,14 @@ func runUpload(client clientConfig, args []string) error {
 	if err != nil {
 		return err
 	}
-	return doJSON(client, http.MethodPut, "/v1/sandboxes/"+args[0]+"/files/"+strings.TrimLeft(args[2], "/"), model.FileWriteRequest{Encoding: "base64", ContentBase64: base64.StdEncoding.EncodeToString(data)}, nil)
+	remotePath, err := normalizeWorkspaceAPIPath(args[2])
+	if err != nil {
+		return err
+	}
+	if remotePath == "" {
+		return errors.New("remote path must reference a file inside /workspace")
+	}
+	return doJSON(client, http.MethodPut, "/v1/sandboxes/"+args[0]+"/files/"+remotePath, model.FileWriteRequest{Encoding: "base64", ContentBase64: base64.StdEncoding.EncodeToString(data)}, nil)
 }
 
 func runDownload(client clientConfig, args []string) error {
@@ -324,7 +331,14 @@ func runDownload(client clientConfig, args []string) error {
 		return errors.New("usage: sandboxctl download <sandbox-id> <remote-path> <local-path>")
 	}
 	var file model.FileReadResponse
-	if err := doJSON(client, http.MethodGet, "/v1/sandboxes/"+args[0]+"/files/"+strings.TrimLeft(args[1], "/")+"?encoding=base64", nil, &file); err != nil {
+	remotePath, err := normalizeWorkspaceAPIPath(args[1])
+	if err != nil {
+		return err
+	}
+	if remotePath == "" {
+		return errors.New("remote path must reference a file inside /workspace")
+	}
+	if err := doJSON(client, http.MethodGet, "/v1/sandboxes/"+args[0]+"/files/"+remotePath+"?encoding=base64", nil, &file); err != nil {
 		return err
 	}
 	data, err := base64.StdEncoding.DecodeString(file.ContentBase64)
@@ -338,7 +352,11 @@ func runMkdir(client clientConfig, args []string) error {
 	if len(args) != 2 {
 		return errors.New("usage: sandboxctl mkdir <sandbox-id> <path>")
 	}
-	return doJSON(client, http.MethodPost, "/v1/sandboxes/"+args[0]+"/mkdir", model.MkdirRequest{Path: args[1]}, nil)
+	workspacePath, err := normalizeWorkspaceAPIPath(args[1])
+	if err != nil {
+		return err
+	}
+	return doJSON(client, http.MethodPost, "/v1/sandboxes/"+args[0]+"/mkdir", model.MkdirRequest{Path: workspacePath}, nil)
 }
 
 func runTunnelCreate(client clientConfig, args []string) error {

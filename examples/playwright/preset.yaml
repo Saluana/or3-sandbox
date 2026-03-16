@@ -31,10 +31,28 @@ files:
         process.exit(1);
       });
 bootstrap:
+  - name: install-playwright-package
+    command:
+      - sh
+      - -lc
+      - |
+        set -eu
+        cd /workspace
+        if [ ! -d node_modules/playwright ]; then
+          npm init -y >/dev/null 2>&1
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --no-save playwright@1.51.1 >/dev/null
+        fi
+    timeout: 10m
+    env:
+      HOME: /workspace
+      NPM_CONFIG_CACHE: /workspace/.npm
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
   - name: capture-screenshot
     command: ["node", "/workspace/shot.js"]
     timeout: 10m
     env:
+      HOME: /workspace
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
       TARGET_URL: ${TARGET_URL}
 artifacts:
   - remote_path: screenshot.png

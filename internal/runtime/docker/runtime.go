@@ -2,6 +2,7 @@ package docker
 
 import (
 	"archive/tar"
+	"bufio"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -9,8 +10,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	goruntime "runtime"
 	"strconv"
@@ -29,10 +32,11 @@ import (
 const previewLimit = 64 * 1024
 
 const (
-	defaultUser                    = "10001:10001"
+	defaultUserFallback            = "10001:10001"
 	defaultTmpfsSizeMB             = 64
 	dockerCapabilityElevatedUser   = "docker.elevated-user"
 	dockerCapabilityExtraCapPrefix = "docker.extra-cap:"
+	dockerTunnelBridgeReady        = "__OR3_TUNNEL_BRIDGE_READY__"
 )
 
 // Options configures the Docker runtime adapter.
@@ -76,7 +80,7 @@ func New(options ...Options) *Runtime {
 	resolved := Options{
 		Binary:      "docker",
 		HostOS:      goruntime.GOOS,
-		User:        defaultUser,
+		User:        defaultRuntimeUser(),
 		TmpfsSizeMB: defaultTmpfsSizeMB,
 	}
 	if len(options) > 0 {
@@ -120,6 +124,23 @@ func New(options ...Options) *Runtime {
 		allowDangerousOverrides: resolved.AllowDangerousOverrides,
 		restoreLimits:           limits,
 	}
+}
+
+func defaultRuntimeUser() string {
+	current, err := user.Current()
+	if err != nil {
+		return defaultUserFallback
+	}
+	if current.Uid == "" || current.Gid == "" {
+		return defaultUserFallback
+	}
+	if _, err := strconv.Atoi(current.Uid); err != nil {
+		return defaultUserFallback
+	}
+	if _, err := strconv.Atoi(current.Gid); err != nil {
+		return defaultUserFallback
+	}
+	return current.Uid + ":" + current.Gid
 }
 
 // NewWithBinary constructs a Docker runtime adapter that shells out through
@@ -534,6 +555,59 @@ func (r *Runtime) AttachTTY(ctx context.Context, sandbox model.Sandbox, req mode
 	return &ttyHandle{cmd: cmd, pty: ptmx}, nil
 }
 
+// OpenSandboxLocalConn opens a daemon-side TCP bridge into the Docker sandbox
+// without routing through a PTY, which corrupts proxied HTTP/WebSocket bytes.
+func (r *Runtime) OpenSandboxLocalConn(ctx context.Context, sandbox model.Sandbox, targetPort int) (net.Conn, error) {
+	if targetPort < 1 || targetPort > 65535 {
+		return nil, fmt.Errorf("target port must be between 1 and 65535")
+	}
+	args := append([]string{"exec", "-i"}, execOptions(model.ExecRequest{
+		Cwd: "/workspace",
+		Env: map[string]string{"OR3_TUNNEL_TARGET_PORT": strconv.Itoa(targetPort)},
+	})...)
+	args = append(args, containerName(sandbox.ID), "sh", "-lc", dockerSandboxLocalTCPBridgeScript)
+	cmd := exec.CommandContext(ctx, r.binary, args...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return nil, err
+	}
+	stderr := newPreviewWriter(nil, 4096)
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		return nil, err
+	}
+	reader := bufio.NewReader(stdout)
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+	if err := awaitDockerTunnelBridgeReady(reader, waitCh, stderr); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		<-waitCh
+		return nil, err
+	}
+	return &dockerSandboxLocalConn{
+		cmd:    cmd,
+		stdin:  stdin,
+		stdout: stdout,
+		reader: reader,
+		waitCh: waitCh,
+		local:  bridgeAddr("daemon"),
+		remote: bridgeAddr(fmt.Sprintf("sandbox:%s:127.0.0.1:%d", sandbox.ID, targetPort)),
+	}, nil
+}
+
 // CreateSnapshot captures a snapshot artifact for sandbox.
 func (r *Runtime) CreateSnapshot(ctx context.Context, sandbox model.Sandbox, snapshotID string) (model.SnapshotInfo, error) {
 	imageRef := snapshotImage(snapshotID)
@@ -753,6 +827,271 @@ func (h *ttyHandle) Close() error {
 	}
 	return nil
 }
+
+type dockerSandboxLocalConn struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	reader *bufio.Reader
+	waitCh <-chan error
+	local  net.Addr
+	remote net.Addr
+
+	closeOnce     sync.Once
+	closeErr      error
+	mu            sync.RWMutex
+	readDeadline  time.Time
+	writeDeadline time.Time
+}
+
+func (c *dockerSandboxLocalConn) Read(p []byte) (int, error) {
+	return c.runWithDeadline(c.deadline(true), func() (int, error) {
+		return c.reader.Read(p)
+	})
+}
+
+func (c *dockerSandboxLocalConn) Write(p []byte) (int, error) {
+	return c.runWithDeadline(c.deadline(false), func() (int, error) {
+		return c.stdin.Write(p)
+	})
+}
+
+func (c *dockerSandboxLocalConn) Close() error {
+	c.closeOnce.Do(func() {
+		if c.stdin != nil {
+			_ = c.stdin.Close()
+		}
+		if c.stdout != nil {
+			_ = c.stdout.Close()
+		}
+		if c.cmd != nil && c.cmd.Process != nil {
+			_ = c.cmd.Process.Kill()
+		}
+		if c.waitCh != nil {
+			if err := <-c.waitCh; err != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					c.closeErr = err
+				}
+			}
+		}
+	})
+	return c.closeErr
+}
+
+func (c *dockerSandboxLocalConn) LocalAddr() net.Addr {
+	return c.local
+}
+
+func (c *dockerSandboxLocalConn) RemoteAddr() net.Addr {
+	return c.remote
+}
+
+func (c *dockerSandboxLocalConn) SetDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.readDeadline = deadline
+	c.writeDeadline = deadline
+	return nil
+}
+
+func (c *dockerSandboxLocalConn) SetReadDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.readDeadline = deadline
+	return nil
+}
+
+func (c *dockerSandboxLocalConn) SetWriteDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writeDeadline = deadline
+	return nil
+}
+
+func (c *dockerSandboxLocalConn) deadline(read bool) time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if read {
+		return c.readDeadline
+	}
+	return c.writeDeadline
+}
+
+func (c *dockerSandboxLocalConn) runWithDeadline(deadline time.Time, fn func() (int, error)) (int, error) {
+	if deadline.IsZero() {
+		return fn()
+	}
+	wait := time.Until(deadline)
+	if wait <= 0 {
+		_ = c.Close()
+		return 0, deadlineExceededError{}
+	}
+	type result struct {
+		n   int
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		n, err := fn()
+		done <- result{n: n, err: err}
+	}()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case res := <-done:
+		return res.n, res.err
+	case <-timer.C:
+		_ = c.Close()
+		return 0, deadlineExceededError{}
+	}
+}
+
+type bridgeAddr string
+
+func (a bridgeAddr) Network() string { return "tcp" }
+func (a bridgeAddr) String() string  { return string(a) }
+
+type deadlineExceededError struct{}
+
+func (deadlineExceededError) Error() string   { return "i/o timeout" }
+func (deadlineExceededError) Timeout() bool   { return true }
+func (deadlineExceededError) Temporary() bool { return true }
+
+func awaitDockerTunnelBridgeReady(reader *bufio.Reader, waitCh <-chan error, stderr *previewWriter) error {
+	type result struct {
+		line string
+		err  error
+	}
+	readyCh := make(chan result, 1)
+	go func() {
+		line, err := reader.ReadString('\n')
+		readyCh <- result{line: line, err: err}
+	}()
+	select {
+	case res := <-readyCh:
+		if res.err != nil {
+			detail := strings.TrimSpace(stderr.String())
+			if detail != "" {
+				return fmt.Errorf("sandbox-local tunnel bridge failed: %s", detail)
+			}
+			return fmt.Errorf("timed out opening sandbox-local tunnel bridge")
+		}
+		line := strings.TrimSpace(res.line)
+		if line != dockerTunnelBridgeReady {
+			if line == "" {
+				detail := strings.TrimSpace(stderr.String())
+				if detail != "" {
+					return fmt.Errorf("sandbox-local tunnel bridge failed: %s", detail)
+				}
+				return errors.New("sandbox-local tunnel bridge did not become ready")
+			}
+			return fmt.Errorf("sandbox-local tunnel bridge failed: %s", line)
+		}
+		return nil
+	case err := <-waitCh:
+		detail := strings.TrimSpace(stderr.String())
+		if detail != "" {
+			return fmt.Errorf("sandbox-local tunnel bridge failed: %s", detail)
+		}
+		if err != nil {
+			return fmt.Errorf("sandbox-local tunnel bridge failed: %w", err)
+		}
+		return errors.New("sandbox-local tunnel bridge did not become ready")
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("timed out opening sandbox-local tunnel bridge")
+	}
+}
+
+const dockerSandboxLocalTCPBridgeScript = `
+set -eu
+port="${OR3_TUNNEL_TARGET_PORT:?}"
+if command -v python3 >/dev/null 2>&1; then
+	exec python3 -u -c 'import os, select, socket, sys
+port = int(sys.argv[1])
+sock = socket.create_connection(("127.0.0.1", port))
+os.write(sys.stdout.fileno(), b"__OR3_TUNNEL_BRIDGE_READY__\n")
+while True:
+	readable, _, _ = select.select([sys.stdin.fileno(), sock], [], [])
+	if sys.stdin.fileno() in readable:
+		data = os.read(sys.stdin.fileno(), 8192)
+		if not data:
+			break
+		sock.sendall(data)
+	if sock in readable:
+		data = sock.recv(8192)
+		if not data:
+			break
+		os.write(sys.stdout.fileno(), data)
+' "$port"
+fi
+if command -v python >/dev/null 2>&1; then
+	exec python -u -c 'import os, select, socket, sys
+port = int(sys.argv[1])
+sock = socket.create_connection(("127.0.0.1", port))
+os.write(sys.stdout.fileno(), b"__OR3_TUNNEL_BRIDGE_READY__\n")
+while True:
+	readable, _, _ = select.select([sys.stdin.fileno(), sock], [], [])
+	if sys.stdin.fileno() in readable:
+		data = os.read(sys.stdin.fileno(), 8192)
+		if not data:
+			break
+		sock.sendall(data)
+	if sock in readable:
+		data = sock.recv(8192)
+		if not data:
+			break
+		os.write(sys.stdout.fileno(), data)
+' "$port"
+fi
+if command -v node >/dev/null 2>&1; then
+	exec node -e 'const net = require("net");
+const port = Number(process.argv[1]);
+const socket = net.createConnection({ host: "127.0.0.1", port }, () => {
+	process.stdout.write("__OR3_TUNNEL_BRIDGE_READY__\n");
+});
+process.stdin.on("data", (chunk) => {
+	if (!socket.destroyed) {
+		socket.write(chunk);
+	}
+});
+socket.on("data", (chunk) => {
+	process.stdout.write(chunk);
+});
+const close = () => {
+	if (!socket.destroyed) {
+		socket.end();
+	}
+};
+process.stdin.on("end", close);
+process.stdin.on("close", close);
+socket.on("end", () => process.exit(0));
+socket.on("close", () => process.exit(0));
+socket.on("error", (err) => {
+	process.stderr.write(String(err && err.message ? err.message : err) + "\\n");
+	process.exit(1);
+});
+' "$port"
+fi
+if command -v nc >/dev/null 2>&1; then
+	if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+		printf '__OR3_TUNNEL_BRIDGE_READY__\n'
+		exec nc 127.0.0.1 "$port"
+	fi
+	echo 'sandbox-local tunnel bridge failed to connect' >&2
+	exit 1
+fi
+if command -v busybox >/dev/null 2>&1; then
+	if busybox nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+		printf '__OR3_TUNNEL_BRIDGE_READY__\n'
+		exec busybox nc 127.0.0.1 "$port"
+	fi
+	echo 'sandbox-local tunnel bridge failed to connect' >&2
+	exit 1
+fi
+echo 'no supported tcp bridge helper in sandbox' >&2
+exit 127
+`
 
 type previewWriter struct {
 	target    io.Writer

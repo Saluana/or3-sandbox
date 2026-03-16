@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -134,9 +135,39 @@ func TestCreateUsesAbsoluteHostPathsForBindMounts(t *testing.T) {
 	if !strings.Contains(text, secretsMount) {
 		t.Fatalf("expected absolute secrets mount %q in args %q", secretsMount, text)
 	}
-	for _, expected := range []string{"--user", defaultUser, "--cap-drop", "ALL", "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m", "--security-opt", "no-new-privileges:true"} {
+	for _, expected := range []string{"--user", defaultRuntimeUser(), "--cap-drop", "ALL", "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64m", "--security-opt", "no-new-privileges:true"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("expected hardened docker arg %q in args %q", expected, text)
+		}
+	}
+}
+
+func TestOpenSandboxLocalConnUsesDockerExecPipes(t *testing.T) {
+	fakeDocker, argsLog := newFakeDockerScript(t, "#!/bin/sh\nprintf '%s\n' \"$@\" > \"$DOCKER_ARGS_LOG\"\nif [ \"$1\" = \"exec\" ]; then\n  printf '__OR3_TUNNEL_BRIDGE_READY__\\n'\n  cat\n  exit 0\nfi\nprintf 'container-id\\n'\n")
+	runtime := New(Options{Binary: fakeDocker})
+	conn, err := runtime.OpenSandboxLocalConn(context.Background(), model.Sandbox{ID: "sbx-bridge"}, 8080)
+	if err != nil {
+		t.Fatalf("open sandbox local conn: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("hello")); err != nil {
+		t.Fatalf("write bridged bytes: %v", err)
+	}
+	buf := make([]byte, 5)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read bridged bytes: %v", err)
+	}
+	if string(buf) != "hello" {
+		t.Fatalf("unexpected bridged payload %q", string(buf))
+	}
+	logged, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(logged)
+	for _, expected := range []string{"exec", "-i", "--workdir", "/workspace", "-e", "OR3_TUNNEL_TARGET_PORT=8080", containerName("sbx-bridge")} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("expected docker exec arg %q in args %q", expected, text)
 		}
 	}
 }
@@ -144,7 +175,7 @@ func TestCreateUsesAbsoluteHostPathsForBindMounts(t *testing.T) {
 func TestResolveSecurityOptionsAddsLinuxProfilesAndOverrides(t *testing.T) {
 	runtime := New(Options{
 		HostOS:                  "linux",
-		User:                    defaultUser,
+		User:                    defaultRuntimeUser(),
 		TmpfsSizeMB:             32,
 		SeccompProfile:          "/profiles/seccomp.json",
 		AppArmorProfile:         "or3-sandbox",

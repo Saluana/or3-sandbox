@@ -12,11 +12,11 @@ In this project, the runtime is the engine under the hood.
 
 Operators choose which runtimes to enable using **runtime selections**:
 
-| Runtime selection | Backend | Runtime class | Production eligible |
-| --- | --- | --- | --- |
-| `docker-dev` | `docker` | `trusted-docker` | No – shared-kernel only |
-| `containerd-kata-professional` | `kata` | `vm` | Yes – microVM isolation |
-| `qemu-professional` | `qemu` | `vm` | Yes – full VM isolation |
+| Runtime selection              | Backend  | Runtime class    | Production eligible     |
+| ------------------------------ | -------- | ---------------- | ----------------------- |
+| `docker-dev`                   | `docker` | `trusted-docker` | No – shared-kernel only |
+| `containerd-kata-professional` | `kata`   | `vm`             | Yes – microVM isolation |
+| `qemu-professional`            | `qemu`   | `vm`             | Yes – full VM isolation |
 
 Multiple runtime selections can be enabled simultaneously. The operator sets `SANDBOX_ENABLED_RUNTIMES` and `SANDBOX_DEFAULT_RUNTIME` in the daemon config. Callers can request a specific runtime selection at sandbox creation time.
 
@@ -24,11 +24,11 @@ Multiple runtime selections can be enabled simultaneously. The operator sets `SA
 
 Each backend maps to a **runtime class** that describes its isolation posture:
 
-| Backend | Runtime class | Production eligible |
-| --- | --- | --- |
-| `docker` | `trusted-docker` | No – shared-kernel only |
-| `kata` | `vm` | Yes – microVM-backed isolation |
-| `qemu` | `vm` | Yes – VM-backed isolation |
+| Backend  | Runtime class    | Production eligible            |
+| -------- | ---------------- | ------------------------------ |
+| `docker` | `trusted-docker` | No – shared-kernel only        |
+| `kata`   | `vm`             | Yes – microVM-backed isolation |
+| `qemu`   | `vm`             | Yes – VM-backed isolation      |
 
 The runtime class is used by policy decisions throughout the system. Setting `SANDBOX_MODE=production` fails closed: it rejects any backend whose runtime class is not `vm`.
 
@@ -40,10 +40,10 @@ The current runtime info including enabled selections is visible through `GET /v
 
 ```json
 {
-  "backend": "kata",
-  "class": "vm",
-  "default_runtime_selection": "containerd-kata-professional",
-  "enabled_runtime_selections": ["docker-dev", "containerd-kata-professional"]
+    "backend": "kata",
+    "class": "vm",
+    "default_runtime_selection": "containerd-kata-professional",
+    "enabled_runtime_selections": ["docker-dev", "containerd-kata-professional"]
 }
 ```
 
@@ -53,11 +53,11 @@ For the recommended production posture, use `SANDBOX_DEPLOYMENT_PROFILE=producti
 
 ## Quick comparison
 
-| Runtime | Best for | Runtime class | Main control method |
-| --- | --- | --- | --- |
-| `docker` | local development and trusted setups | `trusted-docker` | Docker CLI |
-| `kata` | professional hosted sandboxes | `vm` | containerd ctr CLI |
-| `qemu` | production isolation and security-sensitive workloads | `vm` | QEMU + guest agent |
+| Runtime  | Best for                                              | Runtime class    | Main control method |
+| -------- | ----------------------------------------------------- | ---------------- | ------------------- |
+| `docker` | local development and trusted setups                  | `trusted-docker` | Docker CLI          |
+| `kata`   | professional hosted sandboxes                         | `vm`             | containerd ctr CLI  |
+| `qemu`   | production isolation and security-sensitive workloads | `vm`             | QEMU + guest agent  |
 
 ## Docker runtime
 
@@ -81,7 +81,7 @@ It currently supports:
 
 Its default trusted posture now aims for least privilege:
 
-- explicit non-root execution via `SANDBOX_DOCKER_USER` (default `10001:10001`)
+- explicit non-root execution via `SANDBOX_DOCKER_USER` (default: the daemon's current numeric `uid:gid`, overrideable when operators need a fixed identity)
 - `--cap-drop=ALL`
 - `--security-opt no-new-privileges:true`
 - read-only root filesystem

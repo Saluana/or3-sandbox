@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	goruntime "runtime"
 	"strconv"
@@ -157,7 +158,7 @@ func Load(args []string) (Config, error) {
 	fs.IntVar(&snapshotMaxMB, "snapshot-max-mb", snapshotMaxMB, "maximum extracted snapshot bundle size in megabytes")
 	fs.IntVar(&cfg.SnapshotMaxFiles, "snapshot-max-files", envInt("SANDBOX_SNAPSHOT_MAX_FILES", 8192), "maximum files allowed in a restored snapshot archive")
 	fs.IntVar(&cfg.SnapshotMaxExpansionRatio, "snapshot-max-expansion-ratio", envInt("SANDBOX_SNAPSHOT_MAX_EXPANSION_RATIO", 32), "maximum extracted-to-compressed ratio allowed for snapshot restore archives")
-	fs.StringVar(&cfg.DockerUser, "docker-user", env("SANDBOX_DOCKER_USER", "10001:10001"), "docker user or uid:gid for trusted-docker sandboxes")
+	fs.StringVar(&cfg.DockerUser, "docker-user", env("SANDBOX_DOCKER_USER", defaultDockerUser()), "docker user or uid:gid for trusted-docker sandboxes")
 	fs.IntVar(&cfg.DockerTmpfsSizeMB, "docker-tmpfs-mb", envInt("SANDBOX_DOCKER_TMPFS_MB", 64), "docker tmpfs size for /tmp in megabytes")
 	fs.StringVar(&cfg.DockerSeccompProfile, "docker-seccomp-profile", env("SANDBOX_DOCKER_SECCOMP_PROFILE", ""), "optional docker seccomp profile path")
 	fs.StringVar(&cfg.DockerAppArmorProfile, "docker-apparmor-profile", env("SANDBOX_DOCKER_APPARMOR_PROFILE", ""), "optional docker AppArmor profile name")
@@ -1054,7 +1055,20 @@ func parseCommaSeparated(raw string) []string {
 }
 
 func defaultDockerUser() string {
-	return "10001:10001"
+	current, err := user.Current()
+	if err != nil {
+		return "10001:10001"
+	}
+	if current.Uid == "" || current.Gid == "" {
+		return "10001:10001"
+	}
+	if _, err := strconv.Atoi(current.Uid); err != nil {
+		return "10001:10001"
+	}
+	if _, err := strconv.Atoi(current.Gid); err != nil {
+		return "10001:10001"
+	}
+	return current.Uid + ":" + current.Gid
 }
 
 func defaultDockerTmpfsSizeMB() int {

@@ -158,3 +158,26 @@ func TestShippedDockerExamplesUseExplicitProfiles(t *testing.T) {
 		}
 	}
 }
+
+func TestShippedQEMUExamplesUseValidProfiles(t *testing.T) {
+	examplesDir := filepath.Clean(filepath.Join("..", "..", "examples"))
+	for _, testCase := range []struct {
+		name    string
+		profile model.GuestProfile
+	}{
+		{name: "qemu-bootstrap", profile: model.GuestProfileCore},
+		{name: "qemu-browser-artifact", profile: model.GuestProfileBrowser},
+		{name: "qemu-service", profile: model.GuestProfileRuntime},
+	} {
+		manifest, err := LoadManifest(filepath.Join(examplesDir, testCase.name, ManifestFileName))
+		if err != nil {
+			t.Fatalf("load %s manifest: %v", testCase.name, err)
+		}
+		if model.GuestProfile(manifest.Runtime.Profile) != testCase.profile {
+			t.Fatalf("expected %s profile %q, got %q", testCase.name, testCase.profile, manifest.Runtime.Profile)
+		}
+		if !manifest.AllowsRuntime("qemu") {
+			t.Fatalf("expected %s manifest to allow qemu runtime", testCase.name)
+		}
+	}
+}

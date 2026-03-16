@@ -2,7 +2,7 @@ name: qemu-service
 description: Start a guest-hosted HTTP service and expose it through the shared tunnel flow.
 runtime:
   allowed: [qemu]
-  profile: python-service-guest
+  profile: runtime
 sandbox:
   image: ${QEMU_GUEST_IMAGE}
   cpu: "1"

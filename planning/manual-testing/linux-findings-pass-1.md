@@ -62,8 +62,8 @@ Snapshot IDs:
 - `qemu-system-x86_64`, `qemu-img`, `cloud-localds`, and `/dev/kvm` are present.
 - `sandboxctl doctor --production-qemu` produced believable host-level output.
 - The guest-image build path had two builder bugs fixed in pass 1:
-  - oversized environment payload when passing the guest-agent binary through the environment
-  - invalid YAML rendering from unindented multiline cloud-init substitutions
+    - oversized environment payload when passing the guest-agent binary through the environment
+    - invalid YAML rendering from unindented multiline cloud-init substitutions
 - Even after those fixes, the guest-image build still did not complete a valid prepared image with sidecar artifacts, so QEMU remains blocked on the in-guest readiness path.
 
 ## Files Changed During Pass 1
