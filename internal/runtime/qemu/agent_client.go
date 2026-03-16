@@ -27,6 +27,8 @@ type guestHandshake struct {
 
 var agentRequestCounter atomic.Uint64
 
+const defaultAgentRoundTripTimeout = 5 * time.Second
+
 func (r *Runtime) agentHandshake(ctx context.Context, layout sandboxLayout) (guestHandshake, error) {
 	var result agentproto.HelloResult
 	if err := r.agentRoundTrip(ctx, layout.agentSocketPath, agentproto.OpHello, nil, &result); err != nil {
@@ -297,6 +299,9 @@ func (r *Runtime) agentRoundTrip(ctx context.Context, socketPath string, op stri
 		return err
 	}
 	defer conn.Close()
+	if err := applyAgentConnDeadline(conn, ctx, defaultAgentRoundTripTimeout); err != nil {
+		return err
+	}
 	var payload json.RawMessage
 	if request != nil {
 		encoded, err := json.Marshal(request)
@@ -328,6 +333,14 @@ func (r *Runtime) agentRoundTrip(ctx context.Context, socketPath string, op stri
 		}
 	}
 	return nil
+}
+
+func applyAgentConnDeadline(conn net.Conn, ctx context.Context, fallback time.Duration) error {
+	deadline := time.Now().Add(fallback)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	return conn.SetDeadline(deadline)
 }
 
 func nextAgentRequestID() string {

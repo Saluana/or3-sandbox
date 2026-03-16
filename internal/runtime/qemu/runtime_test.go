@@ -278,6 +278,24 @@ func TestAgentRoundTripRejectsOversizeResponse(t *testing.T) {
 	}
 }
 
+func TestAgentReadyHonorsContextDeadline(t *testing.T) {
+	socketPath := startTestAgentSocket(t, func(conn net.Conn) {
+		defer conn.Close()
+		_, _ = agentproto.ReadMessage(conn)
+		time.Sleep(200 * time.Millisecond)
+	})
+	r := &Runtime{}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := r.agentReady(ctx, sandboxLayout{agentSocketPath: socketPath})
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "i/o timeout") {
+		t.Fatalf("expected context deadline or i/o timeout, got %v", err)
+	}
+}
+
 func TestAgentWriteWorkspaceFileBytesChunksLargeFiles(t *testing.T) {
 	content := []byte(strings.Repeat("abcdef", agentproto.MaxFileChunkSize/6+5))
 	expectedChunks := (len(content) + agentproto.MaxFileChunkSize - 1) / agentproto.MaxFileChunkSize

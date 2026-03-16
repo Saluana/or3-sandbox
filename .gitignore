@@ -6,3 +6,7 @@ data
 sandbox.db
 .gocache
 images/guest/.cache
+images/guest/or3-guest-core.qcow2
+images/guest/or3-guest-core.qcow2.packages.txt
+images/guest/or3-guest-core.qcow2.or3.json
+images/guest/or3-guest-core.qcow2.profile.json

@@ -7,6 +7,10 @@ CLOUD_INIT_DIR="$ROOT_DIR/cloud-init"
 SYSTEMD_DIR="$ROOT_DIR/systemd"
 PROFILES_DIR="$ROOT_DIR/profiles"
 
+log_step() {
+  printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"
+}
+
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "missing required command: $1" >&2
@@ -55,6 +59,8 @@ if [ -z "$GUEST_AGENT_GOARCH" ]; then
 		*) GUEST_AGENT_GOARCH="amd64" ;;
 	esac
 fi
+
+log_step "Resolving guest profile: $PROFILE_MANIFEST"
 
 python3 - "$PROFILE_MANIFEST" > "$WORK_DIR/profile.json" <<'PY'
 import json
@@ -128,12 +134,14 @@ cp "$SYSTEMD_DIR/or3-bootstrap.sh" "$WORK_DIR/or3-bootstrap.sh"
 cp "$SYSTEMD_DIR/or3-bootstrap.service" "$WORK_DIR/or3-bootstrap.service"
 cp "$SYSTEMD_DIR/or3-guest-agent.service" "$WORK_DIR/or3-guest-agent.service"
 
+log_step "Building guest agent binary for linux/$GUEST_AGENT_GOARCH"
 (
 	cd "$REPO_ROOT"
 	CGO_ENABLED=0 GOOS=linux GOARCH="$GUEST_AGENT_GOARCH" go build -o "$WORK_DIR/or3-guest-agent" ./cmd/or3-guest-agent
 )
 base64 < "$WORK_DIR/or3-guest-agent" | tr -d '\n' > "$WORK_DIR/or3-guest-agent.b64"
 
+log_step "Rendering cloud-init user-data"
 AGENT_USER="$AGENT_USER" \
 BOOTSTRAP_SCRIPT_FILE="$WORK_DIR/or3-bootstrap.sh" \
 BOOTSTRAP_SERVICE_FILE="$WORK_DIR/or3-bootstrap.service" \
@@ -195,8 +203,11 @@ sys.stdout.write(template)
 PY
 
 if [ ! -f "$DOWNLOAD_PATH" ]; then
+  log_step "Downloading Ubuntu base image to $DOWNLOAD_PATH"
   require_cmd curl
   curl -L "$BASE_IMAGE_URL" -o "$DOWNLOAD_PATH"
+else
+  log_step "Using cached Ubuntu base image: $DOWNLOAD_PATH"
 fi
 
 python3 - "$DOWNLOAD_PATH" <<'PY' > "$WORK_DIR/base-image.sha256"
@@ -216,12 +227,14 @@ fi
 
 cp "$DOWNLOAD_PATH" "$WORK_DIR/base.qcow2"
 
+log_step "Preparing cloud-init seed image"
 sed \
   -e "s/__INSTANCE_ID__/or3-build/g" \
   -e "s/__HOSTNAME__/or3-build/g" \
   "$CLOUD_INIT_DIR/meta-data.tpl" > "$WORK_DIR/meta-data"
 
 cloud-localds "$WORK_DIR/seed.img" "$WORK_DIR/user-data" "$WORK_DIR/meta-data"
+log_step "Creating guest root and workspace disks"
 "$QEMU_IMG_BINARY" create -f qcow2 -F qcow2 -b "$WORK_DIR/base.qcow2" "$OUTPUT_IMAGE" 20G >/dev/null
 "$QEMU_IMG_BINARY" create -f raw "$WORK_DIR/workspace.img" 10G >/dev/null
 
@@ -230,6 +243,7 @@ if [[ "$QEMU_BINARY" == *aarch64* ]]; then
   net_device="virtio-net-device"
 fi
 
+log_step "Booting guest under QEMU"
 "$QEMU_BINARY" \
   -daemonize \
   -pidfile "$WORK_DIR/qemu.pid" \
@@ -268,6 +282,7 @@ if payload and payload != "null":
     message["result"] = json.loads(payload)
 raw = json.dumps(message).encode("utf-8")
 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+    conn.settimeout(5)
     conn.connect(sock_path)
     conn.sendall(struct.pack(">I", len(raw)) + raw)
     header = conn.recv(4)
@@ -295,6 +310,54 @@ agent_exec_stdout() {
   local result_json
   result_json="$(agent_rpc exec "$command_json")"
   printf '%s' "$result_json" | jq -r '.stdout_preview // ""' | tr -d '\r'
+}
+
+wait_for_agent_ready() {
+  OR3_AGENT_SOCKET_PATH="$WORK_DIR/agent.sock" python3 - <<'PY'
+import json
+import os
+import socket
+import struct
+import sys
+import time
+
+sock_path = os.environ["OR3_AGENT_SOCKET_PATH"]
+deadline = time.time() + (120 * 2)
+attempt = 0
+
+while time.time() < deadline:
+    attempt += 1
+    try:
+        print(f"[{time.strftime('%H:%M:%S', time.gmtime())}] Waiting for guest readiness: attempt {attempt}/120", file=sys.stderr)
+        request = {"op": "ready", "id": f"build-{time.time_ns()}"}
+        raw = json.dumps(request).encode("utf-8")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(5)
+            conn.connect(sock_path)
+            conn.sendall(struct.pack(">I", len(raw)) + raw)
+            header = conn.recv(4)
+            if len(header) != 4:
+                raise RuntimeError("short guest-agent header")
+            length = struct.unpack(">I", header)[0]
+            data = b""
+            while len(data) < length:
+                chunk = conn.recv(length - len(data))
+                if not chunk:
+                    raise RuntimeError("short guest-agent body")
+                data += chunk
+        reply = json.loads(data.decode("utf-8"))
+        if reply.get("ok"):
+            result = reply.get("result") or {}
+            if result.get("ready") is True:
+                print(f"[{time.strftime('%H:%M:%S', time.gmtime())}] Guest agent reported ready", file=sys.stderr)
+                sys.exit(0)
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+        pass
+    time.sleep(2)
+
+print(f"[{time.strftime('%H:%M:%S', time.gmtime())}] Guest agent did not report ready before timeout", file=sys.stderr)
+sys.exit(1)
+PY
 }
 
 verify_profile_artifacts() {
@@ -343,18 +406,7 @@ PY
   fi
 }
 
-ready=0
-for _ in $(seq 1 120); do
-	if ready_json="$(agent_rpc ready '{}' 2>/dev/null)"; then
-		if [ "$(printf '%s' "$ready_json" | jq -r '.ready // false')" = "true" ]; then
-			ready=1
-			break
-		fi
-	fi
-	sleep 2
-done
-
-if [ "$ready" != "1" ]; then
+if ! wait_for_agent_ready; then
   echo "guest image bootstrap did not reach readiness" >&2
   if [ -f "$WORK_DIR/serial.log" ]; then
     tail -n 50 "$WORK_DIR/serial.log" >&2 || true
@@ -362,6 +414,7 @@ if [ "$ready" != "1" ]; then
   exit 1
 fi
 
+log_step "Verifying guest profile contents and package inventory"
 verify_profile_artifacts
 
 python3 - "$WORK_DIR/profile.json" <<'PY' > "$WORK_DIR/profile.sha256"
@@ -387,6 +440,7 @@ PY
 package_inventory_sha="$(tr -d '\n' < "$WORK_DIR/package-inventory.sha256")"
 
 if [ "$ssh_present" = "true" ]; then
+  log_step "Capturing guest SSH host public key"
 	host_key_json="$(agent_rpc exec "$(jq -cn '{command:["sh","-lc","cat /etc/ssh/ssh_host_ed25519_key.pub"],cwd:"/"}')")"
 	printf '%s\n' "$(printf '%s' "$host_key_json" | jq -r '.stdout_preview' | tr -d '\r')" > "$SSH_HOST_PUBLIC_KEY_OUTPUT"
 	if [ ! -s "$SSH_HOST_PUBLIC_KEY_OUTPUT" ]; then
@@ -395,6 +449,7 @@ if [ "$ssh_present" = "true" ]; then
 	fi
 fi
 
+log_step "Shutting down guest"
 agent_rpc shutdown '{"reboot":false}' >/dev/null 2>&1 || true
 if [ -f "$WORK_DIR/qemu.pid" ]; then
 	pid="$(cat "$WORK_DIR/qemu.pid")"
@@ -410,6 +465,10 @@ if [ -f "$WORK_DIR/qemu.pid" ]; then
 	fi
 fi
 
+log_step "Flattening final qcow2 image"
+"$QEMU_IMG_BINARY" rebase -f qcow2 -b "" "$OUTPUT_IMAGE" >/dev/null
+
+log_step "Computing checksums and writing image contract"
 python3 - "$OUTPUT_IMAGE" <<'PY' > "$WORK_DIR/image.sha256"
 import hashlib
 import pathlib
