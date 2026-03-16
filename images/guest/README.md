@@ -14,20 +14,20 @@ The production-default control path is the guest agent over virtio-serial. SSH i
 The supported profiles live under `images/guest/profiles/`:
 
 - `core`
-  - minimal production profile
-  - agent-based control
-  - no SSH
-  - no inner Docker
+    - minimal production profile
+    - agent-based control
+    - no SSH
+    - no inner Docker
 - `runtime`
-  - `core` plus Git, Python, and Node tooling
+    - `core` plus Git, Python, and Node tooling
 - `browser`
-  - `runtime` plus browser-supporting system libraries
+    - `runtime` plus browser-supporting system libraries
 - `container`
-  - `core` plus inner Docker service and `docker` group membership
+    - `core` plus inner Docker service and `docker` group membership
 - `debug`
-  - compatibility and troubleshooting profile
-  - keeps SSH and elevated conveniences
-  - marked dangerous and production-ineligible by default policy unless explicitly allowed
+    - compatibility and troubleshooting profile
+    - keeps SSH and elevated conveniences
+    - marked dangerous and production-ineligible by default policy unless explicitly allowed
 
 `core` is the default profile and the intended production baseline.
 
@@ -83,29 +83,30 @@ Notably:
 Operator-visible storage behavior:
 
 - `disk_limit_mb` is split 50/50 between the writable guest system disk and the persistent workspace disk
+- the writable guest system disk is never allowed to be smaller than the guest image virtual size, even when `disk_limit_mb / 2` is smaller than the built image floor
 - guest-local Docker data stays on the writable system disk, so it counts against the sandbox disk budget instead of using separate host-side storage
 
 ## Files
 
 - `build-base-image.sh`
-  - builds a profile-resolved qcow2 guest image from a cloud image
-  - injects `cmd/or3-guest-agent`
-  - boots the image once and verifies the selected profile against the guest via the guest agent
-  - emits a resolved manifest, versioned package inventory, and `*.or3.json` sidecar contract
+    - builds a profile-resolved qcow2 guest image from a cloud image
+    - injects `cmd/or3-guest-agent`
+    - boots the image once and verifies the selected profile against the guest via the guest agent
+    - emits a resolved manifest, versioned package inventory, and `*.or3.json` sidecar contract
 - `smoke-ssh.sh`
-  - boots an SSH-bearing compatibility/debug image and verifies SSH reachability plus the readiness marker
+    - boots an SSH-bearing compatibility/debug image and verifies SSH reachability plus the readiness marker
 - `cloud-init/user-data.tpl`
-  - cloud-init template used for profile-aware first boot preparation
+    - cloud-init template used for profile-aware first boot preparation
 - `cloud-init/meta-data.tpl`
-  - cloud-init metadata template
+    - cloud-init metadata template
 - `profiles/*.json`
-  - fixed supported guest profile manifests
+    - fixed supported guest profile manifests
 - `systemd/or3-bootstrap.sh`
-  - guest-side bootstrap script that formats or mounts the workspace disk and writes the readiness marker
+    - guest-side bootstrap script that formats or mounts the workspace disk and writes the readiness marker
 - `systemd/or3-bootstrap.service`
-  - systemd unit that runs the bootstrap script at boot
+    - systemd unit that runs the bootstrap script at boot
 - `systemd/or3-guest-agent.service`
-  - systemd unit that keeps the guest agent running
+    - systemd unit that keeps the guest agent running
 
 ## Lightweight init and supervision choice
 

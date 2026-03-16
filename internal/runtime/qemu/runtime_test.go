@@ -672,6 +672,67 @@ func TestCreateAndSnapshotArtifacts(t *testing.T) {
 	}
 }
 
+func TestCreateUsesBaseImageVirtualSizeForRootDisk(t *testing.T) {
+	base := t.TempDir()
+	imagePath := writeTestQEMUBaseImage(t)
+	const baseVirtualSize = 20 * 1024 * 1024 * 1024
+	var calls [][]string
+	r := &Runtime{
+		qemuImgBinary: "qemu-img",
+		runCommand: func(ctx context.Context, binary string, args ...string) ([]byte, error) {
+			calls = append(calls, append([]string{binary}, args...))
+			switch {
+			case len(args) == 3 && args[0] == "info" && args[1] == "--output=json" && args[2] == imagePath:
+				return []byte(fmt.Sprintf(`{"virtual-size":%d}`, baseVirtualSize)), nil
+			case len(args) >= 2 && args[0] == "create":
+				outputPath := args[len(args)-2]
+				if err := os.WriteFile(outputPath, nil, 0o644); err != nil {
+					return nil, err
+				}
+				return nil, nil
+			default:
+				return nil, fmt.Errorf("unexpected command %s %v", binary, args)
+			}
+		},
+	}
+	state, err := r.Create(context.Background(), model.SandboxSpec{
+		SandboxID:     "sbx-root-floor",
+		BaseImageRef:  imagePath,
+		StorageRoot:   filepath.Join(base, "rootfs"),
+		WorkspaceRoot: filepath.Join(base, "workspace"),
+		CacheRoot:     filepath.Join(base, "cache"),
+		DiskLimitMB:   10240,
+	})
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	if state.Status != model.SandboxStatusStopped {
+		t.Fatalf("unexpected create status: %s", state.Status)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("expected qemu-img info and two create calls, got %#v", calls)
+	}
+	rootCreate := calls[1]
+	if got := rootCreate[len(rootCreate)-1]; got != qemuSize(baseVirtualSize) {
+		t.Fatalf("expected root disk size %s, got %s in %#v", qemuSize(baseVirtualSize), got, rootCreate)
+	}
+	workspaceCreate := calls[2]
+	if got, want := workspaceCreate[len(workspaceCreate)-1], qemuSize(5*1024*1024*1024); got != want {
+		t.Fatalf("expected workspace disk size %s, got %s in %#v", want, got, workspaceCreate)
+	}
+	layout := layoutForSpec(model.SandboxSpec{
+		SandboxID:     "sbx-root-floor",
+		StorageRoot:   filepath.Join(base, "rootfs"),
+		WorkspaceRoot: filepath.Join(base, "workspace"),
+		CacheRoot:     filepath.Join(base, "cache"),
+	})
+	for _, path := range []string{layout.rootDiskPath, layout.workspaceDiskPath, layout.serialLogPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected artifact %s: %v", path, err)
+		}
+	}
+}
+
 func TestInspectReportsBootingWhenGuestIsAliveButNotReadyWithinBootWindow(t *testing.T) {
 	cmd := exec.Command("sleep", "30")
 	if err := cmd.Start(); err != nil {
@@ -993,7 +1054,7 @@ func TestBaseSSHArgsIncludeTTYAndIdentityOptions(t *testing.T) {
 }
 
 func TestSplitDiskBytesUsesEvenFirstPassPolicy(t *testing.T) {
-	rootfsBytes, workspaceBytes := splitDiskBytes(513)
+	rootfsBytes, workspaceBytes := splitDiskBytes(513, 0)
 	totalBytes := int64(513) * 1024 * 1024
 	if rootfsBytes+workspaceBytes != totalBytes {
 		t.Fatalf("unexpected total bytes: got %d want %d", rootfsBytes+workspaceBytes, totalBytes)
@@ -1004,6 +1065,17 @@ func TestSplitDiskBytesUsesEvenFirstPassPolicy(t *testing.T) {
 	}
 	if delta > 1024*1024 {
 		t.Fatalf("expected near-even split, delta=%d", delta)
+	}
+}
+
+func TestSplitDiskBytesFloorsRootToBaseImageSize(t *testing.T) {
+	minimumRoot := int64(20) * 1024 * 1024 * 1024
+	rootfsBytes, workspaceBytes := splitDiskBytes(10240, minimumRoot)
+	if rootfsBytes != minimumRoot {
+		t.Fatalf("expected rootfs bytes %d, got %d", minimumRoot, rootfsBytes)
+	}
+	if workspaceBytes != int64(5)*1024*1024*1024 {
+		t.Fatalf("expected workspace bytes %d, got %d", int64(5)*1024*1024*1024, workspaceBytes)
 	}
 }
 

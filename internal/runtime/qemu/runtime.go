@@ -2,6 +2,7 @@ package qemu
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -27,7 +28,7 @@ const (
 	defaultAgentTransport = "virtio-serial"
 	sshCompatTransport    = "ssh-port-forward"
 	readyMarkerPath       = "/var/lib/or3/bootstrap.ready"
-	readyProbeTimeout     = 2 * time.Second
+	readyProbeTimeout     = 10 * time.Second
 	defaultPollInterval   = 500 * time.Millisecond
 	qemuRuntimePrefix     = "qemu-"
 	sshPortBase           = 22000
@@ -183,7 +184,11 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 	if err != nil {
 		return model.RuntimeState{}, err
 	}
-	rootBytes, workspaceBytes := splitDiskBytes(spec.DiskLimitMB)
+	baseVirtualSizeBytes, err := r.baseImageVirtualSizeBytes(ctx, baseImagePath)
+	if err != nil {
+		return model.RuntimeState{}, err
+	}
+	rootBytes, workspaceBytes := splitDiskBytes(spec.DiskLimitMB, baseVirtualSizeBytes)
 	if err := r.createRootDisk(ctx, baseImagePath, layout.rootDiskPath, rootBytes); err != nil {
 		return model.RuntimeState{}, err
 	}
@@ -451,6 +456,28 @@ func (r *Runtime) createWorkspaceDisk(ctx context.Context, outputPath string, si
 		qemuSize(sizeBytes),
 	)
 	return err
+}
+
+type qemuImageInfo struct {
+	VirtualSize int64 `json:"virtual-size"`
+}
+
+func (r *Runtime) baseImageVirtualSizeBytes(ctx context.Context, imagePath string) (int64, error) {
+	if strings.TrimSpace(imagePath) == "" || strings.TrimSpace(r.qemuImgBinary) == "" || r.runCommand == nil {
+		return 0, nil
+	}
+	output, err := r.runCommand(ctx, r.qemuImgBinary, "info", "--output=json", imagePath)
+	if err != nil {
+		return 0, fmt.Errorf("inspect qemu base image %q: %w", imagePath, err)
+	}
+	var info qemuImageInfo
+	if err := json.Unmarshal(output, &info); err != nil {
+		return 0, fmt.Errorf("parse qemu image info for %q: %w", imagePath, err)
+	}
+	if info.VirtualSize <= 0 {
+		return 0, fmt.Errorf("qemu image %q reported non-positive virtual size %d", imagePath, info.VirtualSize)
+	}
+	return info.VirtualSize, nil
 }
 
 func (r *Runtime) startArgs(sandbox model.Sandbox, layout sandboxLayout, sshPort int) []string {
@@ -970,15 +997,20 @@ func ensureLayout(layout sandboxLayout) error {
 	return nil
 }
 
-func splitDiskBytes(totalMB int) (int64, int64) {
+func splitDiskBytes(totalMB int, minimumRootBytes int64) (int64, int64) {
 	totalBytes := int64(totalMB) * 1024 * 1024
 	if totalBytes <= 0 {
 		return 0, 0
 	}
 	// Keep the operator model simple in the first pass: split requested disk
 	// budget evenly between the writable system layer and persistent workspace.
+	// Never size the writable system disk smaller than the guest image it layers
+	// on top of, or the guest will fail to find its root filesystem at boot.
 	root := totalBytes / 2
 	workspace := totalBytes - root
+	if minimumRootBytes > root {
+		root = minimumRootBytes
+	}
 	return root, workspace
 }
 

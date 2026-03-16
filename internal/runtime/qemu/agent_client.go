@@ -27,7 +27,7 @@ type guestHandshake struct {
 
 var agentRequestCounter atomic.Uint64
 
-const defaultAgentRoundTripTimeout = 5 * time.Second
+const defaultAgentRoundTripTimeout = 30 * time.Second
 
 func (r *Runtime) agentHandshake(ctx context.Context, layout sandboxLayout) (guestHandshake, error) {
 	var result agentproto.HelloResult

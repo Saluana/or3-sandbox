@@ -102,6 +102,7 @@ go run ./cmd/sandboxctl create --start
 The daemon will:
 
 - create sandbox disk files
+- keep the writable system disk at least as large as the selected guest image, even if the requested disk budget is smaller than that image floor
 - boot the guest
 - wait for the guest agent on agent-first images, or SSH only in explicit `ssh-compat` mode
 - wait for readiness
