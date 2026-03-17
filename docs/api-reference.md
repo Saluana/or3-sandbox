@@ -20,9 +20,9 @@ All non-streaming `4xx` and `5xx` API responses use the same JSON envelope:
 
 ```json
 {
-  "error": "not found",
-  "code": "not_found",
-  "status": 404
+    "error": "not found",
+    "code": "not_found",
+    "status": 404
 }
 ```
 
@@ -59,24 +59,24 @@ Example response:
 
 ```json
 {
-  "backend": "qemu",
-  "class": "vm",
-  "default_runtime_selection": "qemu-professional",
-  "enabled_runtime_selections": ["qemu-professional"],
-  "guest_image": {
-    "path": "/var/lib/or3/images/or3-guest-core.qcow2",
-    "sidecar_path": "/var/lib/or3/images/or3-guest-core.qcow2.or3.json",
-    "contract_version": "v1",
-    "build_version": "2025.03.17",
-    "git_sha": "abc1234",
-    "image_sha256": "...",
-    "profile": "core",
-    "capabilities": ["exec", "files", "pty"],
-    "allowed_features": ["exec", "files", "pty"],
-    "control_mode": "agent",
-    "control_protocol_version": "1",
-    "workspace_contract_version": "1"
-  }
+    "backend": "qemu",
+    "class": "vm",
+    "default_runtime_selection": "qemu-professional",
+    "enabled_runtime_selections": ["qemu-professional"],
+    "guest_image": {
+        "path": "/var/lib/or3/images/or3-guest-core.qcow2",
+        "sidecar_path": "/var/lib/or3/images/or3-guest-core.qcow2.or3.json",
+        "contract_version": "v1",
+        "build_version": "2025.03.17",
+        "git_sha": "abc1234",
+        "image_sha256": "...",
+        "profile": "core",
+        "capabilities": ["exec", "files", "pty"],
+        "allowed_features": ["exec", "files", "pty"],
+        "control_mode": "agent",
+        "control_protocol_version": "1",
+        "workspace_contract_version": "1"
+    }
 }
 ```
 
@@ -92,34 +92,34 @@ Example response:
 
 ```json
 {
-  "backend": "docker",
-  "healthy": true,
-  "checked_at": "2025-01-01T00:00:00Z",
-  "runtime_selection_counts": { "docker-dev": 1 },
-  "status_counts": { "running": 1 },
-  "agent_sessions": {
-    "sessions_opened": 3,
-    "sessions_reused": 12,
-    "sessions_invalidated": 0,
-    "sessions_closed": 2,
-    "buffered_exec_events": 1,
-    "buffered_file_events": 1,
-    "dropped_exec_events": 0,
-    "dropped_file_events": 0
-  },
-  "sandboxes": [
-    {
-      "sandbox_id": "sbx-123",
-      "tenant_id": "tenant-a",
-      "runtime_selection": "docker-dev",
-      "persisted_status": "running",
-      "observed_status": "running",
-      "runtime_id": "sbx-123",
-      "runtime_status": "running",
-      "pid": 1234,
-      "ip_address": "172.18.0.2"
-    }
-  ]
+    "backend": "docker",
+    "healthy": true,
+    "checked_at": "2025-01-01T00:00:00Z",
+    "runtime_selection_counts": { "docker-dev": 1 },
+    "status_counts": { "running": 1 },
+    "agent_sessions": {
+        "sessions_opened": 3,
+        "sessions_reused": 12,
+        "sessions_invalidated": 0,
+        "sessions_closed": 2,
+        "buffered_exec_events": 1,
+        "buffered_file_events": 1,
+        "dropped_exec_events": 0,
+        "dropped_file_events": 0
+    },
+    "sandboxes": [
+        {
+            "sandbox_id": "sbx-123",
+            "tenant_id": "tenant-a",
+            "runtime_selection": "docker-dev",
+            "persisted_status": "running",
+            "observed_status": "running",
+            "runtime_id": "sbx-123",
+            "runtime_status": "running",
+            "pid": 1234,
+            "ip_address": "172.18.0.2"
+        }
+    ]
 }
 ```
 
@@ -154,14 +154,14 @@ Example request:
 
 ```json
 {
-  "base_image_ref": "alpine:3.20",
-  "cpu_limit": 1,
-  "memory_limit_mb": 512,
-  "pids_limit": 128,
-  "disk_limit_mb": 2048,
-  "network_mode": "internet-enabled",
-  "allow_tunnels": true,
-  "start": true
+    "base_image_ref": "alpine:3.20",
+    "cpu_limit": 1,
+    "memory_limit_mb": 512,
+    "pids_limit": 128,
+    "disk_limit_mb": 2048,
+    "network_mode": "internet-enabled",
+    "allow_tunnels": true,
+    "start": true
 }
 ```
 
@@ -169,24 +169,24 @@ Example response:
 
 ```json
 {
-  "id": "sbx-123",
-  "tenant_id": "tenant-a",
-  "status": "running",
-  "runtime_selection": "docker-dev",
-  "runtime_backend": "docker",
-  "runtime_class": "trusted-docker",
-  "base_image_ref": "alpine:3.20",
-  "cpu_limit": 1,
-  "memory_limit_mb": 512,
-  "pids_limit": 128,
-  "disk_limit_mb": 2048,
-  "network_mode": "internet-enabled",
-  "allow_tunnels": true,
-  "runtime_id": "sbx-123",
-  "runtime_status": "running",
-  "created_at": "2025-01-01T00:00:00Z",
-  "updated_at": "2025-01-01T00:00:00Z",
-  "last_active_at": "2025-01-01T00:00:00Z"
+    "id": "sbx-123",
+    "tenant_id": "tenant-a",
+    "status": "running",
+    "runtime_selection": "docker-dev",
+    "runtime_backend": "docker",
+    "runtime_class": "trusted-docker",
+    "base_image_ref": "alpine:3.20",
+    "cpu_limit": 1,
+    "memory_limit_mb": 512,
+    "pids_limit": 128,
+    "disk_limit_mb": 2048,
+    "network_mode": "internet-enabled",
+    "allow_tunnels": true,
+    "runtime_id": "sbx-123",
+    "runtime_status": "running",
+    "created_at": "2025-01-01T00:00:00Z",
+    "updated_at": "2025-01-01T00:00:00Z",
+    "last_active_at": "2025-01-01T00:00:00Z"
 }
 ```
 
@@ -241,10 +241,10 @@ Example request:
 
 ```json
 {
-  "command": ["sh", "-lc", "echo hello"],
-  "cwd": "/workspace",
-  "timeout": 30000000000,
-  "detached": false
+    "command": ["sh", "-lc", "echo hello"],
+    "cwd": "/workspace",
+    "timeout": 30000000000,
+    "detached": false
 }
 ```
 
@@ -257,20 +257,20 @@ Example response:
 
 ```json
 {
-  "id": "exec-123",
-  "sandbox_id": "sbx-123",
-  "tenant_id": "tenant-a",
-  "command": "sh -lc echo hello",
-  "cwd": "/workspace",
-  "timeout_seconds": 30,
-  "status": "succeeded",
-  "exit_code": 0,
-  "stdout_preview": "hello\n",
-  "stderr_truncated": false,
-  "stdout_truncated": false,
-  "started_at": "2025-01-01T00:00:00Z",
-  "completed_at": "2025-01-01T00:00:01Z",
-  "duration_ms": 1000
+    "id": "exec-123",
+    "sandbox_id": "sbx-123",
+    "tenant_id": "tenant-a",
+    "command": "sh -lc echo hello",
+    "cwd": "/workspace",
+    "timeout_seconds": 30,
+    "status": "succeeded",
+    "exit_code": 0,
+    "stdout_preview": "hello\n",
+    "stderr_truncated": false,
+    "stdout_truncated": false,
+    "started_at": "2025-01-01T00:00:00Z",
+    "completed_at": "2025-01-01T00:00:01Z",
+    "duration_ms": 1000
 }
 ```
 
@@ -333,11 +333,11 @@ Example init frame:
 
 ```json
 {
-  "command": ["sh"],
-  "cwd": "/workspace",
-  "cols": 120,
-  "rows": 40,
-  "env": {"TERM": "xterm-256color"}
+    "command": ["sh"],
+    "cwd": "/workspace",
+    "cols": 120,
+    "rows": 40,
+    "env": { "TERM": "xterm-256color" }
 }
 ```
 
@@ -376,10 +376,10 @@ Text response example:
 
 ```json
 {
-  "path": "notes.txt",
-  "content": "hello",
-  "size": 5,
-  "encoding": "utf-8"
+    "path": "notes.txt",
+    "content": "hello",
+    "size": 5,
+    "encoding": "utf-8"
 }
 ```
 
@@ -387,10 +387,10 @@ Binary-safe response example:
 
 ```json
 {
-  "path": "pixel.png",
-  "content_base64": "iVBORw0KGgo=",
-  "size": 10,
-  "encoding": "base64"
+    "path": "pixel.png",
+    "content_base64": "iVBORw0KGgo=",
+    "size": 10,
+    "encoding": "base64"
 }
 ```
 
@@ -417,8 +417,8 @@ Binary-safe upload:
 
 ```json
 {
-  "encoding": "base64",
-  "content_base64": "iVBORw0KGgo="
+    "encoding": "base64",
+    "content_base64": "iVBORw0KGgo="
 }
 ```
 
@@ -459,7 +459,7 @@ Example request:
 
 ```json
 {
-  "paths": ["README.md", "src"]
+    "paths": ["README.md", "src"]
 }
 ```
 
@@ -485,10 +485,10 @@ Example request:
 
 ```json
 {
-  "target_port": 3000,
-  "protocol": "http",
-  "auth_mode": "token",
-  "visibility": "private"
+    "target_port": 3000,
+    "protocol": "http",
+    "auth_mode": "token",
+    "visibility": "private"
 }
 ```
 
@@ -496,22 +496,22 @@ Example response:
 
 ```json
 {
-  "id": "tun-123",
-  "sandbox_id": "sbx-123",
-  "tenant_id": "tenant-a",
-  "target_port": 3000,
-  "protocol": "http",
-  "auth_mode": "token",
-  "visibility": "private",
-  "endpoint": "http://127.0.0.1:8080/v1/tunnels/tun-123/proxy",
-  "access_token": "ttok-abc",
-  "access": {
-    "requires_tenant_token": true,
-    "tunnel_token_header": "X-Tunnel-Token",
-    "tunnel_token_query": "token",
-    "example_curl": "curl -H 'Authorization: Bearer <tenant-token>' -H 'X-Tunnel-Token: ttok-abc' 'http://127.0.0.1:8080/v1/tunnels/tun-123/proxy'"
-  },
-  "created_at": "2025-01-01T00:00:00Z"
+    "id": "tun-123",
+    "sandbox_id": "sbx-123",
+    "tenant_id": "tenant-a",
+    "target_port": 3000,
+    "protocol": "http",
+    "auth_mode": "token",
+    "visibility": "private",
+    "endpoint": "http://127.0.0.1:8080/v1/tunnels/tun-123/proxy",
+    "access_token": "ttok-abc",
+    "access": {
+        "requires_tenant_token": true,
+        "tunnel_token_header": "X-Tunnel-Token",
+        "tunnel_token_query": "token",
+        "example_curl": "curl -H 'Authorization: Bearer <tenant-token>' -H 'X-Tunnel-Token: ttok-abc' 'http://127.0.0.1:8080/v1/tunnels/tun-123/proxy'"
+    },
+    "created_at": "2025-01-01T00:00:00Z"
 }
 ```
 
@@ -539,8 +539,8 @@ Example request:
 
 ```json
 {
-  "path": "/",
-  "ttl_seconds": 300
+    "path": "/",
+    "ttl_seconds": 300
 }
 ```
 
@@ -548,8 +548,8 @@ Example response:
 
 ```json
 {
-  "url": "http://127.0.0.1:8080/v1/tunnels/tun-123/proxy/?or3_exp=...&or3_sig=...",
-  "expires_at": "2025-01-01T00:05:00Z"
+    "url": "http://127.0.0.1:8080/v1/tunnels/tun-123/proxy/?or3_exp=...&or3_sig=...",
+    "expires_at": "2025-01-01T00:05:00Z"
 }
 ```
 
@@ -561,8 +561,8 @@ Signed browser launch contract:
 - The bootstrap page is the supported browser-launch mechanism for dashboard-style apps.
 - One-time launch capabilities return `capability_id` and are consumed on first successful bootstrap.
 - This browser capability is distinct from tunnel-token auth:
-  - tunnel token auth is a direct request capability for HTTP/WebSocket clients
-  - signed browser launch auth is a browser-friendly bootstrap flow that installs a scoped cookie
+    - tunnel token auth is a direct request capability for HTTP/WebSocket clients
+    - signed browser launch auth is a browser-friendly bootstrap flow that installs a scoped cookie
 
 ### `GET /v1/tunnels/{id}/proxy...`
 

@@ -369,15 +369,15 @@ type RestoreSnapshotRequest struct {
 
 // RuntimeHealth is the runtime health report returned by GET /v1/runtime/health.
 type RuntimeHealth struct {
-	DefaultRuntimeSelection  RuntimeSelection       `json:"default_runtime_selection,omitempty"`
-	EnabledRuntimeSelections []RuntimeSelection     `json:"enabled_runtime_selections,omitempty"`
-	Backend                  string                 `json:"backend"`
-	Healthy                  bool                   `json:"healthy"`
-	CheckedAt                time.Time              `json:"checked_at"`
-	RuntimeSelectionCounts   map[string]int         `json:"runtime_selection_counts,omitempty"`
-	StatusCounts             map[string]int         `json:"status_counts,omitempty"`
+	DefaultRuntimeSelection  RuntimeSelection            `json:"default_runtime_selection,omitempty"`
+	EnabledRuntimeSelections []RuntimeSelection          `json:"enabled_runtime_selections,omitempty"`
+	Backend                  string                      `json:"backend"`
+	Healthy                  bool                        `json:"healthy"`
+	CheckedAt                time.Time                   `json:"checked_at"`
+	RuntimeSelectionCounts   map[string]int              `json:"runtime_selection_counts,omitempty"`
+	StatusCounts             map[string]int              `json:"status_counts,omitempty"`
 	AgentSessions            *RuntimeAgentSessionsHealth `json:"agent_sessions,omitempty"`
-	Sandboxes                []RuntimeSandboxHealth `json:"sandboxes"`
+	Sandboxes                []RuntimeSandboxHealth      `json:"sandboxes"`
 }
 
 type RuntimeAgentSessionsHealth struct {
@@ -393,27 +393,27 @@ type RuntimeAgentSessionsHealth struct {
 
 // RuntimeInfo is the runtime summary returned by GET /v1/runtime/info.
 type RuntimeInfo struct {
-	Backend                  string             `json:"backend,omitempty"`
-	Class                    string             `json:"class,omitempty"`
-	DefaultRuntimeSelection  RuntimeSelection   `json:"default_runtime_selection,omitempty"`
-	EnabledRuntimeSelections []RuntimeSelection `json:"enabled_runtime_selections,omitempty"`
+	Backend                  string              `json:"backend,omitempty"`
+	Class                    string              `json:"class,omitempty"`
+	DefaultRuntimeSelection  RuntimeSelection    `json:"default_runtime_selection,omitempty"`
+	EnabledRuntimeSelections []RuntimeSelection  `json:"enabled_runtime_selections,omitempty"`
 	GuestImage               *GuestImageIdentity `json:"guest_image,omitempty"`
-	GuestImageError          string             `json:"guest_image_error,omitempty"`
+	GuestImageError          string              `json:"guest_image_error,omitempty"`
 }
 
 type GuestImageIdentity struct {
-	Path                     string             `json:"path,omitempty"`
-	SidecarPath              string             `json:"sidecar_path,omitempty"`
-	ContractVersion          string             `json:"contract_version,omitempty"`
-	BuildVersion             string             `json:"build_version,omitempty"`
-	GitSHA                   string             `json:"git_sha,omitempty"`
-	ImageSHA256              string             `json:"image_sha256,omitempty"`
-	Profile                  GuestProfile       `json:"profile,omitempty"`
-	Capabilities             []string           `json:"capabilities,omitempty"`
-	AllowedFeatures          []string           `json:"allowed_features,omitempty"`
-	ControlMode              GuestControlMode   `json:"control_mode,omitempty"`
-	ControlProtocolVersion   string             `json:"control_protocol_version,omitempty"`
-	WorkspaceContractVersion string             `json:"workspace_contract_version,omitempty"`
+	Path                     string           `json:"path,omitempty"`
+	SidecarPath              string           `json:"sidecar_path,omitempty"`
+	ContractVersion          string           `json:"contract_version,omitempty"`
+	BuildVersion             string           `json:"build_version,omitempty"`
+	GitSHA                   string           `json:"git_sha,omitempty"`
+	ImageSHA256              string           `json:"image_sha256,omitempty"`
+	Profile                  GuestProfile     `json:"profile,omitempty"`
+	Capabilities             []string         `json:"capabilities,omitempty"`
+	AllowedFeatures          []string         `json:"allowed_features,omitempty"`
+	ControlMode              GuestControlMode `json:"control_mode,omitempty"`
+	ControlProtocolVersion   string           `json:"control_protocol_version,omitempty"`
+	WorkspaceContractVersion string           `json:"workspace_contract_version,omitempty"`
 }
 
 // RuntimeSandboxHealth is one sandbox entry inside RuntimeHealth.

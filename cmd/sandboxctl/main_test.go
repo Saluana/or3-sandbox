@@ -248,8 +248,8 @@ func TestRunDoctorQEMUBundleWritesArtifacts(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(model.RuntimeInfo{
 				Backend: "qemu",
 				GuestImage: &model.GuestImageIdentity{
-					Path:        imagePath,
-					SidecarPath: guestimage.SidecarPath(imagePath),
+					Path:         imagePath,
+					SidecarPath:  guestimage.SidecarPath(imagePath),
 					BuildVersion: "test",
 				},
 			})

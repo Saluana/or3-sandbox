@@ -290,18 +290,18 @@ func TestAgentSessionBuffersExecEventsUntilRegistered(t *testing.T) {
 func TestAgentSessionBuffersFileEventsUntilRegistered(t *testing.T) {
 	runtime := &Runtime{}
 	session := &agentSession{
-		runtime:      runtime,
-		pending:      make(map[string]chan agentproto.Message),
-		pendingFiles: make(map[string][]agentproto.FileData),
-		pendingExecs: make(map[string][]agentproto.ExecEvent),
+		runtime:         runtime,
+		pending:         make(map[string]chan agentproto.Message),
+		pendingFiles:    make(map[string][]agentproto.FileData),
+		pendingExecs:    make(map[string][]agentproto.ExecEvent),
 		pendingArchives: make(map[string][]agentproto.ArchiveStreamChunk),
-		pendingPTY:   make(map[string][]agentproto.PTYData),
-		execs:        make(map[string]chan agentproto.ExecEvent),
-		files:        make(map[string]chan agentproto.FileData),
-		archive:      make(map[string]chan agentproto.ArchiveStreamChunk),
-		pty:          make(map[string]*agentTTYHandle),
-		bridge:       make(map[string]*sandboxLocalConnHandle),
-		closeCh:      make(chan struct{}),
+		pendingPTY:      make(map[string][]agentproto.PTYData),
+		execs:           make(map[string]chan agentproto.ExecEvent),
+		files:           make(map[string]chan agentproto.FileData),
+		archive:         make(map[string]chan agentproto.ArchiveStreamChunk),
+		pty:             make(map[string]*agentTTYHandle),
+		bridge:          make(map[string]*sandboxLocalConnHandle),
+		closeCh:         make(chan struct{}),
 	}
 	payload := agentproto.FileData{SessionID: "file-1", Data: agentproto.EncodeBytes([]byte("hello")), EOF: true}
 	if !session.deliverFile(payload) {
