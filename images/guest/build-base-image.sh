@@ -21,6 +21,7 @@ require_cmd() {
 require_cmd cloud-localds
 require_cmd go
 require_cmd jq
+require_cmd mkfs.ext4
 require_cmd python3
 QEMU_BINARY="${QEMU_BINARY:-qemu-system-x86_64}"
 QEMU_IMG_BINARY="${QEMU_IMG_BINARY:-qemu-img}"
@@ -128,6 +129,8 @@ if [ "$ssh_present" = "true" ]; then
 	ssh_authorized_keys_block+="      - $ssh_public_key"
 	ssh_authorized_keys_block+=$'\n'
 	ssh_enable_commands=$'  - systemctl enable ssh\n  - systemctl start ssh\n'
+else
+  ssh_enable_commands=$'  - systemctl disable --now ssh >/dev/null 2>&1 || true\n  - apt-get purge -y openssh-server >/dev/null 2>&1 || true\n  - apt-get autoremove -y >/dev/null 2>&1 || true\n'
 fi
 
 cp "$SYSTEMD_DIR/or3-bootstrap.sh" "$WORK_DIR/or3-bootstrap.sh"
@@ -237,6 +240,7 @@ cloud-localds "$WORK_DIR/seed.img" "$WORK_DIR/user-data" "$WORK_DIR/meta-data"
 log_step "Creating guest root and workspace disks"
 "$QEMU_IMG_BINARY" create -f qcow2 -F qcow2 -b "$WORK_DIR/base.qcow2" "$OUTPUT_IMAGE" 20G >/dev/null
 "$QEMU_IMG_BINARY" create -f raw "$WORK_DIR/workspace.img" 10G >/dev/null
+"$(command -v mkfs.ext4)" -F -L or3-build-ws "$WORK_DIR/workspace.img" >/dev/null
 
 net_device="virtio-net-pci"
 if [[ "$QEMU_BINARY" == *aarch64* ]]; then
@@ -307,9 +311,79 @@ PY
 
 agent_exec_stdout() {
   local command_json="$1"
-  local result_json
-  result_json="$(agent_rpc exec "$command_json")"
-  printf '%s' "$result_json" | jq -r '.stdout_preview // ""' | tr -d '\r'
+  OR3_AGENT_PAYLOAD="$command_json" OR3_AGENT_SOCKET_PATH="$WORK_DIR/agent.sock" python3 - <<'PY'
+import base64
+import json
+import os
+import socket
+import struct
+import sys
+import time
+
+sock_path = os.environ["OR3_AGENT_SOCKET_PATH"]
+payload = json.loads(os.environ["OR3_AGENT_PAYLOAD"])
+
+def send(conn, message):
+  raw = json.dumps(message).encode("utf-8")
+  conn.sendall(struct.pack(">I", len(raw)) + raw)
+
+def recv(conn):
+  header = conn.recv(4)
+  if len(header) != 4:
+    raise SystemExit("short guest-agent header")
+  length = struct.unpack(">I", header)[0]
+  data = b""
+  while len(data) < length:
+    chunk = conn.recv(length - len(data))
+    if not chunk:
+      raise SystemExit("short guest-agent body")
+    data += chunk
+  return json.loads(data.decode("utf-8"))
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+  conn.settimeout(30)
+  conn.connect(sock_path)
+  send(conn, {"op": "exec_start", "id": f"build-{time.time_ns()}", "result": payload})
+  reply = recv(conn)
+  if not reply.get("ok", False):
+    raise SystemExit(reply.get("error") or "guest exec_start failed")
+  exec_id = (reply.get("result") or {}).get("exec_id", "").strip()
+  if not exec_id:
+    raise SystemExit("guest agent returned empty exec id")
+
+  stdout_parts = []
+  stderr_parts = []
+  while True:
+    message = recv(conn)
+    if not message.get("ok", False):
+      raise SystemExit(message.get("error") or "guest exec_event failed")
+    if message.get("op") != "exec_event":
+      raise SystemExit(f"unexpected guest exec stream op: {message.get('op')!r}")
+    event = message.get("result") or {}
+    if event.get("exec_id") != exec_id:
+      raise SystemExit(f"unexpected guest exec id: {event.get('exec_id')!r}")
+    stream = event.get("stream", "")
+    data = event.get("data", "")
+    if data:
+      decoded = base64.b64decode(data)
+      if stream == "stdout":
+        stdout_parts.append(decoded)
+      elif stream == "stderr":
+        stderr_parts.append(decoded)
+    terminal = event.get("result")
+    if terminal is None:
+      continue
+    status = str(terminal.get("status", ""))
+    if status != "succeeded":
+      stderr_preview = terminal.get("stderr_preview", "")
+      if stderr_preview:
+        print(stderr_preview, file=sys.stderr)
+      elif stderr_parts:
+        print(b"".join(stderr_parts).decode("utf-8", errors="replace"), file=sys.stderr)
+      raise SystemExit(f"guest exec failed with status {status!r}")
+    sys.stdout.write(b"".join(stdout_parts).decode("utf-8", errors="replace"))
+    break
+PY
 }
 
 wait_for_agent_ready() {
@@ -329,7 +403,7 @@ while time.time() < deadline:
     attempt += 1
     try:
         print(f"[{time.strftime('%H:%M:%S', time.gmtime())}] Waiting for guest readiness: attempt {attempt}/120", file=sys.stderr)
-        request = {"op": "ready", "id": f"build-{time.time_ns()}"}
+        request = {"op": "ping", "id": f"build-{time.time_ns()}"}
         raw = json.dumps(request).encode("utf-8")
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
             conn.settimeout(5)
@@ -381,7 +455,7 @@ ssh_present = json.loads(os.environ.get("OR3_SSH_PRESENT_JSON", "false"))
 capabilities = set(json.loads(os.environ.get("OR3_CAPABILITIES_JSON", "[]")))
 allowed_features = set(json.loads(os.environ.get("OR3_ALLOWED_FEATURES_JSON", "[]")))
 
-lines = ["set -euo pipefail"]
+lines = ["set -eu"]
 if packages:
     lines.append("dpkg-query -W -f='${Package}\t${Version}\\n' " + " ".join(quote(pkg) for pkg in packages) + " | sort")
 else:
@@ -414,6 +488,12 @@ if ! wait_for_agent_ready; then
   exit 1
 fi
 
+# Allow the guest agent to fully re-open the virtio port after the
+# readiness-probe connection closes.  Without this pause the next
+# host-side connect can race with the guest-side fd re-open, causing
+# the exec_start message to be silently dropped by the virtio buffer.
+sleep 3
+
 log_step "Verifying guest profile contents and package inventory"
 verify_profile_artifacts
 
@@ -441,8 +521,7 @@ package_inventory_sha="$(tr -d '\n' < "$WORK_DIR/package-inventory.sha256")"
 
 if [ "$ssh_present" = "true" ]; then
   log_step "Capturing guest SSH host public key"
-	host_key_json="$(agent_rpc exec "$(jq -cn '{command:["sh","-lc","cat /etc/ssh/ssh_host_ed25519_key.pub"],cwd:"/"}')")"
-	printf '%s\n' "$(printf '%s' "$host_key_json" | jq -r '.stdout_preview' | tr -d '\r')" > "$SSH_HOST_PUBLIC_KEY_OUTPUT"
+  printf '%s\n' "$(agent_exec_stdout "$(jq -cn '{command:["sh","-lc","cat /etc/ssh/ssh_host_ed25519_key.pub"],cwd:"/"}')" | tr -d '\r')" > "$SSH_HOST_PUBLIC_KEY_OUTPUT"
 	if [ ! -s "$SSH_HOST_PUBLIC_KEY_OUTPUT" ]; then
 		echo "failed to capture guest SSH host public key" >&2
 		exit 1

@@ -18,11 +18,22 @@ require_cmd() {
 
 require_cmd "$QEMU_BINARY"
 require_cmd "$QEMU_IMG_BINARY"
+require_cmd mkfs.ext4
 require_cmd jq
 require_cmd python3
 
+RESOLVED_QEMU_ACCEL="$QEMU_ACCEL"
+if [[ "$RESOLVED_QEMU_ACCEL" == "auto" ]]; then
+  if [[ -e /dev/kvm ]]; then
+    RESOLVED_QEMU_ACCEL="kvm"
+  else
+    RESOLVED_QEMU_ACCEL="tcg"
+  fi
+fi
+
 "$QEMU_IMG_BINARY" create -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$WORK_DIR/root-overlay.qcow2" 20G >/dev/null
 "$QEMU_IMG_BINARY" create -f raw "$WORK_DIR/workspace.img" 10G >/dev/null
+mkfs.ext4 -F -L or3-smoke-ws "$WORK_DIR/workspace.img" >/dev/null
 
 QEMU_NET_DEVICE="${QEMU_NET_DEVICE:-virtio-net-pci}"
 if [[ "$QEMU_BINARY" == *aarch64* ]] && [[ "${QEMU_NET_DEVICE:-}" == "virtio-net-pci" ]]; then
@@ -35,7 +46,7 @@ fi
   -monitor "unix:$WORK_DIR/monitor.sock,server,nowait" \
   -serial "file:$WORK_DIR/serial.log" \
   -display none \
-  -accel "$QEMU_ACCEL" \
+  -accel "$RESOLVED_QEMU_ACCEL" \
   -m 2048 \
   -smp 2 \
   -device virtio-serial \
@@ -88,44 +99,15 @@ PY
 }
 
 wait_for_agent_ready() {
-  OR3_AGENT_SOCKET_PATH="$WORK_DIR/agent.sock" python3 - <<'PY'
-import json
-import os
-import socket
-import struct
-import sys
-import time
-
-sock_path = os.environ["OR3_AGENT_SOCKET_PATH"]
-deadline = time.time() + (120 * 2)
-
-while time.time() < deadline:
-    try:
-        request = {"op": "ready", "id": f"smoke-ready-{time.time_ns()}"}
-        raw = json.dumps(request).encode("utf-8")
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
-            conn.settimeout(5)
-            conn.connect(sock_path)
-            conn.sendall(struct.pack(">I", len(raw)) + raw)
-            header = conn.recv(4)
-            if len(header) != 4:
-                raise RuntimeError("short guest-agent header")
-            length = struct.unpack(">I", header)[0]
-            data = b""
-            while len(data) < length:
-                chunk = conn.recv(length - len(data))
-                if not chunk:
-                    raise RuntimeError("short guest-agent body")
-                data += chunk
-        reply = json.loads(data.decode("utf-8"))
-        if reply.get("ok") and (reply.get("result") or {}).get("ready") is True:
-            sys.exit(0)
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
-        pass
-    time.sleep(2)
-
-sys.exit(1)
-PY
+  local ready_json=""
+  local attempt
+  for attempt in $(seq 1 120); do
+    if ready_json="$(agent_rpc ping 2>/dev/null)" && jq -e '.ready == true' >/dev/null <<<"$ready_json"; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
 }
 
 if wait_for_agent_ready; then

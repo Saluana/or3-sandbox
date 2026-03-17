@@ -605,6 +605,13 @@ func validateQEMUConfig(c Config, probe runtimeValidationProbe) error {
 		return errors.New("qemu runtime requires at least one allowed guest profile")
 	}
 	if c.QEMUControlMode == model.GuestControlModeSSHCompat {
+		for _, profile := range c.effectiveAllowedGuestProfiles("qemu") {
+			if profile != model.GuestProfileDebug {
+				return fmt.Errorf("qemu ssh-compat mode only supports debug guest profiles; remove unsupported profile %q or switch SANDBOX_QEMU_CONTROL_MODE=agent", profile)
+			}
+		}
+	}
+	if c.QEMUControlMode == model.GuestControlModeSSHCompat {
 		if strings.TrimSpace(c.QEMUSSHUser) == "" {
 			return errors.New("qemu ssh-compat mode requires SANDBOX_QEMU_SSH_USER")
 		}

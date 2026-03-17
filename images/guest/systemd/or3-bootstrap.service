@@ -1,6 +1,6 @@
 [Unit]
 Description=or3 guest bootstrap
-After=local-fs.target network-online.target
+After=local-fs.target
 Wants=network-online.target
 
 [Service]

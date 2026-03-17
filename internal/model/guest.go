@@ -7,7 +7,7 @@ import (
 
 // DefaultGuestControlProtocolVersion is the default guest control protocol
 // version emitted in sandbox metadata.
-const DefaultGuestControlProtocolVersion = "2"
+const DefaultGuestControlProtocolVersion = "3"
 
 // DefaultWorkspaceContractVersion is the default workspace contract version
 // expected by the daemon and guest tooling.

@@ -298,7 +298,12 @@ func reportQEMUDoctor(add func(string, string, string), cfg config.Config) {
 	if !cfg.IsRuntimeSelectionEnabled(model.RuntimeSelectionQEMUProfessional) {
 		return
 	}
-	for _, command := range []string{cfg.QEMUBinary, "qemu-img"} {
+	if cfg.QEMUControlMode == model.GuestControlModeSSHCompat {
+		add("warn", "qemu-control", "ssh-compat is a debug and rescue path; agent mode is the normal production posture")
+	} else {
+		add("pass", "qemu-control", "agent mode is configured as the normal production control path")
+	}
+	for _, command := range []string{cfg.QEMUBinary, "qemu-img", "mkfs.ext4"} {
 		if strings.TrimSpace(command) == "" {
 			add("fail", "command", "SANDBOX_QEMU_BINARY must be set for production-qemu validation")
 			continue

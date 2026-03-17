@@ -39,7 +39,10 @@ That command runs the shipped smoke, host verification, production smoke, and re
 Run the host-gated wrapper on a prepared Linux/KVM host:
 
 ```bash
+go run ./cmd/sandboxctl qemu init
+go run ./cmd/sandboxctl doctor --production-qemu
 ./scripts/qemu-host-verification.sh --profile core --control-mode agent
+go run ./cmd/sandboxctl qemu smoke
 ```
 
 Required environment:
@@ -52,6 +55,7 @@ Wrapper behavior:
 
 - prints the requested profile label and control mode so operator evidence is tied to the intended runtime contract
 - exits with an explicit skip message when the required QEMU environment is missing
+- checks for host-side workspace formatting prerequisites such as `mkfs.ext4` before attempting QEMU verification
 - runs the existing `go test ./internal/runtime/qemu` host entry points without introducing a second harness
 - leaves pass/fail detail to the underlying Go tests so host misconfiguration and isolation regressions stay visible
 
@@ -74,6 +78,8 @@ The `core` gate verifies the production-default substrate without relying on SSH
 
 This is the minimum host verification layer needed before using “production-ready” language for hostile-workload QEMU deployments.
 
+The production-default contract for this layer is guest-agent protocol version `3` over the virtio-serial channel. SSH is not part of the normal production readiness gate.
+
 ### Browser and container capability verification
 
 Heavier profiles add profile-specific checks only when the selected guest image advertises those capabilities. Examples include:
@@ -94,9 +100,9 @@ The combined smoke path, host wrapper, and operator drills give evidence that:
 
 - the control plane packages behave as expected
 - the prepared Linux/KVM host can boot the selected guest image and satisfy its control contract
-- the production-default guest-agent path is healthy
+- the production-default guest-agent path is healthy, including protocol version `3` session negotiation and host-side workspace formatting prerequisites
 - obvious repo-specific isolation assumptions still hold, such as no host docker socket exposure or host workspace bind leakage into the guest
-- restart, snapshot, and storage-pressure behavior remains conservative enough for operator recovery workflows
+- restart, workspace-first snapshot restore, and storage-pressure behavior remain conservative enough for operator recovery workflows
 
 ## What the suite does not prove
 
@@ -127,18 +133,18 @@ The doctor verifies runtime/auth posture, KVM/QEMU availability, free-space post
 
 ## Supported host matrix and evidence mapping
 
-| Production claim | Evidence path |
-| --- | --- |
-| Safe VM-backed production boundary | `go test ./internal/config ./internal/service` + `sandboxctl doctor --production-qemu` |
-| Explicit JWT role and service-account scope checks | `go test ./internal/auth` |
-| Runtime info / health / metrics inspection surfaces | `go test ./internal/api -run 'Test(StartAdmissionDenialAppearsInMetrics|RuntimeHealthEndpoint)'` |
+| Production claim                                      | Evidence path                                                                                                |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------- | -------------------------- |
+| Safe VM-backed production boundary                    | `go test ./internal/config ./internal/service` + `sandboxctl doctor --production-qemu`                       |
+| Explicit JWT role and service-account scope checks    | `go test ./internal/auth`                                                                                    |
+| Runtime info / health / metrics inspection surfaces   | `go test ./internal/api -run 'Test(StartAdmissionDenialAppearsInMetrics                                      | RuntimeHealthEndpoint)'`            |
 | Promoted image registry and production QEMU admission | `sandboxctl image promote` + `go test ./internal/service -run TestProductionQEMUCreateRequiresPromotedImage` |
-| Additive SQLite hardening state | `go test ./internal/db ./internal/repository` |
-| Bootstrap and config lint path | `go test ./cmd/sandboxctl -run 'Test(RunConfigLint|RunDoctorRequiresProductionQEMUFlag|ProductionQEMUDoctor.*)'` |
-| Linux/KVM host substrate | `./scripts/qemu-host-verification.sh --profile core --control-mode agent` |
-| Production smoke | `./scripts/qemu-production-smoke.sh` |
-| Abuse-path runtime behavior | `./scripts/qemu-resource-abuse.sh` |
-| Recovery and restore behavior | `./scripts/qemu-recovery-drill.sh` |
+| Additive SQLite hardening state                       | `go test ./internal/db ./internal/repository`                                                                |
+| Bootstrap and config lint path                        | `go test ./cmd/sandboxctl -run 'Test(RunConfigLint                                                           | RunDoctorRequiresProductionQEMUFlag | ProductionQEMUDoctor.\*)'` |
+| Linux/KVM host substrate                              | `./scripts/qemu-host-verification.sh --profile core --control-mode agent`                                    |
+| Production smoke                                      | `./scripts/qemu-production-smoke.sh`                                                                         |
+| Abuse-path runtime behavior                           | `./scripts/qemu-resource-abuse.sh`                                                                           |
+| Recovery and restore behavior                         | `./scripts/qemu-recovery-drill.sh`                                                                           |
 
 ## Guest image verification
 
@@ -165,6 +171,13 @@ The sidecar provenance fields are a promotion record, not a proof of bit-for-bit
 ## Operator drill flow
 
 Existing `sandboxctl` commands and API endpoints are sufficient for the read-only verification flow; no extra CLI helper is required today.
+
+For host preparation and smoke execution, the recommended wrappers are now:
+
+```bash
+go run ./cmd/sandboxctl qemu init
+go run ./cmd/sandboxctl qemu smoke
+```
 
 ### Read-only inspection drill
 
@@ -226,14 +239,14 @@ Cleanup:
 The repository also includes host-gated operator drill scripts:
 
 - `./scripts/qemu-production-smoke.sh`
-  - runs `sandboxctl doctor --production-qemu`
-  - exercises core-profile exec, file transfer, suspend/resume, snapshot create/restore, and optional daemon restart reconciliation
+    - runs `sandboxctl doctor --production-qemu`
+    - exercises core-profile exec, file transfer, suspend/resume, snapshot create/restore, and optional daemon restart reconciliation
 - `./scripts/qemu-resource-abuse.sh`
-  - runs bounded memory/disk/file-count/PID/stdout abuse scenarios against a core-profile sandbox
-  - captures runtime health, quota, and optional metrics evidence
+    - runs bounded memory/disk/file-count/PID/stdout abuse scenarios against a core-profile sandbox
+    - captures runtime health, quota, and optional metrics evidence
 - `./scripts/qemu-recovery-drill.sh`
-  - is disruptive and guarded by `OR3_ALLOW_DISRUPTIVE=1`
-  - verifies restart durability when `SANDBOXD_RESTART_COMMAND` is supplied and checks conservative stopped-state restore behavior, partial restore failure handling, and owned-root cleanup
+    - is disruptive and guarded by `OR3_ALLOW_DISRUPTIVE=1`
+    - verifies restart durability when `SANDBOXD_RESTART_COMMAND` is supplied and checks conservative stopped-state restore behavior, partial restore failure handling, and owned-root cleanup
 
 Expected evidence:
 

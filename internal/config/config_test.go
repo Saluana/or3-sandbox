@@ -140,6 +140,37 @@ func TestValidateRuntimeConfigQEMUMissingPrerequisites(t *testing.T) {
 	}
 }
 
+func TestValidateRuntimeConfigQEMUSSHCompatRequiresDebugProfileOnly(t *testing.T) {
+	cfg := Config{
+		RuntimeBackend:        "qemu",
+		QEMUBinary:            "qemu-system-x86_64",
+		QEMUAccel:             "kvm",
+		QEMUBaseImagePath:     "/images/base.qcow2",
+		QEMUControlMode:       model.GuestControlModeSSHCompat,
+		QEMUAllowedProfiles:   []model.GuestProfile{model.GuestProfileCore},
+		QEMUSSHUser:           "sandbox",
+		QEMUSSHPrivateKeyPath: "/keys/id_ed25519",
+		QEMUSSHHostKeyPath:    "/keys/guest_host_ed25519.pub",
+		QEMUBootTimeout:       time.Minute,
+	}
+	probe := runtimeValidationProbe{
+		goos:          "linux",
+		commandExists: func(string) error { return nil },
+		fileReadable:  func(string) error { return nil },
+		kvmAvailable:  func() error { return nil },
+		hvfAvailable:  func() error { return nil },
+	}
+	err := validateRuntimeConfig(cfg, probe)
+	if err == nil || !strings.Contains(err.Error(), "only supports debug guest profiles") {
+		t.Fatalf("expected ssh-compat profile validation error, got %v", err)
+	}
+
+	cfg.QEMUAllowedProfiles = []model.GuestProfile{model.GuestProfileDebug}
+	if err := validateRuntimeConfig(cfg, probe); err != nil {
+		t.Fatalf("expected debug-only ssh-compat config to validate, got %v", err)
+	}
+}
+
 func TestValidateRuntimeConfigKataRejectsNonLinuxHost(t *testing.T) {
 	cfg := Config{
 		EnabledRuntimeSelections: []model.RuntimeSelection{model.RuntimeSelectionContainerdKataProfessional},

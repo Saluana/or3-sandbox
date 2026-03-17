@@ -1,20 +1,15 @@
 {
-  "extends": "core",
-  "profile": "container",
-  "description": "Agent-based profile that adds an inner Docker engine for explicitly approved workloads.",
-  "capabilities": [
-    "container"
-  ],
-  "allowed_features": [
-    "docker"
-  ],
-  "packages": [
-    "docker.io"
-  ],
-  "enable_services": [
-    "docker"
-  ],
-  "sandbox_groups": [
-    "docker"
-  ]
+    "extends": "core",
+    "profile": "container",
+    "description": "Agent-based profile that adds an inner Docker engine for explicitly approved workloads.",
+    "control": {
+        "mode": "agent",
+        "protocol_version": "3",
+        "supported_transports": ["virtio-serial"]
+    },
+    "capabilities": ["container"],
+    "allowed_features": ["docker"],
+    "packages": ["docker.io"],
+    "enable_services": ["docker"],
+    "sandbox_groups": ["docker"]
 }

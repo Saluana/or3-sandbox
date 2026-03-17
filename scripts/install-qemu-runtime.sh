@@ -7,14 +7,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/install-runtime-common.sh"
 
 PROFILE="${PROFILE:-core}"
-SKIP_IMAGE_BUILD="${SKIP_IMAGE_BUILD:-0}"
+SKIP_IMAGE_BUILD="${SKIP_IMAGE_BUILD:-1}"
 
 require_linux
 require_apt
 require_sudo
 require_cmd go
 
-install_packages ca-certificates curl jq qemu-system qemu-utils cloud-image-utils openssh-client cpu-checker
+install_packages ca-certificates curl jq qemu-system qemu-utils cloud-image-utils openssh-client cpu-checker e2fsprogs
 bootstrap_go_modules
 
 qemu_binary="qemu-system-x86_64"
@@ -39,11 +39,18 @@ if [ "$SKIP_IMAGE_BUILD" != "1" ]; then
     cd "$REPO_ROOT"
     PROFILE="$PROFILE" QEMU_BINARY="$qemu_binary" QEMU_ACCEL="kvm" images/guest/build-base-image.sh
   )
+else
+  log "skipping guest image build; set SKIP_IMAGE_BUILD=0 to build ${PROFILE} locally"
 fi
 
-image_path="$REPO_ROOT/images/guest/or3-guest-${PROFILE}.qcow2"
-if [ -f "$image_path" ]; then
-  log "verifying repo QEMU config with the built image"
+if [ "$SKIP_IMAGE_BUILD" = "1" ]; then
+  image_path="${SANDBOX_QEMU_BASE_IMAGE_PATH:-}"
+else
+  image_path="$REPO_ROOT/images/guest/or3-guest-${PROFILE}.qcow2"
+fi
+
+if [ -n "$image_path" ] && [ -f "$image_path" ]; then
+  log "verifying repo QEMU config with the selected image"
   (
     cd "$REPO_ROOT"
     SANDBOX_RUNTIME=qemu \
@@ -53,7 +60,7 @@ if [ -f "$image_path" ]; then
     go run ./cmd/sandboxctl config-lint
   )
 else
-  warn "guest image $image_path was not found; skipping qemu config-lint verification"
+  warn "no guest image selected for config-lint verification; set SANDBOX_QEMU_BASE_IMAGE_PATH or SKIP_IMAGE_BUILD=0"
 fi
 
 printf '\n'

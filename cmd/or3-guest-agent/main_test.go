@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"or3-sandbox/internal/model"
 	"or3-sandbox/internal/runtime/qemu/agentproto"
 )
 
@@ -21,7 +23,7 @@ func TestRunExecDetachedTimeoutKeepsProcessAlive(t *testing.T) {
 	t.Parallel()
 
 	marker := filepath.Join(t.TempDir(), "detached.txt")
-	req := agentproto.ExecRequest{
+	req := agentproto.ExecStartRequest{
 		Command:  []string{"sh", "-lc", fmt.Sprintf("sleep 0.2; printf ok > %q", marker)},
 		Cwd:      "/tmp",
 		Timeout:  2 * time.Second,
@@ -90,9 +92,40 @@ func TestGuestAgentRejectsDisallowedOperation(t *testing.T) {
 	if err := agent.loadCapabilities(); err != nil {
 		t.Fatalf("load capabilities: %v", err)
 	}
-	_, err := agent.handle(context.Background(), agentproto.Message{ID: "msg-1", Op: agentproto.OpExec})
+	_, err := agent.handle(context.Background(), agentproto.Message{ID: "msg-1", Op: agentproto.OpExecStart})
 	if err == nil || !strings.Contains(err.Error(), "does not allow operation") {
 		t.Fatalf("expected disallowed operation error, got %v", err)
+	}
+}
+
+func TestGuestAgentServeSessionReturnsNilOnEOF(t *testing.T) {
+	agent := &guestAgent{
+		workspaceContract: model.DefaultWorkspaceContractVersion,
+		allowedOps: map[string]struct{}{
+			agentproto.OpHello: {},
+			agentproto.OpPing:  {},
+		},
+	}
+	serverConn, clientConn := net.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		done <- agent.serveSession(context.Background(), serverConn)
+	}()
+	message := agentproto.Message{ID: "msg-1", Op: agentproto.OpPing}
+	if err := agentproto.WriteMessage(clientConn, message); err != nil {
+		t.Fatalf("write ping: %v", err)
+	}
+	if _, err := agentproto.ReadMessage(clientConn); err != nil {
+		t.Fatalf("read ping response: %v", err)
+	}
+	_ = clientConn.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serveSession returned %v after EOF; want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("serveSession did not return after EOF")
 	}
 }
 
@@ -101,7 +134,7 @@ func TestRunExecOverridesIdentityEnvironment(t *testing.T) {
 
 	identity := currentWorkloadIdentity(t)
 	identity.HomeDir = filepath.Join(t.TempDir(), "workload-home")
-	req := agentproto.ExecRequest{
+	req := agentproto.ExecStartRequest{
 		Command: []string{"sh", "-lc", "printf '%s|%s|%s' \"$HOME\" \"$USER\" \"$LOGNAME\""},
 		Cwd:     "/tmp",
 		Timeout: time.Second,
@@ -146,7 +179,7 @@ func TestRunFileOpHelperReadWriteMkdirDelete(t *testing.T) {
 		t.Fatalf("mkdir helper: %v", err)
 	}
 	writePayload := fmt.Sprintf(`{"op":"%s","target":%q,"write":{"path":%q,"total_size":5,"truncate":true,"eof":true},"data":%q}`,
-		agentproto.OpFileWrite,
+		"file_write",
 		target,
 		target,
 		agentproto.EncodeBytes([]byte("hello")),
@@ -155,11 +188,11 @@ func TestRunFileOpHelperReadWriteMkdirDelete(t *testing.T) {
 		t.Fatalf("write helper: %v", err)
 	}
 	var output strings.Builder
-	readPayload := fmt.Sprintf(`{"op":"%s","target":%q,"read":{"path":%q,"max_bytes":16}}`, agentproto.OpFileRead, target, target)
+	readPayload := fmt.Sprintf(`{"op":"%s","target":%q,"read":{"path":%q,"max_bytes":16}}`, "file_read", target, target)
 	if err := runFileOpHelper(strings.NewReader(readPayload), &output); err != nil {
 		t.Fatalf("read helper: %v", err)
 	}
-	var response workloadFileOpResponse
+	var response testFileOpResponse
 	if err := json.Unmarshal([]byte(output.String()), &response); err != nil {
 		t.Fatalf("unmarshal helper response: %v", err)
 	}
@@ -170,7 +203,7 @@ func TestRunFileOpHelperReadWriteMkdirDelete(t *testing.T) {
 	if string(data) != "hello" {
 		t.Fatalf("unexpected helper file content %q", string(data))
 	}
-	if err := runFileOpHelper(strings.NewReader(fmt.Sprintf(`{"op":"%s","target":%q}`, agentproto.OpFileDelete, target)), io.Discard); err != nil {
+	if err := runFileOpHelper(strings.NewReader(fmt.Sprintf(`{"op":"%s","target":%q}`, "file_delete", target)), io.Discard); err != nil {
 		t.Fatalf("delete helper: %v", err)
 	}
 	if _, err := os.Stat(target); !os.IsNotExist(err) {

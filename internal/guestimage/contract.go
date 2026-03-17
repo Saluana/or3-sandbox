@@ -103,6 +103,9 @@ func Validate(imagePath string, contract Contract) error {
 	if strings.TrimSpace(contract.ImageSHA256) == "" {
 		return fmt.Errorf("image contract is missing image_sha256")
 	}
+	if contract.Control.Mode == model.GuestControlModeSSHCompat && contract.Profile != model.GuestProfileDebug {
+		return fmt.Errorf("ssh-compat image contract for %q must use debug profile", imagePath)
+	}
 	actualSHA, err := ComputeSHA256(imagePath)
 	if err != nil {
 		return err

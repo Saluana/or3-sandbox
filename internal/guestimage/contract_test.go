@@ -34,6 +34,30 @@ func TestValidateRejectsAgentImageAdvertisingSSHWithoutDebug(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsSSHCompatNonDebugProfile(t *testing.T) {
+	imagePath := filepath.Join(t.TempDir(), "guest.qcow2")
+	if err := os.WriteFile(imagePath, []byte("guest"), 0o644); err != nil {
+		t.Fatalf("write image: %v", err)
+	}
+	sha, err := ComputeSHA256(imagePath)
+	if err != nil {
+		t.Fatalf("compute sha: %v", err)
+	}
+	contract := Contract{
+		ContractVersion:          model.DefaultImageContractVersion,
+		ImagePath:                imagePath,
+		ImageSHA256:              sha,
+		BuildVersion:             "test",
+		Profile:                  model.GuestProfileCore,
+		Control:                  ControlContract{Mode: model.GuestControlModeSSHCompat, ProtocolVersion: model.DefaultGuestControlProtocolVersion},
+		WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
+		SSHPresent:               true,
+	}
+	if err := Validate(imagePath, contract); err == nil || !strings.Contains(err.Error(), "must use debug profile") {
+		t.Fatalf("expected ssh-compat profile rejection, got %v", err)
+	}
+}
+
 func TestRequestedFeaturesAllowedRejectsUnknownFeature(t *testing.T) {
 	contract := Contract{Profile: model.GuestProfileContainer, AllowedFeatures: []string{"docker"}}
 	if err := RequestedFeaturesAllowed(contract, []string{"docker", "gpu"}); err == nil || !strings.Contains(err.Error(), "not allowed") {

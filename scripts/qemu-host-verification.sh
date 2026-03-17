@@ -11,8 +11,9 @@ usage() {
 usage: ./scripts/qemu-host-verification.sh [--profile <core|runtime|browser|container|debug>] [--control-mode <agent|ssh-compat>]
 
 Runs the host-gated QEMU integration verification entry points when the required
-QEMU environment is present. If the environment is incomplete, the wrapper
-prints a skip message and exits successfully.
+QEMU environment is present. Agent mode is the normal production path; use
+ssh-compat only for explicit debug or rescue verification. If the environment is
+incomplete, the wrapper prints a skip message and exits successfully.
 EOF
 }
 
@@ -72,10 +73,17 @@ if [[ ${#missing[@]} -gt 0 ]]; then
   exit 0
 fi
 
+for name in qemu-img mkfs.ext4; do
+  if ! command -v "$name" >/dev/null 2>&1; then
+    printf '[qemu-host-verification] skipping: required host command %s is missing\n' "$name"
+    exit 0
+  fi
+done
+
 printf '[qemu-host-verification] requested_profile=%s control_mode=%s\n' "$PROFILE_LABEL" "$CONTROL_MODE"
 printf '[qemu-host-verification] base_image=%s accel=%s\n' "$SANDBOX_QEMU_BASE_IMAGE_PATH" "$SANDBOX_QEMU_ACCEL"
 if [[ "$CONTROL_MODE" == "ssh-compat" ]]; then
-  echo '[qemu-host-verification] note: agent-default substrate checks may skip under ssh-compat; the guest image contract remains authoritative.'
+  echo '[qemu-host-verification] note: ssh-compat verification is debug-only; agent-default substrate checks may skip and the guest image contract remains authoritative.'
 fi
 
 test_regex='TestHost(CoreSubstrateAndAgentProtocol|DiskFullAndWorkspacePersistence|IsolationBoundaries|RestartRecoveryAndProfileWorkloads|SandboxLocalBridge)$'

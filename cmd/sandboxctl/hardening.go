@@ -45,6 +45,47 @@ func runConfigLint(args []string) error {
 	return nil
 }
 
+var (
+	qemuLocateRepoRoot = locateRepoRoot
+	qemuExecCommand    = exec.Command
+)
+
+func runQEMU(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: sandboxctl qemu <init|smoke>")
+	}
+	switch args[0] {
+	case "init":
+		return runQEMUInit(args[1:])
+	case "smoke":
+		return runQEMUSmoke(args[1:])
+	default:
+		return errors.New("usage: sandboxctl qemu <init|smoke>")
+	}
+}
+
+func runQEMUInit(args []string) error {
+	return runQEMUScript("install-qemu-runtime.sh", args)
+}
+
+func runQEMUSmoke(args []string) error {
+	return runQEMUScript("qemu-production-smoke.sh", args)
+}
+
+func runQEMUScript(name string, args []string) error {
+	root, err := qemuLocateRepoRoot()
+	if err != nil {
+		return err
+	}
+	command := qemuExecCommand(filepath.Join(root, "scripts", name), args...)
+	command.Env = append(os.Environ(), "SANDBOXCTL_BIN="+os.Args[0])
+	command.Dir = root
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	command.Stdin = os.Stdin
+	return command.Run()
+}
+
 func runImage(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: sandboxctl image <promote|list>")

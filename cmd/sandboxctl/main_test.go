@@ -59,11 +59,54 @@ func TestRunCreateSendsRuntimeSelection(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := runCreate(clientConfig{baseURL: server.URL, token: "dev-token"}, []string{"--image", "alpine:3.20", "--runtime", "docker-dev", "--start=false"}); err != nil {
-		t.Fatalf("runCreate failed: %v", err)
-	}
+	output := captureStdout(t, func() {
+		if err := runCreate(clientConfig{baseURL: server.URL, token: "dev-token"}, []string{"--image", "alpine:3.20", "--runtime", "docker-dev", "--start=false"}); err != nil {
+			t.Fatalf("runCreate failed: %v", err)
+		}
+	})
 	if req.RuntimeSelection != model.RuntimeSelectionDockerDev {
 		t.Fatalf("expected runtime selection docker-dev, got %q", req.RuntimeSelection)
+	}
+	if !strings.Contains(output, "\"id\": \"sbx-1\"") {
+		t.Fatalf("unexpected output: %s", output)
+	}
+}
+
+func TestRunQEMURequiresKnownSubcommand(t *testing.T) {
+	err := runQEMU(nil)
+	if err == nil || !strings.Contains(err.Error(), "usage: sandboxctl qemu <init|smoke>") {
+		t.Fatalf("expected qemu usage error, got %v", err)
+	}
+}
+
+func TestRunQEMUScriptDispatchesToRepoScript(t *testing.T) {
+	root := t.TempDir()
+	scriptsDir := filepath.Join(root, "scripts")
+	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	originalLocate := qemuLocateRepoRoot
+	originalExec := qemuExecCommand
+	defer func() {
+		qemuLocateRepoRoot = originalLocate
+		qemuExecCommand = originalExec
+	}()
+	qemuLocateRepoRoot = func() (string, error) { return root, nil }
+	var gotName string
+	var gotArgs []string
+	qemuExecCommand = func(name string, args ...string) *exec.Cmd {
+		gotName = name
+		gotArgs = append([]string(nil), args...)
+		return exec.Command(testTrueBinary(t))
+	}
+	if err := runQEMUSmoke([]string{"--flag"}); err != nil {
+		t.Fatalf("runQEMUSmoke failed: %v", err)
+	}
+	if gotName != filepath.Join(root, "scripts", "qemu-production-smoke.sh") {
+		t.Fatalf("unexpected script path %q", gotName)
+	}
+	if len(gotArgs) != 1 || gotArgs[0] != "--flag" {
+		t.Fatalf("unexpected script args %#v", gotArgs)
 	}
 }
 
@@ -510,6 +553,55 @@ func TestProductionQEMUDoctorReportsEnabledRuntimeSelections(t *testing.T) {
 	assertDoctorCheck(t, summary.Checks, "runtime-selection", "pass", "docker-dev")
 	assertDoctorCheck(t, summary.Checks, "kata", "pass", "io.containerd.kata.v2")
 	assertDoctorCheck(t, summary.Checks, "docker", "pass", "docker-dev prerequisites are present")
+	assertDoctorCheck(t, summary.Checks, "qemu-control", "pass", "agent mode")
+}
+
+func TestProductionQEMUDoctorWarnsOnSSHCompatControlMode(t *testing.T) {
+	restore := captureDoctorGlobals()
+	defer restore()
+
+	root := t.TempDir()
+	imagePath := filepath.Join(root, "guest.qcow2")
+	secretPath := filepath.Join(root, "jwt.secret")
+	for _, dir := range []string{filepath.Join(root, "db"), filepath.Join(root, "storage"), filepath.Join(root, "snapshots")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(secretPath, []byte("secret"), 0o600); err != nil {
+		t.Fatalf("write jwt secret: %v", err)
+	}
+	if err := writeDoctorGuestContract(imagePath); err != nil {
+		t.Fatalf("write guest contract: %v", err)
+	}
+	doctorHostOS = "linux"
+	doctorLookPath = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	doctorStat = os.Stat
+	doctorReadFile = func(path string) ([]byte, error) {
+		if path == "/sys/fs/cgroup/cgroup.controllers" {
+			return []byte("cpu memory pids"), nil
+		}
+		return os.ReadFile(path)
+	}
+	doctorStatFS = func(string) (doctorFSInfo, error) { return doctorFSInfo{AvailableBytes: 8 << 30}, nil }
+	doctorConfigLoader = func([]string) (config.Config, error) {
+		return config.Config{
+			RuntimeBackend:            "qemu",
+			DefaultRuntimeSelection:   model.RuntimeSelectionQEMUProfessional,
+			EnabledRuntimeSelections:  []model.RuntimeSelection{model.RuntimeSelectionQEMUProfessional},
+			AuthMode:                  "jwt-hs256",
+			AuthJWTSecretPaths:        []string{secretPath},
+			DatabasePath:              filepath.Join(root, "db", "sandbox.db"),
+			StorageRoot:               filepath.Join(root, "storage"),
+			SnapshotRoot:              filepath.Join(root, "snapshots"),
+			QEMUBinary:                "qemu-system-x86_64",
+			QEMUControlMode:           model.GuestControlModeSSHCompat,
+			QEMUAllowedBaseImagePaths: []string{imagePath},
+		}, nil
+	}
+
+	summary := runProductionQEMUDoctor()
+	assertDoctorCheck(t, summary.Checks, "qemu-control", "warn", "debug and rescue path")
 }
 
 func TestProductionQEMUDoctorFailsKataOnNonLinuxHost(t *testing.T) {

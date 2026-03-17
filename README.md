@@ -102,11 +102,19 @@ export SANDBOX_AUTH_JWT_AUDIENCE=sandbox-api
 export SANDBOX_AUTH_JWT_SECRET_PATHS=/run/secrets/or3-jwt-hmac
 export SANDBOX_TUNNEL_SIGNING_KEY_PATH=/run/secrets/or3-tunnel-signing-key
 
+go run ./cmd/sandboxctl qemu init
 go run ./cmd/sandboxctl config-lint
 go run ./cmd/sandboxctl doctor --production-qemu
 go run ./cmd/sandboxctl image promote --image /var/lib/or3-images/or3-guest-core.qcow2
+go run ./cmd/sandboxctl qemu smoke
 go run ./cmd/sandboxctl release-gate
 ```
+
+QEMU control contract defaults:
+
+- production-ready guest images use guest-agent control with protocol version `3`
+- `debug` is the only supported `ssh-compat` guest profile, and it remains a compatibility or rescue path rather than the default production mode
+- QEMU snapshots now store the promoted base image reference plus a workspace tarball, then restore by rebuilding the overlay from the base image and repopulating the workspace volume
 
 ## Default Auth
 
@@ -171,6 +179,7 @@ Browser launch guidance:
 - `internet-disabled` sandboxes run with Docker `--network none`.
 - Tunnels are explicit daemon-managed proxy endpoints; containers do not publish host ports directly.
 - Snapshots combine a committed container image with a workspace tarball.
+- QEMU snapshots combine the promoted base image reference with a workspace tarball and restore by rebuilding the overlay from the base image.
 - The daemon requires `SANDBOX_TRUSTED_DOCKER_RUNTIME=true` when `SANDBOX_RUNTIME=docker` because Docker is treated as a shared-kernel trusted mode, not a production hostile multi-tenant boundary.
 - Policy guardrails can restrict allowed base images, public tunnels, maximum sandbox lifetime, and idle time.
 - `GET /v1/runtime/capacity` and `GET /metrics` expose production-oriented capacity and pressure views for operators.

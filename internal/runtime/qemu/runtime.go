@@ -1,6 +1,8 @@
 package qemu
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"or3-sandbox/internal/archiveutil"
 	"or3-sandbox/internal/guestimage"
 	"or3-sandbox/internal/model"
 )
@@ -83,6 +86,8 @@ type Runtime struct {
 	bootTimeout                   time.Duration
 	pollInterval                  time.Duration
 	workspaceFileTransferMaxBytes int64
+	sessionManager                *agentSessionManager
+	mkfsExt4Binary                string
 
 	runCommand  commandRunner
 	sshReady    sshProbe
@@ -142,6 +147,7 @@ func New(opts Options) (*Runtime, error) {
 	runtime := &Runtime{
 		qemuBinary:                    opts.Binary,
 		qemuImgBinary:                 qemuImgBinary,
+		mkfsExt4Binary:                "mkfs.ext4",
 		sshBinary:                     opts.SSHBinary,
 		scpBinary:                     opts.SCPBinary,
 		accelerator:                   accel,
@@ -154,6 +160,7 @@ func New(opts Options) (*Runtime, error) {
 		bootTimeout:                   opts.BootTimeout,
 		pollInterval:                  defaultPollInterval,
 		workspaceFileTransferMaxBytes: workspaceFileTransferLimit(opts.WorkspaceFileTransferMaxBytes),
+		sessionManager:                &agentSessionManager{sessions: make(map[string]*agentSession)},
 	}
 	runtime.runCommand = runtime.defaultRunCommand
 	runtime.sshReady = runtime.defaultSSHProbe
@@ -192,7 +199,7 @@ func (r *Runtime) Create(ctx context.Context, spec model.SandboxSpec) (model.Run
 	if err := r.createRootDisk(ctx, baseImagePath, layout.rootDiskPath, rootBytes); err != nil {
 		return model.RuntimeState{}, err
 	}
-	if err := r.createWorkspaceDisk(ctx, layout.workspaceDiskPath, workspaceBytes); err != nil {
+	if err := r.createWorkspaceDisk(ctx, layout.workspaceDiskPath, workspaceBytes, spec.SandboxID, ""); err != nil {
 		return model.RuntimeState{}, err
 	}
 	if r.controlModeForSpec(spec) == model.GuestControlModeSSHCompat {
@@ -240,14 +247,18 @@ func (r *Runtime) Start(ctx context.Context, sandbox model.Sandbox) (model.Runti
 
 // Stop shuts down a QEMU sandbox.
 func (r *Runtime) Stop(ctx context.Context, sandbox model.Sandbox, force bool) (model.RuntimeState, error) {
-	_ = ctx
 	layout := layoutForSandbox(sandbox)
-	pid, err := r.liveSandboxPID(layout)
-	if errors.Is(err, os.ErrNotExist) {
+	state, err := r.Inspect(ctx, sandbox)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return model.RuntimeState{}, err
+	}
+	if state.Status == model.SandboxStatusStopped || errors.Is(err, os.ErrNotExist) {
+		r.invalidateAgentSession(sandbox.ID)
 		_ = os.Remove(suspendedMarkerPath(layout))
 		return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
 	}
-	if err != nil {
+	pid, err := r.liveSandboxPID(layout)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return model.RuntimeState{}, err
 	}
 	if isSuspended(layout) && !force {
@@ -255,9 +266,22 @@ func (r *Runtime) Stop(ctx context.Context, sandbox model.Sandbox, force bool) (
 			return model.RuntimeState{}, err
 		}
 	}
+	if !force && r.controlModeForSandbox(sandbox) == model.GuestControlModeAgent {
+		shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_ = r.agentShutdown(shutdownCtx, sandbox, layout)
+		cancel()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := r.liveSandboxPID(layout); errors.Is(err, os.ErrNotExist) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
 	if err := terminatePID(pid, force); err != nil {
 		return model.RuntimeState{}, err
 	}
+	r.invalidateAgentSession(sandbox.ID)
 	_ = os.Remove(layout.pidPath)
 	_ = os.Remove(suspendedMarkerPath(layout))
 	return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
@@ -308,14 +332,19 @@ func (r *Runtime) Resume(ctx context.Context, sandbox model.Sandbox) (model.Runt
 // Destroy tears down the guest process and related runtime state.
 func (r *Runtime) Destroy(ctx context.Context, sandbox model.Sandbox) error {
 	_, _ = r.Stop(ctx, sandbox, true)
+	r.invalidateAgentSession(sandbox.ID)
 	return os.RemoveAll(layoutForSandbox(sandbox).baseDir)
 }
 
 // Inspect probes the current guest state for sandbox.
 func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.RuntimeState, error) {
-	layout := layoutForSandbox(sandbox)
+	return r.deriveRuntimeState(ctx, sandbox, layoutForSandbox(sandbox))
+}
+
+func (r *Runtime) deriveRuntimeState(ctx context.Context, sandbox model.Sandbox, layout sandboxLayout) (model.RuntimeState, error) {
 	pid, err := r.liveSandboxPID(layout)
 	if errors.Is(err, os.ErrNotExist) {
+		r.invalidateAgentSession(sandbox.ID)
 		_ = os.Remove(suspendedMarkerPath(layout))
 		return model.RuntimeState{RuntimeID: sandbox.RuntimeID, Status: model.SandboxStatusStopped}, nil
 	}
@@ -324,63 +353,17 @@ func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.Run
 	}
 	if isSuspended(layout) {
 		return model.RuntimeState{
-			RuntimeID: sandbox.RuntimeID,
-			Status:    model.SandboxStatusSuspended,
-			Running:   false,
-			Pid:       pid,
-		}, nil
-	}
-
-	// For agent-mode sandboxes, use the serial log bootstrap marker as the
-	// primary readiness indicator.  Probing over the QEMU virtio-serial
-	// chardev socket is unreliable for periodic health checks because the
-	// single-client socket cannot reconnect deterministically after the
-	// host disconnects.  The agent socket is still used for actual
-	// operations (exec, files, TTY, tunnels) where retry logic handles any
-	// transient chardev disruptions.
-	transport, transportErr := r.controlTransportForSandbox(sandbox)
-	if transportErr == nil && transport.mode == model.GuestControlModeAgent {
-		if reason, ok := bootFailureReason(layout.serialLogPath); ok {
-			return model.RuntimeState{
-				RuntimeID:   sandbox.RuntimeID,
-				Status:      model.SandboxStatusError,
-				Running:     false,
-				Pid:         pid,
-				ControlMode: r.controlModeForSandbox(sandbox),
-				Error:       reason,
-			}, nil
-		}
-		if serialLogShowsReady(layout.serialLogPath) {
-			return model.RuntimeState{
-				RuntimeID:   sandbox.RuntimeID,
-				Status:      model.SandboxStatusRunning,
-				Running:     true,
-				Pid:         pid,
-				IPAddress:   "127.0.0.1",
-				ControlMode: r.controlModeForSandbox(sandbox),
-			}, nil
-		}
-		if withinBootWindow(layout.pidPath, r.effectiveBootTimeout()) {
-			return model.RuntimeState{
-				RuntimeID:   sandbox.RuntimeID,
-				Status:      model.SandboxStatusBooting,
-				Running:     false,
-				Pid:         pid,
-				ControlMode: r.controlModeForSandbox(sandbox),
-				Error:       "guest is still booting",
-			}, nil
-		}
-		return model.RuntimeState{
 			RuntimeID:   sandbox.RuntimeID,
-			Status:      model.SandboxStatusDegraded,
+			Status:      model.SandboxStatusSuspended,
 			Running:     false,
 			Pid:         pid,
 			ControlMode: r.controlModeForSandbox(sandbox),
-			Error:       "guest process is alive but bootstrap marker not found",
 		}, nil
 	}
-
-	// SSH-compat and fallback: probe via SSH or agent socket.
+	transport, transportErr := r.controlTransportForSandbox(sandbox)
+	if transportErr != nil {
+		return model.RuntimeState{}, transportErr
+	}
 	target := r.sshTarget(sandbox, layout)
 	probeCtx, cancel := context.WithTimeout(ctx, readyProbeTimeout)
 	defer cancel()
@@ -391,7 +374,7 @@ func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.Run
 				Status:      model.SandboxStatusError,
 				Running:     false,
 				Pid:         pid,
-				ControlMode: r.controlModeForSandbox(sandbox),
+				ControlMode: transport.mode,
 				Error:       reason,
 			}, nil
 		}
@@ -401,7 +384,7 @@ func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.Run
 				Status:      model.SandboxStatusBooting,
 				Running:     false,
 				Pid:         pid,
-				ControlMode: r.controlModeForSandbox(sandbox),
+				ControlMode: transport.mode,
 				Error:       fmt.Sprintf("guest is still booting: %v", err),
 			}, nil
 		}
@@ -410,7 +393,7 @@ func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.Run
 			Status:      model.SandboxStatusDegraded,
 			Running:     false,
 			Pid:         pid,
-			ControlMode: r.controlModeForSandbox(sandbox),
+			ControlMode: transport.mode,
 			Error:       fmt.Sprintf("guest process is alive but not ready: %v", err),
 		}, nil
 	}
@@ -420,7 +403,7 @@ func (r *Runtime) Inspect(ctx context.Context, sandbox model.Sandbox) (model.Run
 		Running:     true,
 		Pid:         pid,
 		IPAddress:   "127.0.0.1",
-		ControlMode: r.controlModeForSandbox(sandbox),
+		ControlMode: transport.mode,
 	}, nil
 }
 
@@ -433,42 +416,160 @@ func (r *Runtime) CreateSnapshot(ctx context.Context, sandbox model.Sandbox, sna
 	if state.Status != model.SandboxStatusStopped {
 		return model.SnapshotInfo{}, fmt.Errorf("qemu snapshots require the sandbox to be stopped")
 	}
-	layout := layoutForSandbox(sandbox)
-	snapshotDir := filepath.Join(sandbox.StorageRoot, ".snapshots", snapshotID)
-	if err := os.MkdirAll(snapshotDir, 0o755); err != nil {
-		return model.SnapshotInfo{}, err
-	}
-	rootSnapshot := filepath.Join(snapshotDir, "rootfs.img")
-	workspaceSnapshot := filepath.Join(snapshotDir, "workspace.img")
-	if err := copyFile(layout.rootDiskPath, rootSnapshot); err != nil {
-		return model.SnapshotInfo{}, err
-	}
-	if err := copyFile(layout.workspaceDiskPath, workspaceSnapshot); err != nil {
+	archivePath, err := r.exportStoppedWorkspaceArchive(ctx, sandbox)
+	if err != nil {
 		return model.SnapshotInfo{}, err
 	}
 	return model.SnapshotInfo{
-		ImageRef:     rootSnapshot,
-		WorkspaceTar: workspaceSnapshot,
+		ImageRef:     sandbox.BaseImageRef,
+		WorkspaceTar: archivePath,
 	}, nil
+}
+
+func (r *Runtime) exportStoppedWorkspaceArchive(ctx context.Context, sandbox model.Sandbox) (string, error) {
+	layout := layoutForSandbox(sandbox)
+	maxBytes := workspaceFileTransferLimit(r.workspaceFileTransferMaxBytes)
+	if r.runCommand != nil && r.qemuImgBinary != "" {
+		if _, err := os.Stat(layout.workspaceDiskPath); err == nil {
+			return r.exportWorkspaceArchiveFromDiskImage(ctx, layout.workspaceDiskPath, filepath.Dir(sandbox.WorkspaceRoot), maxBytes)
+		}
+	}
+	return createWorkspaceArchiveFromDirectory(sandbox.WorkspaceRoot, filepath.Dir(sandbox.WorkspaceRoot), maxBytes)
+}
+
+func (r *Runtime) exportWorkspaceArchiveFromDiskImage(ctx context.Context, workspaceDiskPath, outputDir string, maxBytes int64) (string, error) {
+	stagingRoot, err := os.MkdirTemp(filepath.Dir(workspaceDiskPath), "workspace-export-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(stagingRoot)
+	dumpRoot := filepath.Join(stagingRoot, "dump")
+	if err := os.MkdirAll(dumpRoot, 0o755); err != nil {
+		return "", err
+	}
+	if _, err := r.runCommand(ctx, "debugfs", "-R", fmt.Sprintf("rdump / %s", dumpRoot), workspaceDiskPath); err != nil {
+		return "", fmt.Errorf("export workspace from %q: %w", workspaceDiskPath, err)
+	}
+	return createWorkspaceArchiveFromDirectory(dumpRoot, outputDir, maxBytes)
+}
+
+func createWorkspaceArchiveFromDirectory(rootDir, outputDir string, maxBytes int64) (string, error) {
+	archiveFile, err := os.CreateTemp(outputDir, "workspace-export-*.tar.gz")
+	if err != nil {
+		return "", err
+	}
+	success := false
+	defer func() {
+		if !success {
+			_ = archiveFile.Close()
+			_ = os.Remove(archiveFile.Name())
+		}
+	}()
+	gzipWriter := gzip.NewWriter(archiveFile)
+	tarWriter := tar.NewWriter(gzipWriter)
+	var totalBytes int64
+	err = filepath.Walk(rootDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(rootDir, path)
+		if err != nil {
+			return err
+		}
+		name := filepath.ToSlash(rel)
+		if name == "." {
+			return nil
+		}
+		if name == "lost+found" || strings.HasPrefix(name, "lost+found/") {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("workspace path contains unsupported symlink: %s", name)
+		}
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = name
+		if info.IsDir() {
+			header.Name += "/"
+		}
+		if !info.IsDir() {
+			totalBytes += info.Size()
+			if maxBytes > 0 && totalBytes > maxBytes {
+				return model.FileTransferTooLargeError(maxBytes)
+			}
+		}
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		_, err = io.Copy(tarWriter, file)
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := tarWriter.Close(); err != nil {
+		return "", err
+	}
+	if err := gzipWriter.Close(); err != nil {
+		return "", err
+	}
+	if err := archiveFile.Close(); err != nil {
+		return "", err
+	}
+	success = true
+	return archiveFile.Name(), nil
 }
 
 // RestoreSnapshot restores sandbox from snapshot.
 func (r *Runtime) RestoreSnapshot(ctx context.Context, sandbox model.Sandbox, snapshot model.Snapshot) (model.RuntimeState, error) {
-	_ = ctx
 	layout := layoutForSandbox(sandbox)
 	if err := ensureLayout(layout); err != nil {
 		return model.RuntimeState{}, err
 	}
-	if snapshot.ImageRef != "" {
-		if err := copyFile(snapshot.ImageRef, layout.rootDiskPath); err != nil {
-			return model.RuntimeState{}, err
-		}
+	baseImagePath := strings.TrimSpace(snapshot.ImageRef)
+	if baseImagePath == "" {
+		baseImagePath = sandbox.BaseImageRef
+	}
+	if baseImagePath == "" {
+		return model.RuntimeState{}, fmt.Errorf("qemu snapshot restore requires a base image reference")
+	}
+	baseVirtualSizeBytes, err := r.baseImageVirtualSizeBytes(ctx, baseImagePath)
+	if err != nil {
+		return model.RuntimeState{}, err
+	}
+	rootBytes, workspaceBytes := splitDiskBytes(sandbox.DiskLimitMB, baseVirtualSizeBytes)
+	if err := r.createRootDisk(ctx, baseImagePath, layout.rootDiskPath, rootBytes); err != nil {
+		return model.RuntimeState{}, err
 	}
 	if snapshot.WorkspaceTar != "" {
-		if err := copyFile(snapshot.WorkspaceTar, layout.workspaceDiskPath); err != nil {
+		stagingRoot, err := os.MkdirTemp(layout.baseDir, "workspace-restore-*")
+		if err != nil {
 			return model.RuntimeState{}, err
 		}
+		defer os.RemoveAll(stagingRoot)
+		if _, err := archiveutil.ExtractTarGz(snapshot.WorkspaceTar, stagingRoot, archiveutil.Limits{MaxBytes: model.MaxWorkspaceFileTransferCeilingBytes, MaxFiles: 100000, MaxExpansionRatio: 64}); err != nil {
+			return model.RuntimeState{}, err
+		}
+		if err := r.createWorkspaceDisk(ctx, layout.workspaceDiskPath, workspaceBytes, sandbox.ID, stagingRoot); err != nil {
+			return model.RuntimeState{}, err
+		}
+	} else if err := r.createWorkspaceDisk(ctx, layout.workspaceDiskPath, workspaceBytes, sandbox.ID, ""); err != nil {
+		return model.RuntimeState{}, err
 	}
+	r.invalidateAgentSession(sandbox.ID)
 	return model.RuntimeState{
 		RuntimeID: sandbox.RuntimeID,
 		Status:    model.SandboxStatusStopped,
@@ -493,19 +594,30 @@ func (r *Runtime) createRootDisk(ctx context.Context, baseImagePath, outputPath 
 	return err
 }
 
-func (r *Runtime) createWorkspaceDisk(ctx context.Context, outputPath string, sizeBytes int64) error {
+func (r *Runtime) createWorkspaceDisk(ctx context.Context, outputPath string, sizeBytes int64, sandboxID, seedDir string) error {
 	if r.qemuImgBinary == "" || r.runCommand == nil {
 		return createSparseFile(outputPath, sizeBytes)
 	}
 	_ = os.Remove(outputPath)
-	_, err := r.runCommand(
+	if _, err := r.runCommand(
 		ctx,
 		r.qemuImgBinary,
 		"create",
 		"-f", "raw",
 		outputPath,
 		qemuSize(sizeBytes),
-	)
+	); err != nil {
+		return err
+	}
+	if strings.TrimSpace(r.mkfsExt4Binary) == "" {
+		return nil
+	}
+	args := []string{"-F", "-L", r.workspaceDiskLabelForSandbox(sandboxID)}
+	if strings.TrimSpace(seedDir) != "" {
+		args = append(args, "-d", seedDir)
+	}
+	args = append(args, outputPath)
+	_, err := r.runCommand(ctx, r.mkfsExt4Binary, args...)
 	return err
 }
 
@@ -1042,7 +1154,17 @@ func (r *Runtime) probeReady(ctx context.Context, sandbox model.Sandbox, layout 
 		return err
 	}
 	if transport.mode == model.GuestControlModeAgent {
-		return r.agentProbeReadySingleConn(ctx, layout, sandbox)
+		result, err := r.agentPing(ctx, sandbox, layout)
+		if err != nil {
+			return err
+		}
+		if !result.Ready {
+			if result.Reason == "" {
+				result.Reason = "guest agent reported not ready"
+			}
+			return errors.New(result.Reason)
+		}
+		return nil
 	}
 	return r.sshReady(ctx, target)
 }

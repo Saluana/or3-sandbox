@@ -313,59 +313,100 @@ func TestAgentReadyAllowsSlowGuestResponseWithinCallerDeadline(t *testing.T) {
 	}
 }
 
+func TestProbeReadyAgentModeUsesPersistentPing(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	defer cmd.Process.Kill()
+
+	base := t.TempDir()
+	sandbox := model.Sandbox{
+		ID:            "sbx-probe-ready",
+		RuntimeID:     "qemu-sbx-probe-ready",
+		ControlMode:   model.GuestControlModeAgent,
+		StorageRoot:   filepath.Join(base, "rootfs"),
+		WorkspaceRoot: filepath.Join(base, "workspace"),
+		CacheRoot:     filepath.Join(base, "cache"),
+	}
+	layout := layoutForSandbox(sandbox)
+	if err := ensureLayout(layout); err != nil {
+		t.Fatalf("ensure layout: %v", err)
+	}
+	if err := os.WriteFile(layout.pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+	listener, err := net.Listen("unix", layout.agentSocketPath)
+	if err != nil {
+		t.Fatalf("listen agent socket: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			request, err := agentproto.ReadMessage(conn)
+			if err != nil {
+				return
+			}
+			if request.Op == agentproto.OpPing {
+				result, _ := json.Marshal(agentproto.PingResult{Ready: true})
+				_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+				return
+			}
+		}
+	}()
+	r := &Runtime{}
+	if err := r.probeReady(context.Background(), sandbox, layout, sshTarget{}); err != nil {
+		t.Fatalf("expected agent readiness probe to succeed via ping, got %v", err)
+	}
+}
+
 func TestAgentWriteWorkspaceFileBytesChunksLargeFiles(t *testing.T) {
 	content := []byte(strings.Repeat("abcdef", agentproto.MaxFileChunkSize/6+5))
-	expectedChunks := (len(content) + agentproto.MaxFileChunkSize - 1) / agentproto.MaxFileChunkSize
-	type writeChunk struct {
-		Offset    int64
-		TotalSize int64
-		Truncate  bool
-		EOF       bool
-		Data      []byte
-	}
-	chunksCh := make(chan writeChunk, expectedChunks)
-	socketPath := startTestAgentSocketLoop(t, expectedChunks+1, func(conn net.Conn) {
+	var rebuilt []byte
+	socketPath := startTestAgentSocket(t, func(conn net.Conn) {
 		defer conn.Close()
-		request, _ := agentproto.ReadMessage(conn)
-		if request.Op == agentproto.OpHello {
-			result, _ := json.Marshal(agentproto.HelloResult{
-				ProtocolVersion:          agentproto.ProtocolVersion,
-				WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
-				MaxFileTransferBytes:     agentproto.MaxFileTransferSize,
-			})
-			_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
-			return
+		for {
+			request, err := agentproto.ReadMessage(conn)
+			if err != nil {
+				return
+			}
+			switch request.Op {
+			case agentproto.OpHello:
+				result, _ := json.Marshal(agentproto.HelloResult{ProtocolVersion: agentproto.ProtocolVersion, WorkspaceContractVersion: model.DefaultWorkspaceContractVersion, MaxFileTransferBytes: agentproto.MaxFileTransferSize})
+				_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+			case agentproto.OpFileOpen:
+				result, _ := json.Marshal(agentproto.FileOpenResult{SessionID: "file-1"})
+				_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+			case agentproto.OpFileData:
+				var payload agentproto.FileData
+				if err := json.Unmarshal(request.Result, &payload); err != nil {
+					t.Errorf("unmarshal file data: %v", err)
+					return
+				}
+				data, err := agentproto.DecodeBytes(payload.Data)
+				if err != nil {
+					t.Errorf("decode file data: %v", err)
+					return
+				}
+				rebuilt = append(rebuilt, data...)
+			case agentproto.OpFileClose:
+				_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true})
+				return
+			}
 		}
-		var payload agentproto.FileWriteRequest
-		if err := json.Unmarshal(request.Result, &payload); err != nil {
-			t.Errorf("unmarshal file write request: %v", err)
-			return
-		}
-		data, err := agentproto.DecodeBytes(payload.Content)
-		if err != nil {
-			t.Errorf("decode file write chunk: %v", err)
-			return
-		}
-		chunksCh <- writeChunk{Offset: payload.Offset, TotalSize: payload.TotalSize, Truncate: payload.Truncate, EOF: payload.EOF, Data: data}
-		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true})
 	})
 	r := &Runtime{workspaceFileTransferMaxBytes: model.DefaultWorkspaceFileTransferMaxBytes}
-	if err := r.agentWriteWorkspaceFileBytes(context.Background(), sandboxLayout{agentSocketPath: socketPath}, "nested/file.txt", content); err != nil {
+	sandbox, layout := testAgentSandbox(t, socketPath)
+	if err := r.agentWriteWorkspaceFileBytes(context.Background(), sandbox, layout, "nested/file.txt", content); err != nil {
 		t.Fatalf("write workspace file bytes: %v", err)
 	}
-	close(chunksCh)
-	var rebuilt []byte
-	for chunk := range chunksCh {
-		if chunk.TotalSize != int64(len(content)) {
-			t.Fatalf("unexpected total size %d", chunk.TotalSize)
-		}
-		if chunk.Truncate != (chunk.Offset == 0) {
-			t.Fatalf("unexpected truncate flag for offset %d", chunk.Offset)
-		}
-		rebuilt = append(rebuilt, chunk.Data...)
-	}
 	if string(rebuilt) != string(content) {
-		t.Fatal("chunked write content mismatch")
+		t.Fatal("streamed write content mismatch")
 	}
 }
 
@@ -382,7 +423,8 @@ func TestAgentWriteWorkspaceFileBytesRejectsOversizePayload(t *testing.T) {
 	})
 	r := &Runtime{workspaceFileTransferMaxBytes: model.DefaultWorkspaceFileTransferMaxBytes}
 	content := []byte(strings.Repeat("x", int(model.DefaultWorkspaceFileTransferMaxBytes)+1))
-	err := r.agentWriteWorkspaceFileBytes(context.Background(), sandboxLayout{agentSocketPath: socketPath}, "large.bin", content)
+	sandbox, layout := testAgentSandbox(t, socketPath)
+	err := r.agentWriteWorkspaceFileBytes(context.Background(), sandbox, layout, "large.bin", content)
 	if err == nil || !strings.Contains(err.Error(), "maximum transfer size") {
 		t.Fatalf("expected oversize write rejection, got %v", err)
 	}
@@ -391,117 +433,135 @@ func TestAgentWriteWorkspaceFileBytesRejectsOversizePayload(t *testing.T) {
 	}
 }
 
-func TestAgentWriteWorkspaceFileBytesUsesGuestTransferLimit(t *testing.T) {
+func TestAgentWriteWorkspaceFileBytesUsesConfiguredTransferLimitWithoutHandshake(t *testing.T) {
 	socketPath := startTestAgentSocket(t, func(conn net.Conn) {
 		defer conn.Close()
-		request, _ := agentproto.ReadMessage(conn)
-		result, _ := json.Marshal(agentproto.HelloResult{
-			ProtocolVersion:          agentproto.ProtocolVersion,
-			WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
-			MaxFileTransferBytes:     1,
-		})
-		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+		select {}
 	})
-	r := &Runtime{workspaceFileTransferMaxBytes: 2}
-	err := r.agentWriteWorkspaceFileBytes(context.Background(), sandboxLayout{agentSocketPath: socketPath}, "small.bin", []byte("ok"))
+	r := &Runtime{workspaceFileTransferMaxBytes: 1}
+	sandbox, layout := testAgentSandbox(t, socketPath)
+	err := r.agentWriteWorkspaceFileBytes(context.Background(), sandbox, layout, "small.bin", []byte("ok"))
 	if !errors.Is(err, model.ErrFileTransferTooLarge) {
-		t.Fatalf("expected guest limit enforcement, got %v", err)
+		t.Fatalf("expected configured limit enforcement, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "1 bytes") {
-		t.Fatalf("expected error to mention guest transfer limit, got %v", err)
+		t.Fatalf("expected error to mention configured transfer limit, got %v", err)
+	}
+}
+
+func TestAgentExecStartsWithoutHelloHandshake(t *testing.T) {
+	socketPath := startTestAgentSocket(t, func(conn net.Conn) {
+		defer conn.Close()
+		request, err := agentproto.ReadMessage(conn)
+		if err != nil {
+			return
+		}
+		if request.Op != agentproto.OpExecStart {
+			return
+		}
+		opened, _ := json.Marshal(agentproto.ExecStartResult{ExecID: "exec-1"})
+		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: opened})
+		time.Sleep(10 * time.Millisecond)
+		result, _ := json.Marshal(agentproto.ExecEvent{
+			ExecID: "exec-1",
+			Result: &agentproto.ExecResult{
+				ExitCode:    0,
+				Status:      string(model.ExecutionStatusSucceeded),
+				StartedAt:   time.Now().UTC(),
+				CompletedAt: time.Now().UTC(),
+			},
+		})
+		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: "stream-1", Op: agentproto.OpExecEvent, OK: true, Result: result})
+	})
+	r := &Runtime{}
+	sandbox, layout := testAgentSandbox(t, socketPath)
+	handle, err := r.agentExec(context.Background(), sandbox, layout, model.ExecRequest{Command: []string{"/bin/true"}, Cwd: "/workspace"}, model.ExecStreams{})
+	if err != nil {
+		t.Fatalf("agent exec: %v", err)
+	}
+	result := handle.Wait()
+	if result.Status != model.ExecutionStatusSucceeded || result.ExitCode != 0 {
+		t.Fatalf("unexpected exec result: %#v", result)
 	}
 }
 
 func TestAgentReadWorkspaceFileBytesAssemblesChunks(t *testing.T) {
 	content := []byte(strings.Repeat("chunk-", agentproto.MaxFileChunkSize/6+3))
-	expectedChunks := (len(content) + agentproto.MaxFileChunkSize - 1) / agentproto.MaxFileChunkSize
-	socketPath := startTestAgentSocketLoop(t, expectedChunks+1, func(conn net.Conn) {
+	socketPath := startTestAgentSocket(t, func(conn net.Conn) {
 		defer conn.Close()
-		request, _ := agentproto.ReadMessage(conn)
-		if request.Op == agentproto.OpHello {
-			result, _ := json.Marshal(agentproto.HelloResult{
-				ProtocolVersion:          agentproto.ProtocolVersion,
-				WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
-				MaxFileTransferBytes:     agentproto.MaxFileTransferSize,
-			})
-			_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
-			return
+		for {
+			request, err := agentproto.ReadMessage(conn)
+			if err != nil {
+				return
+			}
+			switch request.Op {
+			case agentproto.OpHello:
+				result, _ := json.Marshal(agentproto.HelloResult{ProtocolVersion: agentproto.ProtocolVersion, WorkspaceContractVersion: model.DefaultWorkspaceContractVersion, MaxFileTransferBytes: agentproto.MaxFileTransferSize})
+				_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+			case agentproto.OpFileOpen:
+				result, _ := json.Marshal(agentproto.FileOpenResult{SessionID: "file-1", Size: int64(len(content))})
+				_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+				for offset := 0; offset < len(content); offset += agentproto.MaxFileChunkSize {
+					end := offset + agentproto.MaxFileChunkSize
+					if end > len(content) {
+						end = len(content)
+					}
+					payload, _ := json.Marshal(agentproto.FileData{SessionID: "file-1", Data: agentproto.EncodeBytes(content[offset:end]), EOF: end == len(content)})
+					_ = agentproto.WriteMessage(conn, agentproto.Message{ID: fmt.Sprintf("stream-%d", offset), Op: agentproto.OpFileData, OK: true, Result: payload})
+				}
+			case agentproto.OpFileClose:
+				_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true})
+				return
+			}
 		}
-		var payload agentproto.FileReadRequest
-		if err := json.Unmarshal(request.Result, &payload); err != nil {
-			t.Errorf("unmarshal file read request: %v", err)
-			return
-		}
-		end := int(payload.Offset) + agentproto.MaxFileChunkSize
-		if end > len(content) {
-			end = len(content)
-		}
-		result, _ := json.Marshal(agentproto.FileReadResult{
-			Path:    payload.Path,
-			Content: agentproto.EncodeBytes(content[int(payload.Offset):end]),
-			Offset:  payload.Offset,
-			Size:    int64(len(content)),
-			EOF:     end == len(content),
-		})
-		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
 	})
 	r := &Runtime{workspaceFileTransferMaxBytes: model.DefaultWorkspaceFileTransferMaxBytes}
-	data, err := r.agentReadWorkspaceFileBytes(context.Background(), sandboxLayout{agentSocketPath: socketPath}, "nested/file.txt")
+	sandbox, layout := testAgentSandbox(t, socketPath)
+	data, err := r.agentReadWorkspaceFileBytes(context.Background(), sandbox, layout, "nested/file.txt")
 	if err != nil {
 		t.Fatalf("read workspace file bytes: %v", err)
 	}
 	if string(data) != string(content) {
-		t.Fatal("chunked read content mismatch")
+		t.Fatal("streamed read content mismatch")
 	}
 }
 
 func TestAgentReadWorkspaceFileBytesRejectsOversizePayload(t *testing.T) {
-	socketPath := startTestAgentSocketLoop(t, 2, func(conn net.Conn) {
+	socketPath := startTestAgentSocket(t, func(conn net.Conn) {
 		defer conn.Close()
-		request, _ := agentproto.ReadMessage(conn)
-		if request.Op == agentproto.OpHello {
-			result, _ := json.Marshal(agentproto.HelloResult{
-				ProtocolVersion:          agentproto.ProtocolVersion,
-				WorkspaceContractVersion: model.DefaultWorkspaceContractVersion,
-				MaxFileTransferBytes:     agentproto.MaxFileTransferSize,
-			})
-			_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
-			return
+		for {
+			request, err := agentproto.ReadMessage(conn)
+			if err != nil {
+				return
+			}
+			switch request.Op {
+			case agentproto.OpHello:
+				result, _ := json.Marshal(agentproto.HelloResult{ProtocolVersion: agentproto.ProtocolVersion, WorkspaceContractVersion: model.DefaultWorkspaceContractVersion, MaxFileTransferBytes: agentproto.MaxFileTransferSize})
+				_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+			case agentproto.OpFileOpen:
+				result, _ := json.Marshal(agentproto.FileOpenResult{SessionID: "file-1", Size: model.DefaultWorkspaceFileTransferMaxBytes + 1})
+				_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
+				return
+			}
 		}
-		result, _ := json.Marshal(agentproto.FileReadResult{
-			Path:    "/workspace/large.bin",
-			Content: agentproto.EncodeBytes([]byte("ok")),
-			Offset:  0,
-			Size:    model.DefaultWorkspaceFileTransferMaxBytes + 1,
-			EOF:     true,
-		})
-		_ = agentproto.WriteMessage(conn, agentproto.Message{ID: request.ID, Op: request.Op, OK: true, Result: result})
 	})
 	r := &Runtime{workspaceFileTransferMaxBytes: model.DefaultWorkspaceFileTransferMaxBytes}
-	_, err := r.agentReadWorkspaceFileBytes(context.Background(), sandboxLayout{agentSocketPath: socketPath}, "large.bin")
+	sandbox, layout := testAgentSandbox(t, socketPath)
+	_, err := r.agentReadWorkspaceFileBytes(context.Background(), sandbox, layout, "large.bin")
 	if !errors.Is(err, model.ErrFileTransferTooLarge) {
 		t.Fatalf("expected oversize read rejection, got %v", err)
 	}
 }
 
 func TestAgentTTYHandleRejectsWrongSessionData(t *testing.T) {
-	serverConn, clientConn := net.Pipe()
-	defer serverConn.Close()
-	defer clientConn.Close()
-
 	reader, writer := io.Pipe()
 	handle := &agentTTYHandle{
-		conn:      clientConn,
+		session:   &agentSession{},
 		sessionID: "pty-123",
 		reader:    reader,
 		writer:    writer,
 	}
-	go handle.readLoop()
-
-	payload, _ := json.Marshal(agentproto.PTYData{SessionID: "wrong-session", Data: agentproto.EncodeBytes([]byte("nope"))})
-	if err := agentproto.WriteMessage(serverConn, agentproto.Message{ID: "server-1", Op: agentproto.OpPTYData, OK: true, Result: payload}); err != nil {
-		t.Fatalf("write PTY payload: %v", err)
-	}
+	handle.deliver(agentproto.PTYData{SessionID: "wrong-session", Data: agentproto.EncodeBytes([]byte("nope"))})
 	buf := make([]byte, 1)
 	if n, err := reader.Read(buf); err != io.EOF || n != 0 {
 		t.Fatalf("expected PTY reader EOF after wrong session, got n=%d err=%v", n, err)
@@ -522,7 +582,7 @@ func TestAgentTTYHandleCloseIsIdempotent(t *testing.T) {
 
 	reader, writer := io.Pipe()
 	handle := &agentTTYHandle{
-		conn:      clientConn,
+		session:   &agentSession{},
 		sessionID: "pty-123",
 		reader:    reader,
 		writer:    writer,
@@ -536,23 +596,14 @@ func TestAgentTTYHandleCloseIsIdempotent(t *testing.T) {
 }
 
 func TestAgentTTYHandleStopsAfterEOFFrame(t *testing.T) {
-	serverConn, clientConn := net.Pipe()
-	defer serverConn.Close()
-	defer clientConn.Close()
-
 	reader, writer := io.Pipe()
 	handle := &agentTTYHandle{
-		conn:      clientConn,
+		session:   &agentSession{},
 		sessionID: "pty-123",
 		reader:    reader,
 		writer:    writer,
 	}
-	go handle.readLoop()
-
-	payload, _ := json.Marshal(agentproto.PTYData{SessionID: "pty-123", EOF: true})
-	if err := agentproto.WriteMessage(serverConn, agentproto.Message{ID: "server-1", Op: agentproto.OpPTYData, OK: true, Result: payload}); err != nil {
-		t.Fatalf("write PTY EOF payload: %v", err)
-	}
+	handle.deliver(agentproto.PTYData{SessionID: "pty-123", EOF: true})
 	buf := make([]byte, 1)
 	if n, err := reader.Read(buf); err != io.EOF || n != 0 {
 		t.Fatalf("expected EOF after PTY exit frame, got n=%d err=%v", n, err)
@@ -648,9 +699,16 @@ func TestCreateAndSnapshotArtifacts(t *testing.T) {
 	base := t.TempDir()
 	rootfs := filepath.Join(base, "rootfs")
 	workspace := filepath.Join(base, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "seed.txt"), []byte("seed"), 0o644); err != nil {
+		t.Fatalf("write workspace seed: %v", err)
+	}
+	baseImage := writeTestQEMUBaseImage(t)
 	spec := model.SandboxSpec{
 		SandboxID:     "sbx-test",
-		BaseImageRef:  writeTestQEMUBaseImage(t),
+		BaseImageRef:  baseImage,
 		StorageRoot:   rootfs,
 		WorkspaceRoot: workspace,
 		CacheRoot:     filepath.Join(base, "cache"),
@@ -674,6 +732,7 @@ func TestCreateAndSnapshotArtifacts(t *testing.T) {
 	sandbox := model.Sandbox{
 		ID:            spec.SandboxID,
 		RuntimeID:     state.RuntimeID,
+		BaseImageRef:  baseImage,
 		StorageRoot:   spec.StorageRoot,
 		WorkspaceRoot: spec.WorkspaceRoot,
 		CacheRoot:     spec.CacheRoot,
@@ -682,55 +741,62 @@ func TestCreateAndSnapshotArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot failed: %v", err)
 	}
-	for _, path := range []string{snapshot.ImageRef, snapshot.WorkspaceTar} {
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("expected snapshot artifact %s: %v", path, err)
-		}
+	if snapshot.ImageRef != baseImage {
+		t.Fatalf("expected snapshot image ref %q, got %q", baseImage, snapshot.ImageRef)
+	}
+	if _, err := os.Stat(snapshot.WorkspaceTar); err != nil {
+		t.Fatalf("expected snapshot archive %s: %v", snapshot.WorkspaceTar, err)
 	}
 }
 
-func TestRestoreSnapshotCopiesRootAndWorkspaceArtifacts(t *testing.T) {
+func TestRestoreSnapshotRebuildsWorkspaceFromArchive(t *testing.T) {
 	base := t.TempDir()
+	baseImage := writeTestQEMUBaseImage(t)
+	archiveRoot := filepath.Join(base, "archive-root")
+	if err := os.MkdirAll(filepath.Join(archiveRoot, "nested"), 0o755); err != nil {
+		t.Fatalf("mkdir archive root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(archiveRoot, "nested", "restored.txt"), []byte("workspace-snapshot-bytes"), 0o644); err != nil {
+		t.Fatalf("write archive file: %v", err)
+	}
+	workspaceArchive, err := createWorkspaceArchiveFromDirectory(archiveRoot, base, model.DefaultWorkspaceFileTransferMaxBytes)
+	if err != nil {
+		t.Fatalf("create workspace archive: %v", err)
+	}
 	sandbox := model.Sandbox{
 		ID:            "sbx-restore-snapshot",
 		RuntimeID:     "qemu-sbx-restore-snapshot",
+		BaseImageRef:  baseImage,
 		StorageRoot:   filepath.Join(base, "rootfs"),
 		WorkspaceRoot: filepath.Join(base, "workspace"),
 		CacheRoot:     filepath.Join(base, "cache"),
+		DiskLimitMB:   16,
 	}
 	layout := layoutForSandbox(sandbox)
 	if err := ensureLayout(layout); err != nil {
 		t.Fatalf("ensure layout: %v", err)
 	}
-	rootSnapshot := filepath.Join(base, "snapshot-root.img")
-	workspaceSnapshot := filepath.Join(base, "snapshot-workspace.img")
-	if err := os.WriteFile(rootSnapshot, []byte("root-snapshot-bytes"), 0o644); err != nil {
-		t.Fatalf("write root snapshot: %v", err)
-	}
-	if err := os.WriteFile(workspaceSnapshot, []byte("workspace-snapshot-bytes"), 0o644); err != nil {
-		t.Fatalf("write workspace snapshot: %v", err)
-	}
 	r := &Runtime{}
-	state, err := r.RestoreSnapshot(context.Background(), sandbox, model.Snapshot{ImageRef: rootSnapshot, WorkspaceTar: workspaceSnapshot})
+	state, err := r.RestoreSnapshot(context.Background(), sandbox, model.Snapshot{ImageRef: baseImage, WorkspaceTar: workspaceArchive})
 	if err != nil {
 		t.Fatalf("restore snapshot: %v", err)
 	}
 	if state.Status != model.SandboxStatusStopped {
 		t.Fatalf("unexpected restore status: %s", state.Status)
 	}
-	rootBytes, err := os.ReadFile(layout.rootDiskPath)
+	info, err := os.Stat(layout.rootDiskPath)
 	if err != nil {
-		t.Fatalf("read restored root disk: %v", err)
+		t.Fatalf("stat restored root disk: %v", err)
 	}
-	if string(rootBytes) != "root-snapshot-bytes" {
-		t.Fatalf("unexpected restored root bytes %q", string(rootBytes))
+	if info.Size() == 0 {
+		t.Fatal("expected restored root disk to be created")
 	}
-	workspaceBytes, err := os.ReadFile(layout.workspaceDiskPath)
+	workspaceInfo, err := os.Stat(layout.workspaceDiskPath)
 	if err != nil {
-		t.Fatalf("read restored workspace disk: %v", err)
+		t.Fatalf("stat restored workspace disk: %v", err)
 	}
-	if string(workspaceBytes) != "workspace-snapshot-bytes" {
-		t.Fatalf("unexpected restored workspace bytes %q", string(workspaceBytes))
+	if workspaceInfo.Size() == 0 {
+		t.Fatal("expected restored workspace disk to be created")
 	}
 }
 
@@ -747,7 +813,7 @@ func TestSerialLogShowsReadyDetectsMarker(t *testing.T) {
 	}
 }
 
-func TestInspectAgentModeUsesSerialLogReadyMarker(t *testing.T) {
+func TestInspectAgentModeUsesPingReadiness(t *testing.T) {
 	cmd := exec.Command("sleep", "30")
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start sleep: %v", err)
@@ -767,11 +833,35 @@ func TestInspectAgentModeUsesSerialLogReadyMarker(t *testing.T) {
 	if err := ensureLayout(layout); err != nil {
 		t.Fatalf("ensure layout: %v", err)
 	}
+	listener, err := net.Listen("unix", layout.agentSocketPath)
+	if err != nil {
+		t.Fatalf("listen agent socket: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			message, err := agentproto.ReadMessage(conn)
+			if err != nil {
+				return
+			}
+			switch message.Op {
+			case agentproto.OpHello:
+				result, _ := json.Marshal(agentproto.HelloResult{ProtocolVersion: agentproto.ProtocolVersion, WorkspaceContractVersion: model.DefaultWorkspaceContractVersion, MaxFileTransferBytes: agentproto.MaxFileTransferSize})
+				_ = agentproto.WriteMessage(conn, agentproto.Message{ID: message.ID, Op: message.Op, OK: true, Result: result})
+			case agentproto.OpPing:
+				result, _ := json.Marshal(agentproto.PingResult{Ready: true})
+				_ = agentproto.WriteMessage(conn, agentproto.Message{ID: message.ID, Op: message.Op, OK: true, Result: result})
+				return
+			}
+		}
+	}()
 	if err := os.WriteFile(layout.pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
 		t.Fatalf("write pid: %v", err)
-	}
-	if err := os.WriteFile(layout.serialLogPath, []byte("or3-bootstrap: ready\n"), 0o644); err != nil {
-		t.Fatalf("write serial log: %v", err)
 	}
 	r := &Runtime{}
 	state, err := r.Inspect(context.Background(), sandbox)
@@ -1273,6 +1363,30 @@ func startTestAgentSocketLoop(t *testing.T, accepts int, handler func(net.Conn))
 		<-done
 	})
 	return socketPath
+}
+
+func testAgentSandbox(t *testing.T, socketPath string) (model.Sandbox, sandboxLayout) {
+	t.Helper()
+	base := t.TempDir()
+	layout := sandboxLayout{
+		baseDir:         base,
+		rootfsDir:       filepath.Join(base, "rootfs"),
+		workspaceDir:    filepath.Join(base, "workspace"),
+		cacheDir:        filepath.Join(base, "cache"),
+		scratchDir:      filepath.Join(base, "scratch"),
+		secretsDir:      filepath.Join(base, "secrets"),
+		runtimeDir:      filepath.Join(base, ".runtime"),
+		pidPath:         filepath.Join(base, ".runtime", "qemu.pid"),
+		agentSocketPath: socketPath,
+	}
+	if err := ensureLayout(layout); err != nil {
+		t.Fatalf("ensure agent test layout: %v", err)
+	}
+	if err := os.WriteFile(layout.pidPath, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		t.Fatalf("write agent test pid: %v", err)
+	}
+	sandbox := model.Sandbox{ID: "sbx-agent-test", RuntimeID: "qemu-sbx-agent-test", ControlMode: model.GuestControlModeAgent, StorageRoot: layout.rootfsDir, WorkspaceRoot: layout.workspaceDir, CacheRoot: layout.cacheDir}
+	return sandbox, layout
 }
 
 func writeTestQEMUBaseImage(t *testing.T) string {

@@ -1,15 +1,12 @@
 {
-  "extends": "core",
-  "profile": "runtime",
-  "description": "Agent-based profile with common language runtimes and build tools.",
-  "capabilities": [
-    "runtime"
-  ],
-  "packages": [
-    "git",
-    "nodejs",
-    "npm",
-    "python3",
-    "python3-pip"
-  ]
+    "extends": "core",
+    "profile": "runtime",
+    "description": "Agent-based profile with common language runtimes and build tools.",
+    "control": {
+        "mode": "agent",
+        "protocol_version": "3",
+        "supported_transports": ["virtio-serial"]
+    },
+    "capabilities": ["runtime"],
+    "packages": ["git", "nodejs", "npm", "python3", "python3-pip"]
 }

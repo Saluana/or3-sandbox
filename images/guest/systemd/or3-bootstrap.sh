@@ -31,11 +31,6 @@ if [ ! -b "$WORKSPACE_DEVICE" ]; then
   exit 1
 fi
 
-if ! blkid "$WORKSPACE_DEVICE" >/dev/null 2>&1; then
-  mkfs.ext4 -F "$WORKSPACE_DEVICE"
-fi
-
-uuid="$(blkid -s UUID -o value "$WORKSPACE_DEVICE")"
 if ! mountpoint -q "$WORKSPACE_MOUNT"; then
   mount -t ext4 "$WORKSPACE_DEVICE" "$WORKSPACE_MOUNT"
 fi
@@ -43,10 +38,6 @@ fi
 if ! mountpoint -q "$WORKSPACE_MOUNT"; then
   log_bootstrap "or3-bootstrap: failed to mount $WORKSPACE_DEVICE on $WORKSPACE_MOUNT"
   exit 1
-fi
-
-if [ -n "$uuid" ] && ! grep -q "$uuid" /etc/fstab; then
-  echo "UUID=$uuid $WORKSPACE_MOUNT ext4 defaults,nofail 0 2" >> /etc/fstab
 fi
 
 if id "$WORKSPACE_OWNER" >/dev/null 2>&1; then

@@ -15,7 +15,7 @@ import (
 )
 
 // ProtocolVersion is the current guest-agent protocol version.
-const ProtocolVersion = "2"
+const ProtocolVersion = "3"
 
 const (
 	// MaxMessageSize is the maximum encoded size of a single agent message.
@@ -24,7 +24,7 @@ const (
 	MaxRequestIDLength = 128
 	// MaxFileTransferSize is the maximum file transfer size supported by the protocol.
 	MaxFileTransferSize = model.MaxWorkspaceFileTransferCeilingBytes
-	// MaxFileChunkSize is the maximum file payload size carried in one request.
+	// MaxFileChunkSize is the maximum file payload size carried in one message.
 	MaxFileChunkSize = 256 * 1024
 	// MaxBridgeChunkSize is the maximum bridged TCP payload size per message.
 	MaxBridgeChunkSize = 32 * 1024
@@ -33,10 +33,14 @@ const (
 const (
 	// OpHello performs the initial guest-agent handshake.
 	OpHello = "hello"
-	// OpReady queries the guest agent readiness state.
-	OpReady = "ready"
-	// OpExec executes a command in the guest.
-	OpExec = "exec"
+	// OpPing queries the guest agent readiness state and session health.
+	OpPing = "ping"
+	// OpExecStart executes a command in the guest.
+	OpExecStart = "exec_start"
+	// OpExecEvent carries streaming exec output and terminal results.
+	OpExecEvent = "exec_event"
+	// OpExecCancel cancels an in-flight exec.
+	OpExecCancel = "exec_cancel"
 	// OpPTYOpen opens a PTY session in the guest.
 	OpPTYOpen = "pty_open"
 	// OpPTYData carries PTY byte stream data.
@@ -45,14 +49,18 @@ const (
 	OpPTYResize = "pty_resize"
 	// OpPTYClose closes an active PTY session.
 	OpPTYClose = "pty_close"
-	// OpFileRead reads a file chunk from the guest workspace.
-	OpFileRead = "file_read"
-	// OpFileWrite writes a file chunk into the guest workspace.
-	OpFileWrite = "file_write"
+	// OpFileOpen opens a workspace file stream.
+	OpFileOpen = "file_open"
+	// OpFileData carries workspace file bytes.
+	OpFileData = "file_data"
+	// OpFileClose closes a workspace file stream.
+	OpFileClose = "file_close"
 	// OpFileDelete deletes a path in the guest workspace.
 	OpFileDelete = "file_delete"
 	// OpMkdir creates a directory in the guest workspace.
 	OpMkdir = "mkdir"
+	// OpArchiveStream streams normalized workspace archive entries.
+	OpArchiveStream = "archive_stream"
 	// OpTCPBridgeOpen opens a guest-local TCP bridge session.
 	OpTCPBridgeOpen = "tcp_bridge_open"
 	// OpTCPBridgeData carries bridged TCP payload data.
@@ -82,19 +90,27 @@ type HelloResult struct {
 	Ready                    bool     `json:"ready"`
 }
 
-// ReadyResult reports whether the guest agent is ready to serve requests.
-type ReadyResult struct {
+// PingResult reports whether the guest agent is ready to serve requests.
+type PingResult struct {
 	Ready  bool   `json:"ready"`
 	Reason string `json:"reason,omitempty"`
 }
 
-// ExecRequest describes a guest-agent exec request.
-type ExecRequest struct {
+// ReadyResult is a compatibility alias for the pre-v3 readiness payload name.
+type ReadyResult = PingResult
+
+// ExecStartRequest describes a guest-agent exec request.
+type ExecStartRequest struct {
 	Command  []string          `json:"command"`
 	Cwd      string            `json:"cwd,omitempty"`
 	Env      map[string]string `json:"env,omitempty"`
 	Timeout  time.Duration     `json:"timeout,omitempty"`
 	Detached bool              `json:"detached,omitempty"`
+}
+
+// ExecStartResult reports the opened exec session ID.
+type ExecStartResult struct {
+	ExecID string `json:"exec_id"`
 }
 
 // ExecResult reports the result of a guest-agent exec request.
@@ -107,6 +123,21 @@ type ExecResult struct {
 	StderrPreview   string    `json:"stderr_preview,omitempty"`
 	StdoutTruncated bool      `json:"stdout_truncated,omitempty"`
 	StderrTruncated bool      `json:"stderr_truncated,omitempty"`
+}
+
+// ExecEvent carries incremental stdout/stderr data or a final terminal result.
+type ExecEvent struct {
+	ExecID string      `json:"exec_id"`
+	Stream string      `json:"stream,omitempty"`
+	Data   string      `json:"data,omitempty"`
+	EOF    bool        `json:"eof,omitempty"`
+	Error  string      `json:"error,omitempty"`
+	Result *ExecResult `json:"result,omitempty"`
+}
+
+// ExecCancelRequest identifies an exec session to cancel.
+type ExecCancelRequest struct {
+	ExecID string `json:"exec_id"`
 }
 
 // PTYOpenRequest opens a new PTY session.
@@ -138,35 +169,59 @@ type PTYResizeRequest struct {
 	Cols      int    `json:"cols"`
 }
 
-// FileReadRequest requests a chunk of a guest file.
-type FileReadRequest struct {
+// FileOpenRequest opens a workspace file session.
+type FileOpenRequest struct {
 	Path     string `json:"path"`
-	Offset   int64  `json:"offset,omitempty"`
-	MaxBytes int    `json:"max_bytes,omitempty"`
+	Mode     string `json:"mode"`
+	Truncate bool   `json:"truncate,omitempty"`
 }
 
-// FileReadResult returns a chunk of guest file content.
-type FileReadResult struct {
-	Path    string `json:"path"`
-	Content string `json:"content,omitempty"`
-	Offset  int64  `json:"offset,omitempty"`
-	Size    int64  `json:"size,omitempty"`
-	EOF     bool   `json:"eof,omitempty"`
+// FileOpenResult reports an opened file session.
+type FileOpenResult struct {
+	SessionID string `json:"session_id"`
+	Size      int64  `json:"size,omitempty"`
 }
 
-// FileWriteRequest writes a chunk of a guest file.
-type FileWriteRequest struct {
-	Path      string `json:"path"`
-	Content   string `json:"content"`
-	Offset    int64  `json:"offset,omitempty"`
-	TotalSize int64  `json:"total_size,omitempty"`
-	Truncate  bool   `json:"truncate,omitempty"`
+// FileData carries streamed workspace file bytes.
+type FileData struct {
+	SessionID string `json:"session_id"`
+	Data      string `json:"data,omitempty"`
 	EOF       bool   `json:"eof,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// FileCloseRequest closes an active file transfer session.
+type FileCloseRequest struct {
+	SessionID string `json:"session_id"`
 }
 
 // PathRequest names a guest path for delete and mkdir operations.
 type PathRequest struct {
 	Path string `json:"path"`
+}
+
+// ArchiveStreamRequest requests a normalized workspace archive stream.
+type ArchiveStreamRequest struct {
+	Paths []string `json:"paths,omitempty"`
+}
+
+// ArchiveStreamStart acknowledges an opened archive stream session.
+type ArchiveStreamStart struct {
+	SessionID string `json:"session_id"`
+}
+
+// ArchiveStreamChunk carries normalized archive entry metadata and file bytes.
+type ArchiveStreamChunk struct {
+	SessionID string    `json:"session_id"`
+	Path      string    `json:"path,omitempty"`
+	Type      string    `json:"type,omitempty"`
+	Mode      int64     `json:"mode,omitempty"`
+	ModTime   time.Time `json:"mod_time,omitempty"`
+	Size      int64     `json:"size,omitempty"`
+	Data      string    `json:"data,omitempty"`
+	EOF       bool      `json:"eof,omitempty"`
+	End       bool      `json:"end,omitempty"`
+	Error     string    `json:"error,omitempty"`
 }
 
 // ShutdownRequest asks the guest agent to shut down or reboot the guest.
@@ -297,7 +352,7 @@ func ValidateResponse(message Message, expectedOp, expectedID string) error {
 // correlation.
 func RequiresRequestID(op string) bool {
 	switch op {
-	case OpPTYData, OpPTYResize, OpPTYClose, OpTCPBridgeData:
+	case OpExecEvent, OpFileData, OpPTYData, OpPTYResize, OpPTYClose, OpTCPBridgeData, OpArchiveStream:
 		return false
 	default:
 		return true

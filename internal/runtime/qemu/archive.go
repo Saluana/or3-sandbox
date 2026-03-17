@@ -5,18 +5,17 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"or3-sandbox/internal/model"
+	"or3-sandbox/internal/runtime/qemu/agentproto"
 )
-
-const workspaceArchiveCommandTimeout = 2 * time.Minute
 
 var _ model.WorkspaceArchiveExporter = (*Runtime)(nil)
 
@@ -27,80 +26,89 @@ func (r *Runtime) ExportWorkspaceArchive(ctx context.Context, sandbox model.Sand
 	if err != nil {
 		return "", err
 	}
-	localArchivePath := localArchive.Name()
-	if err := localArchive.Close(); err != nil {
-		_ = os.Remove(localArchivePath)
-		return "", err
-	}
-	guestArchive := fmt.Sprintf(".or3-workspace-export-%d.tar.gz", time.Now().UTC().UnixNano())
-	defer r.cleanupGuestWorkspaceArchive(sandbox, guestArchive)
-	if err := r.runWorkspaceArchiveCommand(ctx, sandbox, buildWorkspaceArchiveExportCommand(guestArchive, paths)); err != nil {
-		_ = os.Remove(localArchivePath)
-		return "", err
-	}
-	archiveBytes, err := r.readWorkspaceFileBytesWithLimit(ctx, sandbox, guestArchive, -1)
-	if err != nil {
-		_ = os.Remove(localArchivePath)
-		return "", err
-	}
-	if err := rewriteWorkspaceArchive(localArchivePath, archiveBytes, maxBytes); err != nil {
-		_ = os.Remove(localArchivePath)
-		return "", err
-	}
-	return localArchivePath, nil
-}
-
-func (r *Runtime) cleanupGuestWorkspaceArchive(sandbox model.Sandbox, relativePath string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = r.DeleteWorkspacePath(ctx, sandbox, relativePath)
-}
-
-func (r *Runtime) runWorkspaceArchiveCommand(ctx context.Context, sandbox model.Sandbox, script string) error {
-	handle, err := r.Exec(ctx, sandbox, model.ExecRequest{
-		Command: []string{"sh", "-lc", script},
-		Cwd:     "/workspace",
-		Timeout: workspaceArchiveCommandTimeout,
-	}, model.ExecStreams{})
-	if err != nil {
-		return err
-	}
-	result := handle.Wait()
-	if result.Status == model.ExecutionStatusSucceeded {
-		return nil
-	}
-	message := strings.TrimSpace(result.StderrPreview)
-	if message == "" {
-		message = strings.TrimSpace(result.StdoutPreview)
-	}
-	if message != "" {
-		return fmt.Errorf("workspace archive command failed: %s", message)
-	}
-	return fmt.Errorf("workspace archive command failed with status %s", result.Status)
-}
-
-func buildWorkspaceArchiveExportCommand(archivePath string, paths []string) string {
-	args := make([]string, 0, len(paths))
-	for _, requested := range paths {
-		if strings.TrimSpace(requested) == "" {
-			args = append(args, ".")
-			continue
+	defer func() {
+		if err != nil {
+			_ = localArchive.Close()
+			_ = os.Remove(localArchive.Name())
 		}
-		args = append(args, filepath.ToSlash(requested))
+	}()
+	gzipWriter := gzip.NewWriter(localArchive)
+	tarWriter := tar.NewWriter(gzipWriter)
+	stream, sessionID, err := r.streamWorkspaceArchive(ctx, sandbox, paths)
+	if err != nil {
+		return "", err
 	}
-	if len(args) == 0 {
-		args = append(args, ".")
+	defer func() {
+		if r.sessionManager != nil {
+			if session, sessionErr := r.ensureAgentSession(context.Background(), sandbox, layoutForSandbox(sandbox)); sessionErr == nil {
+				session.unregisterArchive(sessionID)
+			}
+		}
+	}()
+	var currentFile string
+	var totalBytes int64
+	seen := map[string]struct{}{}
+	for chunk := range stream {
+		if chunk.Error != "" {
+			return "", errors.New(chunk.Error)
+		}
+		if chunk.End {
+			break
+		}
+		name, err := normalizeWorkspaceArchiveEntryName(chunk.Path)
+		if err != nil {
+			return "", err
+		}
+		switch chunk.Type {
+		case "dir":
+			if name == "" {
+				continue
+			}
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			header := &tar.Header{Name: name + "/", Mode: chunk.Mode, ModTime: chunk.ModTime, Typeflag: tar.TypeDir}
+			if err := tarWriter.WriteHeader(header); err != nil {
+				return "", err
+			}
+			seen[name] = struct{}{}
+		case "file":
+			if _, ok := seen[name]; !ok {
+				header := &tar.Header{Name: name, Mode: chunk.Mode, ModTime: chunk.ModTime, Size: chunk.Size, Typeflag: tar.TypeReg}
+				if err := tarWriter.WriteHeader(header); err != nil {
+					return "", err
+				}
+				seen[name] = struct{}{}
+				currentFile = name
+			}
+			if chunk.Data != "" {
+				data, err := agentproto.DecodeBytes(chunk.Data)
+				if err != nil {
+					return "", err
+				}
+				totalBytes += int64(len(data))
+				if maxBytes > 0 && totalBytes > maxBytes {
+					return "", model.FileTransferTooLargeError(maxBytes)
+				}
+				if _, err := tarWriter.Write(data); err != nil {
+					return "", err
+				}
+			}
+			if chunk.EOF && currentFile == name {
+				currentFile = ""
+			}
+		}
 	}
-	quoted := make([]string, 0, len(args))
-	for _, arg := range args {
-		quoted = append(quoted, shellQuote(arg))
+	if err := tarWriter.Close(); err != nil {
+		return "", err
 	}
-	return strings.Join([]string{
-		"set -eu",
-		"if ! command -v tar >/dev/null 2>&1; then echo 'workspace export requires tar in guest' >&2; exit 127; fi",
-		"rm -f " + shellQuote(archivePath),
-		"tar -czf " + shellQuote(archivePath) + " --exclude=" + shellQuote("./"+archivePath) + " -- " + strings.Join(quoted, " "),
-	}, "\n")
+	if err := gzipWriter.Close(); err != nil {
+		return "", err
+	}
+	if err := localArchive.Close(); err != nil {
+		return "", err
+	}
+	return localArchive.Name(), nil
 }
 
 func rewriteWorkspaceArchive(destination string, archive []byte, maxBytes int64) error {

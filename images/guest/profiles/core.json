@@ -1,31 +1,19 @@
 {
-  "profile": "core",
-  "description": "Minimal production profile with agent-based control and no SSH or inner Docker.",
-  "control": {
-    "mode": "agent",
-    "protocol_version": "2",
-    "supported_transports": [
-      "virtio-serial"
-    ]
-  },
-  "workspace_contract_version": "1",
-  "capabilities": [
-    "exec",
-    "files",
-    "pty",
-    "tcp_bridge"
-  ],
-  "allowed_features": [],
-  "packages": [
-    "ca-certificates",
-    "curl",
-    "e2fsprogs",
-    "jq"
-  ],
-  "enable_services": [],
-  "sandbox_groups": [],
-  "sandbox_passwordless_sudo": false,
-  "ssh_present": false,
-  "dangerous": false,
-  "debug": false
+    "profile": "core",
+    "description": "Minimal production profile with agent-based control and no SSH or inner Docker.",
+    "control": {
+        "mode": "agent",
+        "protocol_version": "3",
+        "supported_transports": ["virtio-serial"]
+    },
+    "workspace_contract_version": "1",
+    "capabilities": ["exec", "files", "pty", "tcp_bridge"],
+    "allowed_features": [],
+    "packages": ["ca-certificates", "curl", "e2fsprogs", "jq"],
+    "enable_services": [],
+    "sandbox_groups": [],
+    "sandbox_passwordless_sudo": false,
+    "ssh_present": false,
+    "dangerous": false,
+    "debug": false
 }

@@ -36,6 +36,8 @@ func main() {
 	switch os.Args[1] {
 	case "doctor":
 		err = runDoctor(os.Args[2:])
+	case "qemu":
+		err = runQEMU(os.Args[2:])
 	case "config-lint":
 		err = runConfigLint(os.Args[2:])
 	case "create":
@@ -121,7 +123,7 @@ func runCreate(client clientConfig, args []string) error {
 	if err != nil {
 		return err
 	}
-	return doJSON(client, http.MethodPost, "/v1/sandboxes", model.CreateSandboxRequest{
+	if err := doJSON(client, http.MethodPost, "/v1/sandboxes", model.CreateSandboxRequest{
 		RuntimeSelection: model.ParseRuntimeSelection(*runtimeSelection),
 		BaseImageRef:     *image,
 		Profile:          model.GuestProfile(strings.ToLower(strings.TrimSpace(*profile))),
@@ -133,7 +135,10 @@ func runCreate(client clientConfig, args []string) error {
 		NetworkMode:      model.NetworkMode(*network),
 		AllowTunnels:     &allowTunnelsValue,
 		Start:            *start,
-	}, &sandbox)
+	}, &sandbox); err != nil {
+		return err
+	}
+	return printJSON(sandbox)
 }
 
 func runList(client clientConfig) error {
@@ -541,7 +546,7 @@ func printJSON(value any) error {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: sandboxctl <doctor|config-lint|create|list|inspect|start|stop|suspend|resume|delete|exec|tty|upload|download|mkdir|tunnel-create|tunnel-list|tunnel-revoke|quota|runtime-health|snapshot-create|snapshot-list|snapshot-inspect|snapshot-restore|preset|image|release-gate>")
+	fmt.Fprintln(os.Stderr, "usage: sandboxctl <doctor|qemu|config-lint|create|list|inspect|start|stop|suspend|resume|delete|exec|tty|upload|download|mkdir|tunnel-create|tunnel-list|tunnel-revoke|quota|runtime-health|snapshot-create|snapshot-list|snapshot-inspect|snapshot-restore|preset|image|release-gate>")
 }
 
 func env(key, fallback string) string {

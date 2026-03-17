@@ -1,33 +1,18 @@
 {
-  "extends": "runtime",
-  "profile": "debug",
-  "description": "Compatibility and troubleshooting profile with SSH and elevated convenience tools.",
-  "control": {
-    "mode": "ssh-compat",
-    "protocol_version": "2",
-    "supported_transports": [
-      "virtio-serial",
-      "ssh"
-    ]
-  },
-  "capabilities": [
-    "debug"
-  ],
-  "packages": [
-    "lsof",
-    "openssh-server",
-    "strace",
-    "sudo",
-    "tcpdump"
-  ],
-  "enable_services": [
-    "ssh"
-  ],
-  "sandbox_groups": [
-    "sudo"
-  ],
-  "sandbox_passwordless_sudo": true,
-  "ssh_present": true,
-  "dangerous": true,
-  "debug": true
+    "extends": "runtime",
+    "profile": "debug",
+    "description": "Compatibility and troubleshooting profile with SSH and elevated convenience tools.",
+    "control": {
+        "mode": "ssh-compat",
+        "protocol_version": "3",
+        "supported_transports": ["virtio-serial", "ssh"]
+    },
+    "capabilities": ["debug"],
+    "packages": ["lsof", "openssh-server", "strace", "sudo", "tcpdump"],
+    "enable_services": ["ssh"],
+    "sandbox_groups": ["sudo"],
+    "sandbox_passwordless_sudo": true,
+    "ssh_present": true,
+    "dangerous": true,
+    "debug": true
 }
