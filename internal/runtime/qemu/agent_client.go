@@ -42,22 +42,32 @@ type agentSession struct {
 	conn      net.Conn
 	handshake guestHandshake
 
-	writeMu  sync.Mutex
-	mu       sync.Mutex
-	pending  map[string]chan agentproto.Message
-	files    map[string]chan agentproto.FileData
-	execs    map[string]chan agentproto.ExecEvent
-	pty      map[string]*agentTTYHandle
-	bridge   map[string]*sandboxLocalConnHandle
-	archive  map[string]chan agentproto.ArchiveStreamChunk
-	closed   bool
-	closeCh  chan struct{}
-	closeErr error
+	writeMu         sync.Mutex
+	mu              sync.Mutex
+	pending         map[string]chan agentproto.Message
+	pendingFiles    map[string][]agentproto.FileData
+	pendingExecs    map[string][]agentproto.ExecEvent
+	pendingArchives map[string][]agentproto.ArchiveStreamChunk
+	pendingPTY      map[string][]agentproto.PTYData
+	files           map[string]chan agentproto.FileData
+	execs           map[string]chan agentproto.ExecEvent
+	pty             map[string]*agentTTYHandle
+	bridge          map[string]*sandboxLocalConnHandle
+	archive         map[string]chan agentproto.ArchiveStreamChunk
+	closed          bool
+	closeCh         chan struct{}
+	closeErr        error
 }
 
 var agentRequestCounter atomic.Uint64
 
-const defaultAgentRoundTripTimeout = 30 * time.Second
+const (
+	defaultAgentRoundTripTimeout  = 30 * time.Second
+	maxBufferedAgentFileEvents    = 64
+	maxBufferedAgentExecEvents    = 64
+	maxBufferedAgentArchiveEvents = 64
+	maxBufferedAgentPTYEvents     = 64
+)
 
 func (r *Runtime) agentSessions() *agentSessionManager {
 	if r.sessionManager == nil {
@@ -80,6 +90,9 @@ func (m *agentSessionManager) invalidate(sandboxID string) {
 	delete(m.sessions, key)
 	m.mu.Unlock()
 	if session != nil {
+		session.runtime.recordAgentMetric(session.sandboxID, func(metrics *agentSessionMetrics) {
+			metrics.sessionsInvalidated.Add(1)
+		})
 		session.close(errors.New("agent session invalidated"))
 	}
 }
@@ -102,6 +115,9 @@ func (r *Runtime) ensureAgentSession(ctx context.Context, sandbox model.Sandbox,
 	manager.mu.Lock()
 	existing := manager.sessions[key]
 	if existing != nil && existing.matches(sandbox.RuntimeID, pid, layout.agentSocketPath) && !existing.isClosed() {
+		r.recordAgentMetric(sandbox.ID, func(metrics *agentSessionMetrics) {
+			metrics.sessionsReused.Add(1)
+		})
 		manager.mu.Unlock()
 		return existing, nil
 	}
@@ -138,20 +154,27 @@ func (r *Runtime) openAgentSession(ctx context.Context, sandbox model.Sandbox, l
 		return nil, err
 	}
 	session := &agentSession{
-		runtime:    r,
-		sandboxID:  sandbox.ID,
-		runtimeID:  sandbox.RuntimeID,
-		pid:        pid,
-		socketPath: layout.agentSocketPath,
-		conn:       conn,
-		pending:    make(map[string]chan agentproto.Message),
-		files:      make(map[string]chan agentproto.FileData),
-		execs:      make(map[string]chan agentproto.ExecEvent),
-		pty:        make(map[string]*agentTTYHandle),
-		bridge:     make(map[string]*sandboxLocalConnHandle),
-		archive:    make(map[string]chan agentproto.ArchiveStreamChunk),
-		closeCh:    make(chan struct{}),
+		runtime:         r,
+		sandboxID:       sandbox.ID,
+		runtimeID:       sandbox.RuntimeID,
+		pid:             pid,
+		socketPath:      layout.agentSocketPath,
+		conn:            conn,
+		pending:         make(map[string]chan agentproto.Message),
+		pendingFiles:    make(map[string][]agentproto.FileData),
+		pendingExecs:    make(map[string][]agentproto.ExecEvent),
+		pendingArchives: make(map[string][]agentproto.ArchiveStreamChunk),
+		pendingPTY:      make(map[string][]agentproto.PTYData),
+		files:           make(map[string]chan agentproto.FileData),
+		execs:           make(map[string]chan agentproto.ExecEvent),
+		pty:             make(map[string]*agentTTYHandle),
+		bridge:          make(map[string]*sandboxLocalConnHandle),
+		archive:         make(map[string]chan agentproto.ArchiveStreamChunk),
+		closeCh:         make(chan struct{}),
 	}
+	r.recordAgentMetric(sandbox.ID, func(metrics *agentSessionMetrics) {
+		metrics.sessionsOpened.Add(1)
+	})
 	session.handshake = fallbackGuestHandshake(sandbox)
 	go session.readLoop()
 	return session, nil
@@ -167,6 +190,14 @@ func (s *agentSession) isClosed() bool {
 	return s.closed
 }
 
+func (s *agentSession) trace(event string, attrs ...any) {
+	if s == nil || s.runtime == nil {
+		return
+	}
+	base := []any{"sandbox_id", s.sandboxID, "runtime_id", s.runtimeID, "pid", s.pid}
+	s.runtime.traceAgent(event, append(base, attrs...)...)
+}
+
 func (s *agentSession) close(err error) {
 	s.mu.Lock()
 	if s.closed {
@@ -179,12 +210,20 @@ func (s *agentSession) close(err error) {
 	}
 	s.closeErr = err
 	pending := s.pending
+	pendingFiles := s.pendingFiles
+	pendingExecs := s.pendingExecs
+	pendingArchives := s.pendingArchives
+	pendingPTY := s.pendingPTY
 	fileStreams := s.files
 	execStreams := s.execs
 	archiveStreams := s.archive
 	ptyHandles := s.pty
 	bridgeHandles := s.bridge
 	s.pending = nil
+	s.pendingFiles = nil
+	s.pendingExecs = nil
+	s.pendingArchives = nil
+	s.pendingPTY = nil
 	s.files = nil
 	s.execs = nil
 	s.archive = nil
@@ -192,9 +231,21 @@ func (s *agentSession) close(err error) {
 	s.bridge = nil
 	close(s.closeCh)
 	s.mu.Unlock()
+	s.runtime.recordAgentMetric(s.sandboxID, func(metrics *agentSessionMetrics) {
+		metrics.sessionsClosed.Add(1)
+	})
+	s.trace("session.close", "error", err.Error())
 	_ = s.conn.Close()
 	for _, ch := range pending {
 		close(ch)
+	}
+	for range pendingFiles {
+	}
+	for range pendingExecs {
+	}
+	for range pendingArchives {
+	}
+	for range pendingPTY {
 	}
 	for _, ch := range fileStreams {
 		close(ch)
@@ -259,6 +310,7 @@ func (s *agentSession) readLoop() {
 			s.close(err)
 			return
 		}
+		s.trace("recv", "op", message.Op, "id", message.ID, "ok", message.OK, "error", message.Error, "result_bytes", len(message.Result))
 		if s.deliverPending(message) {
 			continue
 		}
@@ -269,14 +321,20 @@ func (s *agentSession) readLoop() {
 				s.close(err)
 				return
 			}
-			s.deliverFileRetry(payload)
+			if !s.deliverFile(payload) {
+				s.close(fmt.Errorf("unexpected file stream session %q", payload.SessionID))
+				return
+			}
 		case agentproto.OpExecEvent:
 			var payload agentproto.ExecEvent
 			if err := json.Unmarshal(message.Result, &payload); err != nil {
 				s.close(err)
 				return
 			}
-			s.deliverExecRetry(payload)
+			if !s.deliverExec(payload) {
+				s.close(fmt.Errorf("unexpected exec stream %q", payload.ExecID))
+				return
+			}
 		case agentproto.OpPTYData:
 			var payload agentproto.PTYData
 			if err := json.Unmarshal(message.Result, &payload); err != nil {
@@ -338,10 +396,12 @@ func (s *agentSession) deliverPending(message agentproto.Message) bool {
 func (s *agentSession) deliverFile(payload agentproto.FileData) bool {
 	s.mu.Lock()
 	ch, ok := s.files[payload.SessionID]
-	s.mu.Unlock()
 	if !ok {
-		return false
+		buffered := s.bufferFileLocked(payload)
+		s.mu.Unlock()
+		return buffered
 	}
+	s.mu.Unlock()
 	ch <- payload
 	if payload.EOF || payload.Error != "" {
 		s.unregisterFile(payload.SessionID)
@@ -352,10 +412,12 @@ func (s *agentSession) deliverFile(payload agentproto.FileData) bool {
 func (s *agentSession) deliverExec(payload agentproto.ExecEvent) bool {
 	s.mu.Lock()
 	ch, ok := s.execs[payload.ExecID]
-	s.mu.Unlock()
 	if !ok {
-		return false
+		buffered := s.bufferExecLocked(payload)
+		s.mu.Unlock()
+		return buffered
 	}
+	s.mu.Unlock()
 	ch <- payload
 	if payload.Result != nil || payload.Error != "" {
 		s.unregisterExec(payload.ExecID)
@@ -366,10 +428,12 @@ func (s *agentSession) deliverExec(payload agentproto.ExecEvent) bool {
 func (s *agentSession) deliverPTY(payload agentproto.PTYData) bool {
 	s.mu.Lock()
 	handle, ok := s.pty[payload.SessionID]
-	s.mu.Unlock()
 	if !ok {
-		return false
+		buffered := s.bufferPTYLocked(payload)
+		s.mu.Unlock()
+		return buffered
 	}
+	s.mu.Unlock()
 	handle.deliver(payload)
 	if payload.EOF {
 		s.unregisterPTY(payload.SessionID)
@@ -394,10 +458,12 @@ func (s *agentSession) deliverBridge(payload agentproto.TCPBridgeData) bool {
 func (s *agentSession) deliverArchive(payload agentproto.ArchiveStreamChunk) bool {
 	s.mu.Lock()
 	ch, ok := s.archive[payload.SessionID]
-	s.mu.Unlock()
 	if !ok {
-		return false
+		buffered := s.bufferArchiveLocked(payload)
+		s.mu.Unlock()
+		return buffered
 	}
+	s.mu.Unlock()
 	ch <- payload
 	if payload.End || payload.Error != "" {
 		s.unregisterArchive(payload.SessionID)
@@ -405,35 +471,68 @@ func (s *agentSession) deliverArchive(payload agentproto.ArchiveStreamChunk) boo
 	return true
 }
 
-// deliverExecRetry retries delivery briefly to handle the race between
-// roundTrip returning the exec_start result and registerExec being called.
-// The guest may send exec_event data immediately after exec_start result.
-func (s *agentSession) deliverExecRetry(payload agentproto.ExecEvent) {
-	for i := 0; i < 50; i++ {
-		if s.deliverExec(payload) {
-			return
-		}
-		if s.isClosed() {
-			return
-		}
-		time.Sleep(time.Millisecond)
+func (s *agentSession) bufferFileLocked(payload agentproto.FileData) bool {
+	if s.closed || s.pendingFiles == nil {
+		return false
 	}
-	// Drop the message rather than tearing down the session.
+	buffered := s.pendingFiles[payload.SessionID]
+	if len(buffered) >= maxBufferedAgentFileEvents {
+		s.runtime.recordAgentMetric(s.sandboxID, func(metrics *agentSessionMetrics) {
+			metrics.droppedFileEvents.Add(1)
+		})
+		return true
+	}
+	s.pendingFiles[payload.SessionID] = append(buffered, payload)
+	s.trace("file.buffer", "session_id", payload.SessionID, "eof", payload.EOF, "has_error", payload.Error != "")
+	s.runtime.recordAgentMetric(s.sandboxID, func(metrics *agentSessionMetrics) {
+		metrics.bufferedFileEvents.Add(1)
+	})
+	return true
 }
 
-// deliverFileRetry retries delivery briefly to handle the race between
-// roundTrip returning the file_open result and registerFile being called.
-func (s *agentSession) deliverFileRetry(payload agentproto.FileData) {
-	for i := 0; i < 50; i++ {
-		if s.deliverFile(payload) {
-			return
-		}
-		if s.isClosed() {
-			return
-		}
-		time.Sleep(time.Millisecond)
+func (s *agentSession) bufferExecLocked(payload agentproto.ExecEvent) bool {
+	if s.closed || s.pendingExecs == nil {
+		return false
 	}
-	// Drop the message rather than tearing down the session.
+	buffered := s.pendingExecs[payload.ExecID]
+	if len(buffered) >= maxBufferedAgentExecEvents {
+		s.runtime.recordAgentMetric(s.sandboxID, func(metrics *agentSessionMetrics) {
+			metrics.droppedExecEvents.Add(1)
+		})
+		return true
+	}
+	s.pendingExecs[payload.ExecID] = append(buffered, payload)
+	s.trace("exec.buffer", "exec_id", payload.ExecID, "stream", payload.Stream, "has_result", payload.Result != nil, "has_error", payload.Error != "")
+	s.runtime.recordAgentMetric(s.sandboxID, func(metrics *agentSessionMetrics) {
+		metrics.bufferedExecEvents.Add(1)
+	})
+	return true
+}
+
+func (s *agentSession) bufferArchiveLocked(payload agentproto.ArchiveStreamChunk) bool {
+	if s.closed || s.pendingArchives == nil {
+		return false
+	}
+	buffered := s.pendingArchives[payload.SessionID]
+	if len(buffered) >= maxBufferedAgentArchiveEvents {
+		return true
+	}
+	s.pendingArchives[payload.SessionID] = append(buffered, payload)
+	s.trace("archive.buffer", "session_id", payload.SessionID, "path", payload.Path, "end", payload.End, "has_error", payload.Error != "")
+	return true
+}
+
+func (s *agentSession) bufferPTYLocked(payload agentproto.PTYData) bool {
+	if s.closed || s.pendingPTY == nil {
+		return false
+	}
+	buffered := s.pendingPTY[payload.SessionID]
+	if len(buffered) >= maxBufferedAgentPTYEvents {
+		return true
+	}
+	s.pendingPTY[payload.SessionID] = append(buffered, payload)
+	s.trace("pty.buffer", "session_id", payload.SessionID, "eof", payload.EOF, "has_data", payload.Data != "")
+	return true
 }
 
 func (s *agentSession) roundTrip(ctx context.Context, op string, request any, out any) error {
@@ -449,6 +548,7 @@ func (s *agentSession) roundTrip(ctx context.Context, op string, request any, ou
 		payload = encoded
 	}
 	message := agentproto.Message{ID: nextAgentRequestID(), Op: op, Result: payload}
+	s.trace("send.request", "op", op, "id", message.ID, "payload_bytes", len(payload))
 	responseCh := make(chan agentproto.Message, 1)
 	s.mu.Lock()
 	if s.closed {
@@ -486,6 +586,7 @@ func (s *agentSession) roundTrip(ctx context.Context, op string, request any, ou
 				return err
 			}
 		}
+		s.trace("recv.response", "op", op, "id", response.ID, "ok", response.OK)
 		return nil
 	case <-ctx.Done():
 		s.mu.Lock()
@@ -518,23 +619,40 @@ func (s *agentSession) send(ctx context.Context, op string, payload any) error {
 		}
 		encoded = data
 	}
-	return s.writeMessage(ctx, agentproto.Message{ID: nextAgentRequestID(), Op: op, Result: encoded})
+	message := agentproto.Message{ID: nextAgentRequestID(), Op: op, Result: encoded}
+	s.trace("send.stream", "op", op, "id", message.ID, "payload_bytes", len(encoded))
+	return s.writeMessage(ctx, message)
 }
 
 func (s *agentSession) registerFile(sessionID string) (chan agentproto.FileData, error) {
-	ch := make(chan agentproto.FileData, 8)
+	ch := make(chan agentproto.FileData, maxBufferedAgentFileEvents)
 	s.mu.Lock()
 	if s.closed || s.files == nil {
 		s.mu.Unlock()
 		return nil, errors.New("agent session closed")
 	}
-	s.files[sessionID] = ch
+	buffered := append([]agentproto.FileData(nil), s.pendingFiles[sessionID]...)
+	delete(s.pendingFiles, sessionID)
+	terminal := false
+	for _, payload := range buffered {
+		ch <- payload
+		if payload.EOF || payload.Error != "" {
+			terminal = true
+		}
+	}
+	if !terminal {
+		s.files[sessionID] = ch
+	}
 	s.mu.Unlock()
+	if terminal {
+		close(ch)
+	}
 	return ch, nil
 }
 
 func (s *agentSession) unregisterFile(sessionID string) {
 	s.mu.Lock()
+	delete(s.pendingFiles, sessionID)
 	ch, ok := s.files[sessionID]
 	if ok {
 		delete(s.files, sessionID)
@@ -546,19 +664,34 @@ func (s *agentSession) unregisterFile(sessionID string) {
 }
 
 func (s *agentSession) registerExec(execID string) (chan agentproto.ExecEvent, error) {
-	ch := make(chan agentproto.ExecEvent, 32)
+	ch := make(chan agentproto.ExecEvent, maxBufferedAgentExecEvents)
 	s.mu.Lock()
 	if s.closed || s.execs == nil {
 		s.mu.Unlock()
 		return nil, errors.New("agent session closed")
 	}
-	s.execs[execID] = ch
+	buffered := append([]agentproto.ExecEvent(nil), s.pendingExecs[execID]...)
+	delete(s.pendingExecs, execID)
+	terminal := false
+	for _, payload := range buffered {
+		ch <- payload
+		if payload.Result != nil || payload.Error != "" {
+			terminal = true
+		}
+	}
+	if !terminal {
+		s.execs[execID] = ch
+	}
 	s.mu.Unlock()
+	if terminal {
+		close(ch)
+	}
 	return ch, nil
 }
 
 func (s *agentSession) unregisterExec(execID string) {
 	s.mu.Lock()
+	delete(s.pendingExecs, execID)
 	ch, ok := s.execs[execID]
 	if ok {
 		delete(s.execs, execID)
@@ -570,19 +703,34 @@ func (s *agentSession) unregisterExec(execID string) {
 }
 
 func (s *agentSession) registerArchive(sessionID string) (chan agentproto.ArchiveStreamChunk, error) {
-	ch := make(chan agentproto.ArchiveStreamChunk, 32)
+	ch := make(chan agentproto.ArchiveStreamChunk, maxBufferedAgentArchiveEvents)
 	s.mu.Lock()
 	if s.closed || s.archive == nil {
 		s.mu.Unlock()
 		return nil, errors.New("agent session closed")
 	}
-	s.archive[sessionID] = ch
+	buffered := append([]agentproto.ArchiveStreamChunk(nil), s.pendingArchives[sessionID]...)
+	delete(s.pendingArchives, sessionID)
+	terminal := false
+	for _, payload := range buffered {
+		ch <- payload
+		if payload.End || payload.Error != "" {
+			terminal = true
+		}
+	}
+	if !terminal {
+		s.archive[sessionID] = ch
+	}
 	s.mu.Unlock()
+	if terminal {
+		close(ch)
+	}
 	return ch, nil
 }
 
 func (s *agentSession) unregisterArchive(sessionID string) {
 	s.mu.Lock()
+	delete(s.pendingArchives, sessionID)
 	ch, ok := s.archive[sessionID]
 	if ok {
 		delete(s.archive, sessionID)
@@ -599,13 +747,28 @@ func (s *agentSession) registerPTY(handle *agentTTYHandle) error {
 		s.mu.Unlock()
 		return errors.New("agent session closed")
 	}
-	s.pty[handle.sessionID] = handle
+	buffered := append([]agentproto.PTYData(nil), s.pendingPTY[handle.sessionID]...)
+	delete(s.pendingPTY, handle.sessionID)
+	terminal := false
+	if !terminal {
+		s.pty[handle.sessionID] = handle
+	}
 	s.mu.Unlock()
+	for _, payload := range buffered {
+		handle.deliver(payload)
+		if payload.EOF {
+			terminal = true
+		}
+	}
+	if terminal {
+		s.unregisterPTY(handle.sessionID)
+	}
 	return nil
 }
 
 func (s *agentSession) unregisterPTY(sessionID string) {
 	s.mu.Lock()
+	delete(s.pendingPTY, sessionID)
 	delete(s.pty, sessionID)
 	s.mu.Unlock()
 }
@@ -633,7 +796,7 @@ func (r *Runtime) agentHandshake(ctx context.Context, layout sandboxLayout) (gue
 		return guestHandshake{}, err
 	}
 	defer conn.Close()
-	session := &agentSession{conn: conn, pending: make(map[string]chan agentproto.Message), closeCh: make(chan struct{})}
+	session := &agentSession{conn: conn, pending: make(map[string]chan agentproto.Message), pendingFiles: make(map[string][]agentproto.FileData), pendingExecs: make(map[string][]agentproto.ExecEvent), pendingPTY: make(map[string][]agentproto.PTYData), closeCh: make(chan struct{})}
 	go session.readLoop()
 	return session.hello(ctx, model.Sandbox{})
 }
@@ -644,7 +807,7 @@ func (r *Runtime) agentHandshakeForSandbox(ctx context.Context, layout sandboxLa
 		return guestHandshake{}, err
 	}
 	defer conn.Close()
-	session := &agentSession{conn: conn, pending: make(map[string]chan agentproto.Message), closeCh: make(chan struct{})}
+	session := &agentSession{conn: conn, pending: make(map[string]chan agentproto.Message), pendingFiles: make(map[string][]agentproto.FileData), pendingExecs: make(map[string][]agentproto.ExecEvent), pendingPTY: make(map[string][]agentproto.PTYData), closeCh: make(chan struct{})}
 	go session.readLoop()
 	return session.hello(ctx, sandbox)
 }
@@ -655,7 +818,7 @@ func (r *Runtime) agentReady(ctx context.Context, layout sandboxLayout) error {
 		return err
 	}
 	defer conn.Close()
-	session := &agentSession{conn: conn, pending: make(map[string]chan agentproto.Message), closeCh: make(chan struct{})}
+	session := &agentSession{conn: conn, pending: make(map[string]chan agentproto.Message), pendingFiles: make(map[string][]agentproto.FileData), pendingExecs: make(map[string][]agentproto.ExecEvent), pendingPTY: make(map[string][]agentproto.PTYData), closeCh: make(chan struct{})}
 	go session.readLoop()
 	result, err := session.Ping(ctx)
 	if err != nil {

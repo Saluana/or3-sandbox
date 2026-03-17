@@ -232,6 +232,72 @@ func TestRunDoctorRequiresProductionQEMUFlag(t *testing.T) {
 	}
 }
 
+func TestRunDoctorQEMUBundleWritesArtifacts(t *testing.T) {
+	root := t.TempDir()
+	imagePath := filepath.Join(root, "guest.qcow2")
+	if err := writeDoctorGuestContract(imagePath); err != nil {
+		t.Fatalf("write guest contract: %v", err)
+	}
+	logPath := filepath.Join(root, "sandboxd.log")
+	if err := os.WriteFile(logPath, []byte("daemon log\n"), 0o644); err != nil {
+		t.Fatalf("write daemon log: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/runtime/info":
+			_ = json.NewEncoder(w).Encode(model.RuntimeInfo{
+				Backend: "qemu",
+				GuestImage: &model.GuestImageIdentity{
+					Path:        imagePath,
+					SidecarPath: guestimage.SidecarPath(imagePath),
+					BuildVersion: "test",
+				},
+			})
+		case "/v1/runtime/health":
+			_ = json.NewEncoder(w).Encode(model.RuntimeHealth{Backend: "qemu", Healthy: true})
+		case "/v1/sandboxes/sbx-1":
+			_ = json.NewEncoder(w).Encode(model.Sandbox{ID: "sbx-1", Status: model.SandboxStatusRunning})
+		case "/v1/sandboxes/sbx-1/snapshots":
+			_ = json.NewEncoder(w).Encode([]model.Snapshot{{ID: "snap-1", SandboxID: "sbx-1"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("SANDBOX_API", server.URL)
+	t.Setenv("SANDBOX_TOKEN", "dev-token")
+	outputDir := filepath.Join(root, "bundle")
+	output := captureStdout(t, func() {
+		if err := runDoctor([]string{"qemu", "--sandbox", "sbx-1", "--output", outputDir, "--daemon-log", logPath}); err != nil {
+			t.Fatalf("runDoctor qemu failed: %v", err)
+		}
+	})
+	for _, artifact := range []string{
+		"runtime-info.json",
+		"runtime-health.json",
+		"sandbox.json",
+		"snapshots.json",
+		"guest-image-contract.json",
+		"daemon.log",
+		"summary.json",
+	} {
+		if _, err := os.Stat(filepath.Join(outputDir, artifact)); err != nil {
+			t.Fatalf("expected artifact %s: %v", artifact, err)
+		}
+	}
+	if !strings.Contains(output, "runtime-info.json") || !strings.Contains(output, outputDir) {
+		t.Fatalf("unexpected qemu doctor output: %s", output)
+	}
+	data, err := os.ReadFile(filepath.Join(outputDir, "daemon.log"))
+	if err != nil {
+		t.Fatalf("read copied daemon log: %v", err)
+	}
+	if string(data) != "daemon log\n" {
+		t.Fatalf("unexpected daemon log copy: %q", string(data))
+	}
+}
+
 func TestProductionQEMUDoctorReportsConfigFailures(t *testing.T) {
 	t.Setenv("SANDBOX_RUNTIME", "docker")
 	t.Setenv("SANDBOX_TRUSTED_DOCKER_RUNTIME", "true")

@@ -273,6 +273,7 @@ Runtime health:
 go run ./cmd/sandboxctl runtime-health
 go run ./cmd/sandboxctl config-lint
 go run ./cmd/sandboxctl doctor --production-qemu
+go run ./cmd/sandboxctl doctor qemu --sandbox <sandbox-id>
 ```
 
 These are good first commands when something seems wrong.
@@ -287,6 +288,8 @@ These are good first commands when something seems wrong.
 - the default runtime selection
 - auth and transport posture
 - host and guest-image prerequisite failures, including enabled Kata prerequisites when they are part of the configured runtime mix
+
+`doctor qemu --sandbox <sandbox-id>` writes a lightweight support bundle with runtime info, runtime health, sandbox inspect data, snapshot inventory, the guest-image sidecar contract when available, and an optional copied daemon log.
 
 ## 10. Work with snapshots
 

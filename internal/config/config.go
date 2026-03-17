@@ -104,6 +104,7 @@ type Config struct {
 	QEMUDangerousProfiles           []model.GuestProfile
 	QEMUAllowDangerousProfiles      bool
 	QEMUAllowSSHCompat              bool
+	QEMUAgentTrace                  bool
 	QEMUSSHUser                     string
 	QEMUSSHPrivateKeyPath           string
 	QEMUSSHHostKeyPath              string
@@ -186,6 +187,8 @@ func Load(args []string) (Config, error) {
 	fs.BoolVar(&qemuAllowDangerousProfiles, "qemu-allow-dangerous-profiles", qemuAllowDangerousProfiles, "allow dangerous qemu guest profiles such as container and debug")
 	qemuAllowSSHCompat := strings.EqualFold(env("SANDBOX_QEMU_ALLOW_SSH_COMPAT", "false"), "true")
 	fs.BoolVar(&qemuAllowSSHCompat, "qemu-allow-ssh-compat", qemuAllowSSHCompat, "allow ssh-compat qemu image contracts in production validation and policy")
+	qemuAgentTrace := strings.EqualFold(env("SANDBOX_QEMU_AGENT_TRACE", "false"), "true")
+	fs.BoolVar(&qemuAgentTrace, "qemu-agent-trace", qemuAgentTrace, "emit debug-level qemu guest-agent protocol trace logs")
 	productionAllowDockerBreakglass := strings.EqualFold(env("SANDBOX_PRODUCTION_ALLOW_DOCKER_BREAKGLASS", "false"), "true")
 	fs.BoolVar(&productionAllowDockerBreakglass, "production-allow-docker-breakglass", productionAllowDockerBreakglass, "allow docker-dev as an explicit production break-glass default")
 	fs.StringVar(&cfg.QEMUSSHUser, "qemu-ssh-user", env("SANDBOX_QEMU_SSH_USER", ""), "qemu guest ssh user")
@@ -261,6 +264,7 @@ func Load(args []string) (Config, error) {
 	cfg.QEMUDangerousProfiles = parseGuestProfiles(qemuDangerousProfiles)
 	cfg.QEMUAllowDangerousProfiles = qemuAllowDangerousProfiles
 	cfg.QEMUAllowSSHCompat = qemuAllowSSHCompat
+	cfg.QEMUAgentTrace = qemuAgentTrace
 	cfg.ProductionTransportMode = normalizeProductionTransportMode(cfg.ProductionTransportMode)
 	cfg.ProductionAllowDockerBreakglass = productionAllowDockerBreakglass
 	cfg.DefaultQuota = model.TenantQuota{

@@ -235,6 +235,34 @@ func TestLocalFileReadsRejectOversizeTransfers(t *testing.T) {
 	}
 }
 
+func TestRuntimeInfoIncludesGuestImageIdentityForQEMU(t *testing.T) {
+	runtime := newStubRuntime()
+	svc, _, _, _, _ := newServiceHarness(t, runtime, "qemu")
+
+	info := svc.RuntimeInfo()
+	if info.Backend != "qemu" {
+		t.Fatalf("unexpected backend %q", info.Backend)
+	}
+	if info.GuestImage == nil {
+		t.Fatal("expected guest image identity")
+	}
+	if info.GuestImage.Path != svc.cfg.QEMUBaseImagePath {
+		t.Fatalf("unexpected guest image path %q", info.GuestImage.Path)
+	}
+	if info.GuestImage.SidecarPath != guestimage.SidecarPath(svc.cfg.QEMUBaseImagePath) {
+		t.Fatalf("unexpected guest image sidecar path %q", info.GuestImage.SidecarPath)
+	}
+	if info.GuestImage.BuildVersion != "test" {
+		t.Fatalf("unexpected build version %q", info.GuestImage.BuildVersion)
+	}
+	if info.GuestImage.ControlMode != model.GuestControlModeAgent {
+		t.Fatalf("unexpected control mode %q", info.GuestImage.ControlMode)
+	}
+	if len(info.GuestImage.Capabilities) == 0 {
+		t.Fatal("expected guest image capabilities")
+	}
+}
+
 func TestWorkspaceArchiveImportExportRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	runtime := newRuntimeOnlyStub()
@@ -361,6 +389,54 @@ func TestWorkspaceArchiveExportUsesRuntimeBoundaryForGuestBackends(t *testing.T)
 	}
 	if _, ok := entries["workspace.img"]; ok {
 		t.Fatalf("expected runtime-backed export to ignore host workspace artifacts, got %#v", entries)
+	}
+}
+
+func TestWorkspaceArchiveExportFallsBackThroughRegistryWhenRuntimeDoesNotImplementExporter(t *testing.T) {
+	ctx := context.Background()
+	dockerRuntime := &measureOnlyRuntime{runtimeOnlyStub: newRuntimeOnlyStub()}
+	runtime := runtimeregistry.New(map[model.RuntimeSelection]model.RuntimeManager{
+		model.RuntimeSelectionDockerDev: dockerRuntime,
+	})
+	svc, _, quota, tenant, _ := newServiceHarness(t, runtime, "docker")
+
+	sandbox, err := svc.CreateSandbox(ctx, tenant, quota, model.CreateSandboxRequest{
+		RuntimeSelection: model.RuntimeSelectionDockerDev,
+		BaseImageRef:     "alpine:3.20",
+		CPULimit:         model.CPUCores(1),
+		MemoryLimitMB:    256,
+		PIDsLimit:        64,
+		DiskLimitMB:      256,
+		NetworkMode:      model.NetworkModeInternetDisabled,
+		AllowTunnels:     boolPtr(false),
+		Start:            false,
+	})
+	if err != nil {
+		t.Fatalf("create sandbox: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(sandbox.WorkspaceRoot, "README.md"), []byte("hello workspace\n"), 0o644); err != nil {
+		t.Fatalf("write README.md: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(sandbox.WorkspaceRoot, "src"), 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sandbox.WorkspaceRoot, "src", "main.ts"), []byte("console.log('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write src/main.ts: %v", err)
+	}
+
+	archivePath, err := svc.ExportWorkspaceArchive(ctx, tenant.ID, sandbox.ID, []string{"README.md", "src"})
+	if err != nil {
+		t.Fatalf("export workspace archive: %v", err)
+	}
+	defer os.Remove(archivePath)
+
+	entries := readWorkspaceArchiveEntries(t, archivePath)
+	if entries["README.md"] != "hello workspace\n" {
+		t.Fatalf("unexpected exported README.md content %q", entries["README.md"])
+	}
+	if entries["src/main.ts"] != "console.log('ok')\n" {
+		t.Fatalf("unexpected exported src/main.ts content %q", entries["src/main.ts"])
 	}
 }
 
@@ -1244,6 +1320,66 @@ func TestRuntimeHealthMarksDegradedGuestsUnhealthy(t *testing.T) {
 	}
 	if health.Sandboxes[0].RuntimeSelection != model.RuntimeSelectionQEMUProfessional {
 		t.Fatalf("expected runtime selection in runtime health entry, got %+v", health.Sandboxes[0])
+	}
+}
+
+func TestRuntimeHealthFiltersAgentSessionMetricsByTenant(t *testing.T) {
+	ctx := context.Background()
+	runtime := newStubRuntime()
+	runtime.agentMetricsSupported = true
+	registry := runtimeregistry.New(map[model.RuntimeSelection]model.RuntimeManager{
+		model.RuntimeSelectionQEMUProfessional: runtime,
+	})
+	svc, _, quota, tenantA, tenantB := newServiceHarness(t, registry, "qemu")
+
+	sandboxA, err := svc.CreateSandbox(ctx, tenantA, quota, model.CreateSandboxRequest{
+		RuntimeSelection: model.RuntimeSelectionQEMUProfessional,
+		BaseImageRef:     "guest-base.qcow2",
+		CPULimit:         model.CPUCores(1),
+		MemoryLimitMB:    512,
+		PIDsLimit:        128,
+		DiskLimitMB:      512,
+		NetworkMode:      model.NetworkModeInternetDisabled,
+		AllowTunnels:     boolPtr(false),
+		Start:            false,
+	})
+	if err != nil {
+		t.Fatalf("create tenant A sandbox: %v", err)
+	}
+	sandboxB, err := svc.CreateSandbox(ctx, tenantB, quota, model.CreateSandboxRequest{
+		RuntimeSelection: model.RuntimeSelectionQEMUProfessional,
+		BaseImageRef:     "guest-base.qcow2",
+		CPULimit:         model.CPUCores(1),
+		MemoryLimitMB:    512,
+		PIDsLimit:        128,
+		DiskLimitMB:      512,
+		NetworkMode:      model.NetworkModeInternetDisabled,
+		AllowTunnels:     boolPtr(false),
+		Start:            false,
+	})
+	if err != nil {
+		t.Fatalf("create tenant B sandbox: %v", err)
+	}
+	runtime.sandboxAgentMetrics = map[string]model.RuntimeAgentSessionsHealth{
+		sandboxA.ID: {
+			SessionsOpened:     2,
+			BufferedExecEvents: 1,
+		},
+		sandboxB.ID: {
+			SessionsOpened:     9,
+			BufferedExecEvents: 7,
+		},
+	}
+
+	health, err := svc.RuntimeHealth(ctx, tenantA.ID)
+	if err != nil {
+		t.Fatalf("runtime health: %v", err)
+	}
+	if health.AgentSessions == nil {
+		t.Fatal("expected tenant-scoped agent session metrics")
+	}
+	if health.AgentSessions.SessionsOpened != 2 || health.AgentSessions.BufferedExecEvents != 1 {
+		t.Fatalf("expected tenant-scoped metrics, got %+v", health.AgentSessions)
 	}
 }
 
@@ -3276,27 +3412,30 @@ func boolPtr(value bool) *bool {
 }
 
 type stubRuntime struct {
-	createState       model.RuntimeState
-	startState        model.RuntimeState
-	stopState         model.RuntimeState
-	restoreState      model.RuntimeState
-	inspectState      model.RuntimeState
-	snapshotInfo      model.SnapshotInfo
-	storageUsage      model.StorageUsage
-	createErr         error
-	startErr          error
-	stopErr           error
-	suspendErr        error
-	resumeErr         error
-	destroyErr        error
-	restoreErr        error
-	inspectErr        error
-	localConnErr      error
-	inspectCalls      int
-	execHandleFactory func(context.Context, model.ExecRequest) model.ExecHandle
-	localConnFactory  func(context.Context, model.Sandbox, int) (net.Conn, error)
-	createdSpec       model.SandboxSpec
-	restoredSnapshot  model.Snapshot
+	createState           model.RuntimeState
+	startState            model.RuntimeState
+	stopState             model.RuntimeState
+	restoreState          model.RuntimeState
+	inspectState          model.RuntimeState
+	snapshotInfo          model.SnapshotInfo
+	storageUsage          model.StorageUsage
+	createErr             error
+	startErr              error
+	stopErr               error
+	suspendErr            error
+	resumeErr             error
+	destroyErr            error
+	restoreErr            error
+	inspectErr            error
+	localConnErr          error
+	inspectCalls          int
+	execHandleFactory     func(context.Context, model.ExecRequest) model.ExecHandle
+	localConnFactory      func(context.Context, model.Sandbox, int) (net.Conn, error)
+	createdSpec           model.SandboxSpec
+	restoredSnapshot      model.Snapshot
+	agentMetrics          model.RuntimeAgentSessionsHealth
+	sandboxAgentMetrics   map[string]model.RuntimeAgentSessionsHealth
+	agentMetricsSupported bool
 
 	reads         map[string]string
 	writes        []stubWrite
@@ -3342,8 +3481,17 @@ type runtimeOnlyStub struct {
 	snapshotInfo model.SnapshotInfo
 }
 
+type measureOnlyRuntime struct {
+	*runtimeOnlyStub
+	storageUsage model.StorageUsage
+}
+
 func newRuntimeOnlyStub() *runtimeOnlyStub {
 	return &runtimeOnlyStub{}
+}
+
+func (r *measureOnlyRuntime) MeasureStorage(context.Context, model.Sandbox) (model.StorageUsage, error) {
+	return r.storageUsage, nil
 }
 
 func (r *stubRuntime) Create(_ context.Context, spec model.SandboxSpec) (model.RuntimeState, error) {
@@ -3497,6 +3645,37 @@ func (r *stubRuntime) ExportWorkspaceArchive(_ context.Context, _ model.Sandbox,
 		entries[name] = content
 	}
 	return writeArchiveFixture(entries)
+}
+
+func (r *stubRuntime) AgentSessionMetrics() model.RuntimeAgentSessionsHealth {
+	return r.agentMetrics
+}
+
+func (r *stubRuntime) AgentSessionMetricsForSandboxes(sandboxes []model.Sandbox) (model.RuntimeAgentSessionsHealth, bool) {
+	if !r.agentMetricsSupported {
+		return model.RuntimeAgentSessionsHealth{}, false
+	}
+	if len(r.sandboxAgentMetrics) == 0 {
+		return model.RuntimeAgentSessionsHealth{}, true
+	}
+	seen := make(map[string]struct{}, len(sandboxes))
+	combined := model.RuntimeAgentSessionsHealth{}
+	for _, sandbox := range sandboxes {
+		if _, ok := seen[sandbox.ID]; ok {
+			continue
+		}
+		seen[sandbox.ID] = struct{}{}
+		metrics := r.sandboxAgentMetrics[sandbox.ID]
+		combined.SessionsOpened += metrics.SessionsOpened
+		combined.SessionsReused += metrics.SessionsReused
+		combined.SessionsInvalidated += metrics.SessionsInvalidated
+		combined.SessionsClosed += metrics.SessionsClosed
+		combined.BufferedExecEvents += metrics.BufferedExecEvents
+		combined.BufferedFileEvents += metrics.BufferedFileEvents
+		combined.DroppedExecEvents += metrics.DroppedExecEvents
+		combined.DroppedFileEvents += metrics.DroppedFileEvents
+	}
+	return combined, true
 }
 
 func (r *stubRuntime) exportablePaths(paths []string) []string {

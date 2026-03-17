@@ -53,16 +53,36 @@ Response:
 
 Returns the configured runtime backend and enabled runtime selections for the current deployment.
 
+For QEMU deployments, this response also includes the configured guest-image identity when the daemon can read the image sidecar contract.
+
 Example response:
 
 ```json
 {
-  "backend": "docker",
-  "class": "trusted-docker",
-  "default_runtime_selection": "docker-dev",
-  "enabled_runtime_selections": ["docker-dev"]
+  "backend": "qemu",
+  "class": "vm",
+  "default_runtime_selection": "qemu-professional",
+  "enabled_runtime_selections": ["qemu-professional"],
+  "guest_image": {
+    "path": "/var/lib/or3/images/or3-guest-core.qcow2",
+    "sidecar_path": "/var/lib/or3/images/or3-guest-core.qcow2.or3.json",
+    "contract_version": "v1",
+    "build_version": "2025.03.17",
+    "git_sha": "abc1234",
+    "image_sha256": "...",
+    "profile": "core",
+    "capabilities": ["exec", "files", "pty"],
+    "allowed_features": ["exec", "files", "pty"],
+    "control_mode": "agent",
+    "control_protocol_version": "1",
+    "workspace_contract_version": "1"
+  }
 }
 ```
+
+Notes:
+
+- `guest_image_error` is returned instead of `guest_image` when the daemon has a configured QEMU base image but the sidecar contract cannot be loaded.
 
 ### `GET /v1/runtime/health`
 
@@ -77,6 +97,16 @@ Example response:
   "checked_at": "2025-01-01T00:00:00Z",
   "runtime_selection_counts": { "docker-dev": 1 },
   "status_counts": { "running": 1 },
+  "agent_sessions": {
+    "sessions_opened": 3,
+    "sessions_reused": 12,
+    "sessions_invalidated": 0,
+    "sessions_closed": 2,
+    "buffered_exec_events": 1,
+    "buffered_file_events": 1,
+    "dropped_exec_events": 0,
+    "dropped_file_events": 0
+  },
   "sandboxes": [
     {
       "sandbox_id": "sbx-123",
@@ -92,6 +122,11 @@ Example response:
   ]
 }
 ```
+
+Notes:
+
+- `agent_sessions` is present for runtimes that expose guest-agent session telemetry, such as QEMU agent mode.
+- The buffered counters are useful for spotting early async guest events that arrived before the host registered the matching exec or file stream.
 
 ### `GET /v1/runtime/capacity`
 
@@ -470,6 +505,12 @@ Example response:
   "visibility": "private",
   "endpoint": "http://127.0.0.1:8080/v1/tunnels/tun-123/proxy",
   "access_token": "ttok-abc",
+  "access": {
+    "requires_tenant_token": true,
+    "tunnel_token_header": "X-Tunnel-Token",
+    "tunnel_token_query": "token",
+    "example_curl": "curl -H 'Authorization: Bearer <tenant-token>' -H 'X-Tunnel-Token: ttok-abc' 'http://127.0.0.1:8080/v1/tunnels/tun-123/proxy'"
+  },
   "created_at": "2025-01-01T00:00:00Z"
 }
 ```
@@ -477,6 +518,8 @@ Example response:
 Notes:
 
 - `access_token` is returned on create and should be treated as a secret capability.
+- `access` describes how to call the tunnel correctly from non-browser clients.
+- Private tunnels normally require both the tenant bearer token and the tunnel token.
 - `access_token` is intended for control-plane or trusted service use. Browser-facing clients should use the signed browser launch flow instead of receiving raw tunnel tokens.
 - Revoked tunnels return `410 Gone` when accessed later.
 

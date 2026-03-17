@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -16,6 +17,8 @@ import (
 	goruntime "runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -68,6 +71,7 @@ type Options struct {
 	SSHBinary                     string
 	SCPBinary                     string
 	WorkspaceFileTransferMaxBytes int64
+	TraceProtocol                 bool
 }
 
 // Runtime implements [model.RuntimeManager] using QEMU virtual machines.
@@ -86,12 +90,126 @@ type Runtime struct {
 	bootTimeout                   time.Duration
 	pollInterval                  time.Duration
 	workspaceFileTransferMaxBytes int64
+	traceProtocol                 bool
 	sessionManager                *agentSessionManager
+	agentMetrics                  agentSessionMetrics
+	agentMetricsMu                sync.Mutex
+	sandboxAgentMetrics           map[string]*agentSessionMetrics
 	mkfsExt4Binary                string
 
 	runCommand  commandRunner
 	sshReady    sshProbe
 	processArgs processArgsReader
+}
+
+type agentSessionMetrics struct {
+	sessionsOpened      atomic.Uint64
+	sessionsReused      atomic.Uint64
+	sessionsInvalidated atomic.Uint64
+	sessionsClosed      atomic.Uint64
+	bufferedExecEvents  atomic.Uint64
+	bufferedFileEvents  atomic.Uint64
+	droppedExecEvents   atomic.Uint64
+	droppedFileEvents   atomic.Uint64
+}
+
+func (r *Runtime) AgentSessionMetrics() model.RuntimeAgentSessionsHealth {
+	if r == nil {
+		return model.RuntimeAgentSessionsHealth{}
+	}
+	return snapshotAgentSessionMetrics(&r.agentMetrics)
+}
+
+func (r *Runtime) traceAgent(event string, attrs ...any) {
+	if r == nil || !r.traceProtocol {
+		return
+	}
+	base := []any{"event", "qemu.agent." + event}
+	slog.Default().Info("qemu agent trace", append(base, attrs...)...)
+}
+
+func (r *Runtime) AgentSessionMetricsForSandboxes(sandboxes []model.Sandbox) (model.RuntimeAgentSessionsHealth, bool) {
+	if r == nil || len(sandboxes) == 0 {
+		return model.RuntimeAgentSessionsHealth{}, false
+	}
+	seen := make(map[string]struct{}, len(sandboxes))
+	combined := model.RuntimeAgentSessionsHealth{}
+	for _, sandbox := range sandboxes {
+		sandboxID := strings.TrimSpace(sandbox.ID)
+		if sandboxID == "" {
+			continue
+		}
+		if _, ok := seen[sandboxID]; ok {
+			continue
+		}
+		seen[sandboxID] = struct{}{}
+		metrics := r.snapshotSandboxAgentSessionMetrics(sandboxID)
+		combined.SessionsOpened += metrics.SessionsOpened
+		combined.SessionsReused += metrics.SessionsReused
+		combined.SessionsInvalidated += metrics.SessionsInvalidated
+		combined.SessionsClosed += metrics.SessionsClosed
+		combined.BufferedExecEvents += metrics.BufferedExecEvents
+		combined.BufferedFileEvents += metrics.BufferedFileEvents
+		combined.DroppedExecEvents += metrics.DroppedExecEvents
+		combined.DroppedFileEvents += metrics.DroppedFileEvents
+	}
+	return combined, true
+}
+
+func snapshotAgentSessionMetrics(metrics *agentSessionMetrics) model.RuntimeAgentSessionsHealth {
+	if metrics == nil {
+		return model.RuntimeAgentSessionsHealth{}
+	}
+	return model.RuntimeAgentSessionsHealth{
+		SessionsOpened:      metrics.sessionsOpened.Load(),
+		SessionsReused:      metrics.sessionsReused.Load(),
+		SessionsInvalidated: metrics.sessionsInvalidated.Load(),
+		SessionsClosed:      metrics.sessionsClosed.Load(),
+		BufferedExecEvents:  metrics.bufferedExecEvents.Load(),
+		BufferedFileEvents:  metrics.bufferedFileEvents.Load(),
+		DroppedExecEvents:   metrics.droppedExecEvents.Load(),
+		DroppedFileEvents:   metrics.droppedFileEvents.Load(),
+	}
+}
+
+func (r *Runtime) recordAgentMetric(sandboxID string, apply func(*agentSessionMetrics)) {
+	if r == nil || apply == nil {
+		return
+	}
+	apply(&r.agentMetrics)
+	if strings.TrimSpace(sandboxID) == "" {
+		return
+	}
+	apply(r.sandboxAgentSessionMetrics(sandboxID))
+}
+
+func (r *Runtime) sandboxAgentSessionMetrics(sandboxID string) *agentSessionMetrics {
+	sandboxID = strings.TrimSpace(sandboxID)
+	if r == nil || sandboxID == "" {
+		return nil
+	}
+	r.agentMetricsMu.Lock()
+	defer r.agentMetricsMu.Unlock()
+	if r.sandboxAgentMetrics == nil {
+		r.sandboxAgentMetrics = make(map[string]*agentSessionMetrics)
+	}
+	metrics := r.sandboxAgentMetrics[sandboxID]
+	if metrics == nil {
+		metrics = &agentSessionMetrics{}
+		r.sandboxAgentMetrics[sandboxID] = metrics
+	}
+	return metrics
+}
+
+func (r *Runtime) snapshotSandboxAgentSessionMetrics(sandboxID string) model.RuntimeAgentSessionsHealth {
+	sandboxID = strings.TrimSpace(sandboxID)
+	if r == nil || sandboxID == "" {
+		return model.RuntimeAgentSessionsHealth{}
+	}
+	r.agentMetricsMu.Lock()
+	metrics := r.sandboxAgentMetrics[sandboxID]
+	r.agentMetricsMu.Unlock()
+	return snapshotAgentSessionMetrics(metrics)
 }
 
 type hostProbe struct {
@@ -161,6 +279,7 @@ func New(opts Options) (*Runtime, error) {
 		pollInterval:                  defaultPollInterval,
 		workspaceFileTransferMaxBytes: workspaceFileTransferLimit(opts.WorkspaceFileTransferMaxBytes),
 		sessionManager:                &agentSessionManager{sessions: make(map[string]*agentSession)},
+		traceProtocol:                 opts.TraceProtocol,
 	}
 	runtime.runCommand = runtime.defaultRunCommand
 	runtime.sshReady = runtime.defaultSSHProbe

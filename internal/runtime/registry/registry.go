@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	"net"
 
 	"or3-sandbox/internal/model"
 )
@@ -252,4 +253,92 @@ func (r *Registry) MeasureStorage(ctx context.Context, sandbox model.Sandbox) (m
 		return rt.MeasureStorage(ctx, sandbox)
 	}
 	return model.StorageUsage{}, fmt.Errorf("runtime %q does not support MeasureStorage", sandbox.RuntimeSelection)
+}
+
+// ExportWorkspaceArchive delegates workspace export to the runtime selected by sandbox.
+func (r *Registry) ExportWorkspaceArchive(ctx context.Context, sandbox model.Sandbox, paths []string, maxBytes int64) (string, error) {
+	runtime, err := r.runtimeForSandbox(sandbox, "export-workspace-archive")
+	if err != nil {
+		return "", err
+	}
+	if rt, ok := runtime.(model.WorkspaceArchiveExporter); ok {
+		return rt.ExportWorkspaceArchive(ctx, sandbox, paths, maxBytes)
+	}
+	return "", model.UnsupportedRuntimeOperationError{Selection: sandbox.RuntimeSelection, Operation: "ExportWorkspaceArchive"}
+}
+
+// OpenSandboxLocalConn delegates daemon-side TCP bridging to the runtime selected by sandbox.
+func (r *Registry) OpenSandboxLocalConn(ctx context.Context, sandbox model.Sandbox, targetPort int) (net.Conn, error) {
+	runtime, err := r.runtimeForSandbox(sandbox, "open-sandbox-local-conn")
+	if err != nil {
+		return nil, err
+	}
+	type bridgeOpener interface {
+		OpenSandboxLocalConn(ctx context.Context, sandbox model.Sandbox, targetPort int) (net.Conn, error)
+	}
+	if rt, ok := runtime.(bridgeOpener); ok {
+		return rt.OpenSandboxLocalConn(ctx, sandbox, targetPort)
+	}
+	return nil, fmt.Errorf("runtime %q does not support OpenSandboxLocalConn", sandbox.RuntimeSelection)
+}
+
+// AgentSessionMetrics exposes runtime agent-session telemetry when supported by the selected runtime(s).
+func (r *Registry) AgentSessionMetrics() model.RuntimeAgentSessionsHealth {
+	type metricsProvider interface {
+		AgentSessionMetrics() model.RuntimeAgentSessionsHealth
+	}
+	combined := model.RuntimeAgentSessionsHealth{}
+	for _, runtime := range r.runtimes {
+		provider, ok := runtime.(metricsProvider)
+		if !ok {
+			continue
+		}
+		metrics := provider.AgentSessionMetrics()
+		combined.SessionsOpened += metrics.SessionsOpened
+		combined.SessionsReused += metrics.SessionsReused
+		combined.SessionsInvalidated += metrics.SessionsInvalidated
+		combined.SessionsClosed += metrics.SessionsClosed
+		combined.BufferedExecEvents += metrics.BufferedExecEvents
+		combined.BufferedFileEvents += metrics.BufferedFileEvents
+		combined.DroppedExecEvents += metrics.DroppedExecEvents
+		combined.DroppedFileEvents += metrics.DroppedFileEvents
+	}
+	return combined
+}
+
+func (r *Registry) AgentSessionMetricsForSandboxes(sandboxes []model.Sandbox) (model.RuntimeAgentSessionsHealth, bool) {
+	type scopedMetricsProvider interface {
+		AgentSessionMetricsForSandboxes(sandboxes []model.Sandbox) (model.RuntimeAgentSessionsHealth, bool)
+	}
+	grouped := make(map[model.RuntimeSelection][]model.Sandbox)
+	for _, sandbox := range sandboxes {
+		selection := model.ResolveRuntimeSelection(sandbox.RuntimeSelection, sandbox.RuntimeBackend)
+		grouped[selection] = append(grouped[selection], sandbox)
+	}
+	combined := model.RuntimeAgentSessionsHealth{}
+	supported := false
+	for selection, scopedSandboxes := range grouped {
+		runtime, ok := r.runtimes[selection]
+		if !ok {
+			continue
+		}
+		provider, ok := runtime.(scopedMetricsProvider)
+		if !ok {
+			continue
+		}
+		metrics, providerSupported := provider.AgentSessionMetricsForSandboxes(scopedSandboxes)
+		if !providerSupported {
+			continue
+		}
+		supported = true
+		combined.SessionsOpened += metrics.SessionsOpened
+		combined.SessionsReused += metrics.SessionsReused
+		combined.SessionsInvalidated += metrics.SessionsInvalidated
+		combined.SessionsClosed += metrics.SessionsClosed
+		combined.BufferedExecEvents += metrics.BufferedExecEvents
+		combined.BufferedFileEvents += metrics.BufferedFileEvents
+		combined.DroppedExecEvents += metrics.DroppedExecEvents
+		combined.DroppedFileEvents += metrics.DroppedFileEvents
+	}
+	return combined, supported
 }

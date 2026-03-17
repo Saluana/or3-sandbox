@@ -169,3 +169,18 @@ type RuntimeManager interface {
 type WorkspaceArchiveExporter interface {
 	ExportWorkspaceArchive(ctx context.Context, sandbox Sandbox, paths []string, maxBytes int64) (string, error)
 }
+
+// UnsupportedRuntimeOperationError reports that an optional runtime operation
+// is unavailable for the selected backend.
+type UnsupportedRuntimeOperationError struct {
+	Selection RuntimeSelection
+	Operation string
+}
+
+// Error returns the formatted unsupported-operation message.
+func (e UnsupportedRuntimeOperationError) Error() string {
+	if e.Selection != "" {
+		return "runtime " + `"` + string(e.Selection) + `"` + " does not support " + e.Operation
+	}
+	return "runtime does not support " + e.Operation
+}

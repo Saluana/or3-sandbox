@@ -247,6 +247,178 @@ func TestAgentRoundTripRejectsMismatchedResponseID(t *testing.T) {
 	}
 }
 
+func TestAgentSessionBuffersExecEventsUntilRegistered(t *testing.T) {
+	runtime := &Runtime{}
+	now := time.Now().UTC()
+	session := &agentSession{
+		runtime:      runtime,
+		pending:      make(map[string]chan agentproto.Message),
+		pendingFiles: make(map[string][]agentproto.FileData),
+		pendingExecs: make(map[string][]agentproto.ExecEvent),
+		pendingPTY:   make(map[string][]agentproto.PTYData),
+		execs:        make(map[string]chan agentproto.ExecEvent),
+		files:        make(map[string]chan agentproto.FileData),
+		archive:      make(map[string]chan agentproto.ArchiveStreamChunk),
+		pty:          make(map[string]*agentTTYHandle),
+		bridge:       make(map[string]*sandboxLocalConnHandle),
+		closeCh:      make(chan struct{}),
+	}
+	payload := agentproto.ExecEvent{ExecID: "exec-1", Result: &agentproto.ExecResult{Status: "succeeded", ExitCode: 0, StartedAt: now, CompletedAt: now}}
+	if !session.deliverExec(payload) {
+		t.Fatal("expected exec event to be buffered")
+	}
+	events, err := session.registerExec("exec-1")
+	if err != nil {
+		t.Fatalf("register exec: %v", err)
+	}
+	buffered, ok := <-events
+	if !ok {
+		t.Fatal("expected buffered exec event")
+	}
+	if buffered.ExecID != payload.ExecID || buffered.Result == nil || buffered.Result.Status != "succeeded" {
+		t.Fatalf("unexpected buffered exec payload %+v", buffered)
+	}
+	if _, ok := <-events; ok {
+		t.Fatal("expected exec channel to close after terminal buffered result")
+	}
+	metrics := runtime.AgentSessionMetrics()
+	if metrics.BufferedExecEvents != 1 {
+		t.Fatalf("expected 1 buffered exec event, got %+v", metrics)
+	}
+}
+
+func TestAgentSessionBuffersFileEventsUntilRegistered(t *testing.T) {
+	runtime := &Runtime{}
+	session := &agentSession{
+		runtime:      runtime,
+		pending:      make(map[string]chan agentproto.Message),
+		pendingFiles: make(map[string][]agentproto.FileData),
+		pendingExecs: make(map[string][]agentproto.ExecEvent),
+		pendingArchives: make(map[string][]agentproto.ArchiveStreamChunk),
+		pendingPTY:   make(map[string][]agentproto.PTYData),
+		execs:        make(map[string]chan agentproto.ExecEvent),
+		files:        make(map[string]chan agentproto.FileData),
+		archive:      make(map[string]chan agentproto.ArchiveStreamChunk),
+		pty:          make(map[string]*agentTTYHandle),
+		bridge:       make(map[string]*sandboxLocalConnHandle),
+		closeCh:      make(chan struct{}),
+	}
+	payload := agentproto.FileData{SessionID: "file-1", Data: agentproto.EncodeBytes([]byte("hello")), EOF: true}
+	if !session.deliverFile(payload) {
+		t.Fatal("expected file data to be buffered")
+	}
+	dataCh, err := session.registerFile("file-1")
+	if err != nil {
+		t.Fatalf("register file: %v", err)
+	}
+	packet, ok := <-dataCh
+	if !ok {
+		t.Fatal("expected buffered file packet")
+	}
+	decoded, err := agentproto.DecodeBytes(packet.Data)
+	if err != nil {
+		t.Fatalf("decode buffered file packet: %v", err)
+	}
+	if string(decoded) != "hello" || !packet.EOF {
+		t.Fatalf("unexpected buffered file packet %+v", packet)
+	}
+	if _, ok := <-dataCh; ok {
+		t.Fatal("expected file channel to close after EOF packet")
+	}
+	metrics := runtime.AgentSessionMetrics()
+	if metrics.BufferedFileEvents != 1 {
+		t.Fatalf("expected 1 buffered file event, got %+v", metrics)
+	}
+}
+
+func TestAgentSessionBuffersArchiveEventsUntilRegistered(t *testing.T) {
+	session := &agentSession{
+		pending:         make(map[string]chan agentproto.Message),
+		pendingFiles:    make(map[string][]agentproto.FileData),
+		pendingExecs:    make(map[string][]agentproto.ExecEvent),
+		pendingArchives: make(map[string][]agentproto.ArchiveStreamChunk),
+		pendingPTY:      make(map[string][]agentproto.PTYData),
+		execs:           make(map[string]chan agentproto.ExecEvent),
+		files:           make(map[string]chan agentproto.FileData),
+		archive:         make(map[string]chan agentproto.ArchiveStreamChunk),
+		pty:             make(map[string]*agentTTYHandle),
+		bridge:          make(map[string]*sandboxLocalConnHandle),
+		closeCh:         make(chan struct{}),
+	}
+	payload := agentproto.ArchiveStreamChunk{SessionID: "archive-1", Path: "src/export.txt", Type: "file", Data: agentproto.EncodeBytes([]byte("hello")), EOF: true}
+	terminal := agentproto.ArchiveStreamChunk{SessionID: "archive-1", End: true}
+	if !session.deliverArchive(payload) {
+		t.Fatal("expected archive chunk to be buffered")
+	}
+	if !session.deliverArchive(terminal) {
+		t.Fatal("expected archive end marker to be buffered")
+	}
+	stream, err := session.registerArchive("archive-1")
+	if err != nil {
+		t.Fatalf("register archive: %v", err)
+	}
+	first, ok := <-stream
+	if !ok {
+		t.Fatal("expected buffered archive chunk")
+	}
+	decoded, err := agentproto.DecodeBytes(first.Data)
+	if err != nil {
+		t.Fatalf("decode buffered archive chunk: %v", err)
+	}
+	if first.Path != payload.Path || string(decoded) != "hello" || !first.EOF {
+		t.Fatalf("unexpected buffered archive chunk %+v", first)
+	}
+	second, ok := <-stream
+	if !ok {
+		t.Fatal("expected buffered archive end marker")
+	}
+	if !second.End {
+		t.Fatalf("expected archive end marker, got %+v", second)
+	}
+	if _, ok := <-stream; ok {
+		t.Fatal("expected archive channel to close after buffered terminal event")
+	}
+}
+
+func TestAgentSessionBuffersPTYEventsUntilRegistered(t *testing.T) {
+	reader, writer := io.Pipe()
+	session := &agentSession{
+		pending:         make(map[string]chan agentproto.Message),
+		pendingFiles:    make(map[string][]agentproto.FileData),
+		pendingExecs:    make(map[string][]agentproto.ExecEvent),
+		pendingArchives: make(map[string][]agentproto.ArchiveStreamChunk),
+		pendingPTY:      make(map[string][]agentproto.PTYData),
+		execs:           make(map[string]chan agentproto.ExecEvent),
+		files:           make(map[string]chan agentproto.FileData),
+		archive:         make(map[string]chan agentproto.ArchiveStreamChunk),
+		pty:             make(map[string]*agentTTYHandle),
+		bridge:          make(map[string]*sandboxLocalConnHandle),
+		closeCh:         make(chan struct{}),
+	}
+	handle := &agentTTYHandle{session: session, sessionID: "pty-1", reader: reader, writer: writer}
+	if !session.deliverPTY(agentproto.PTYData{SessionID: "pty-1", Data: agentproto.EncodeBytes([]byte("hello "))}) {
+		t.Fatal("expected PTY data to be buffered")
+	}
+	if !session.deliverPTY(agentproto.PTYData{SessionID: "pty-1", Data: agentproto.EncodeBytes([]byte("world")), EOF: true}) {
+		t.Fatal("expected PTY EOF to be buffered")
+	}
+	if err := session.registerPTY(handle); err != nil {
+		t.Fatalf("register PTY: %v", err)
+	}
+	buf := make([]byte, 11)
+	n, err := reader.Read(buf)
+	if err != nil && err != io.EOF {
+		t.Fatalf("read PTY data: %v", err)
+	}
+	if string(buf[:n]) != "hello world" {
+		t.Fatalf("unexpected PTY buffered data %q", string(buf[:n]))
+	}
+	more := make([]byte, 1)
+	if n, err := reader.Read(more); err != io.EOF || n != 0 {
+		t.Fatalf("expected PTY reader EOF after buffered terminal event, got n=%d err=%v", n, err)
+	}
+}
+
 func TestAgentHandshakeRejectsCapabilityMismatch(t *testing.T) {
 	imagePath := writeTestQEMUBaseImage(t)
 	socketPath := startTestAgentSocket(t, func(conn net.Conn) {

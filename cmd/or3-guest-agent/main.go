@@ -1008,7 +1008,13 @@ func isReady() bool {
 }
 
 func workspacePath(raw string) (string, error) {
-	clean := path.Clean(defaultString(raw, "/workspace"))
+	requested := strings.TrimSpace(raw)
+	if requested == "" {
+		requested = "/workspace"
+	} else if !path.IsAbs(requested) {
+		requested = "/workspace/" + requested
+	}
+	clean := path.Clean(requested)
 	if clean != "/workspace" && !strings.HasPrefix(clean, "/workspace/") {
 		return "", fmt.Errorf("path escapes workspace")
 	}

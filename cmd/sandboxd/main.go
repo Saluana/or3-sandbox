@@ -114,6 +114,7 @@ func buildRuntime(cfg config.Config) (model.RuntimeManager, error) {
 				SSHHostKeyPath:                cfg.QEMUSSHHostKeyPath,
 				BootTimeout:                   cfg.QEMUBootTimeout,
 				WorkspaceFileTransferMaxBytes: cfg.WorkspaceFileTransferMaxBytes,
+				TraceProtocol:                 cfg.QEMUAgentTrace,
 			})
 			if err != nil {
 				return nil, err

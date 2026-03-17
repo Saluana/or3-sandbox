@@ -431,6 +431,42 @@ func TestAllowTunnelsFalseIsRespected(t *testing.T) {
 	}, http.StatusBadRequest)
 }
 
+func TestTunnelCreateReturnsAccessHintsAndAllowsWorkspaceNamedDirectory(t *testing.T) {
+	h := newHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  "python:3.12-alpine",
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 256,
+		PIDsLimit:     128,
+		DiskLimitMB:   512,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+
+	h.writeFile(t, "token-a", sandbox.ID, "workspace/bad.txt", "nope")
+	file := h.readFile(t, "token-a", sandbox.ID, "workspace/bad.txt")
+	if strings.TrimSpace(file.Content) != "nope" {
+		t.Fatalf("unexpected workspace-named directory content %q", file.Content)
+	}
+
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8080)
+	if !tunnel.Access.RequiresTenantToken {
+		t.Fatal("expected private tunnel to require tenant auth")
+	}
+	if tunnel.Access.TunnelTokenHeader != "X-Tunnel-Token" {
+		t.Fatalf("unexpected tunnel token header hint %q", tunnel.Access.TunnelTokenHeader)
+	}
+	if tunnel.Access.TunnelTokenQuery != "token" {
+		t.Fatalf("unexpected tunnel token query hint %q", tunnel.Access.TunnelTokenQuery)
+	}
+	if !strings.Contains(tunnel.Access.ExampleCurl, "Authorization: Bearer <tenant-token>") || !strings.Contains(tunnel.Access.ExampleCurl, "X-Tunnel-Token: "+tunnel.AccessToken) {
+		t.Fatalf("unexpected tunnel example curl %q", tunnel.Access.ExampleCurl)
+	}
+}
+
 func TestDetachedExecDoesNotConsumeExecQuotaForever(t *testing.T) {
 	h := newHarness(t)
 	defer h.close()
@@ -547,6 +583,34 @@ func TestRuntimeHealthEndpoint(t *testing.T) {
 	}
 	if health.Sandboxes[0].SandboxID != sandbox.ID {
 		t.Fatalf("unexpected sandbox health entry %+v", health.Sandboxes[0])
+	}
+	if health.AgentSessions != nil {
+		t.Fatalf("expected docker runtime health to omit agent session metrics, got %+v", health.AgentSessions)
+	}
+}
+
+func TestQEMURuntimeHealthIncludesAgentSessionMetrics(t *testing.T) {
+	h := newQEMUHarness(t)
+	defer h.close()
+
+	_ = h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  h.cfg.QEMUBaseImagePath,
+		CPULimit:      model.CPUCores(1),
+		MemoryLimitMB: 1024,
+		PIDsLimit:     256,
+		DiskLimitMB:   256,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(false),
+		Start:         true,
+	})
+
+	var health model.RuntimeHealth
+	h.mustDoJSON(t, "token-a", http.MethodGet, "/v1/runtime/health", nil, &health, http.StatusOK)
+	if health.AgentSessions == nil {
+		t.Fatal("expected qemu runtime health to include agent session metrics")
+	}
+	if health.AgentSessions.SessionsOpened == 0 {
+		t.Fatalf("expected at least one opened agent session, got %+v", health.AgentSessions)
 	}
 }
 
@@ -1008,6 +1072,67 @@ nohup python3 -m http.server 8090 -d /workspace/tunnel >/workspace/tunnel-http.l
 	}
 	if !strings.Contains(string(body), "qemu-proxy-ok") {
 		t.Fatalf("unexpected proxied body %q", string(body))
+	}
+}
+
+func TestQEMUAPIExecFilesAndTunnelRegression(t *testing.T) {
+	h := newQEMUHarness(t)
+	defer h.close()
+
+	sandbox := h.createSandbox(t, "token-a", model.CreateSandboxRequest{
+		BaseImageRef:  h.cfg.QEMUBaseImagePath,
+		CPULimit:      model.CPUCores(2),
+		MemoryLimitMB: 1024,
+		PIDsLimit:     256,
+		DiskLimitMB:   256,
+		NetworkMode:   model.NetworkModeInternetDisabled,
+		AllowTunnels:  boolPtr(true),
+		Start:         true,
+	})
+
+	for index := 0; index < 5; index++ {
+		execution := h.exec(t, "token-a", sandbox.ID, model.ExecRequest{
+			Command: []string{"sh", "-lc", fmt.Sprintf("printf exec-%d", index)},
+			Cwd:     "/workspace",
+			Timeout: 20 * time.Second,
+		})
+		if execution.Status != model.ExecutionStatusSucceeded || execution.StdoutPreview != fmt.Sprintf("exec-%d", index) {
+			t.Fatalf("unexpected qemu exec result %+v", execution)
+		}
+	}
+
+	h.writeFile(t, "token-a", sandbox.ID, "notes/hello.txt", "qemu-api-ok")
+	file := h.readFile(t, "token-a", sandbox.ID, "notes/hello.txt")
+	if strings.TrimSpace(file.Content) != "qemu-api-ok" {
+		t.Fatalf("unexpected qemu file content %q", file.Content)
+	}
+	h.writeFile(t, "token-a", sandbox.ID, "workspace/notes/bad.txt", "bad")
+	file = h.readFile(t, "token-a", sandbox.ID, "workspace/notes/bad.txt")
+	if strings.TrimSpace(file.Content) != "bad" {
+		t.Fatalf("unexpected qemu workspace-named directory content %q", file.Content)
+	}
+	h.expectStatus(t, "token-a", http.MethodDelete, "/v1/sandboxes/"+sandbox.ID+"/files/notes/hello.txt", nil, http.StatusNoContent)
+	h.expectStatus(t, "token-a", http.MethodDelete, "/v1/sandboxes/"+sandbox.ID+"/files/workspace/notes/bad.txt", nil, http.StatusNoContent)
+
+	h.exec(t, "token-a", sandbox.ID, model.ExecRequest{
+		Command: []string{"sh", "-lc", `
+set -eu
+printf 'qemu-tunnel-ok' > /workspace/index.html
+nohup python3 -m http.server 8091 -d /workspace >/workspace/http.log 2>&1 &
+`},
+		Cwd:     "/workspace",
+		Timeout: 30 * time.Second,
+	})
+	h.waitForExecContains(t, "token-a", sandbox.ID, model.ExecRequest{
+		Command: []string{"python3", "-c", "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8091').read().decode())"},
+		Cwd:     "/workspace",
+		Timeout: 5 * time.Second,
+	}, "qemu-tunnel-ok", 15*time.Second)
+
+	tunnel := h.createTunnel(t, "token-a", sandbox.ID, 8091)
+	body := h.tunnelGET(t, "token-a", tunnel.ID, tunnel.AccessToken)
+	if !strings.Contains(body, "qemu-tunnel-ok") {
+		t.Fatalf("unexpected qemu tunnel body %q", body)
 	}
 }
 

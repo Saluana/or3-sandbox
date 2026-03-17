@@ -305,6 +305,13 @@ type CreateTunnelSignedURLRequest struct {
 	OneTime    bool   `json:"one_time,omitempty"`
 }
 
+type TunnelAccess struct {
+	RequiresTenantToken bool   `json:"requires_tenant_token,omitempty"`
+	TunnelTokenHeader   string `json:"tunnel_token_header,omitempty"`
+	TunnelTokenQuery    string `json:"tunnel_token_query,omitempty"`
+	ExampleCurl         string `json:"example_curl,omitempty"`
+}
+
 // Tunnel is the HTTP tunnel resource returned by tunnel endpoints.
 type Tunnel struct {
 	ID             string         `json:"id"`
@@ -316,6 +323,7 @@ type Tunnel struct {
 	Visibility     string         `json:"visibility"`
 	Endpoint       string         `json:"endpoint"`
 	AccessToken    string         `json:"access_token,omitempty"`
+	Access         TunnelAccess   `json:"access,omitempty"`
 	AuthSecretHash string         `json:"-"`
 	CreatedAt      time.Time      `json:"created_at"`
 	RevokedAt      *time.Time     `json:"revoked_at,omitempty"`
@@ -368,7 +376,19 @@ type RuntimeHealth struct {
 	CheckedAt                time.Time              `json:"checked_at"`
 	RuntimeSelectionCounts   map[string]int         `json:"runtime_selection_counts,omitempty"`
 	StatusCounts             map[string]int         `json:"status_counts,omitempty"`
+	AgentSessions            *RuntimeAgentSessionsHealth `json:"agent_sessions,omitempty"`
 	Sandboxes                []RuntimeSandboxHealth `json:"sandboxes"`
+}
+
+type RuntimeAgentSessionsHealth struct {
+	SessionsOpened      uint64 `json:"sessions_opened,omitempty"`
+	SessionsReused      uint64 `json:"sessions_reused,omitempty"`
+	SessionsInvalidated uint64 `json:"sessions_invalidated,omitempty"`
+	SessionsClosed      uint64 `json:"sessions_closed,omitempty"`
+	BufferedExecEvents  uint64 `json:"buffered_exec_events,omitempty"`
+	BufferedFileEvents  uint64 `json:"buffered_file_events,omitempty"`
+	DroppedExecEvents   uint64 `json:"dropped_exec_events,omitempty"`
+	DroppedFileEvents   uint64 `json:"dropped_file_events,omitempty"`
 }
 
 // RuntimeInfo is the runtime summary returned by GET /v1/runtime/info.
@@ -377,6 +397,23 @@ type RuntimeInfo struct {
 	Class                    string             `json:"class,omitempty"`
 	DefaultRuntimeSelection  RuntimeSelection   `json:"default_runtime_selection,omitempty"`
 	EnabledRuntimeSelections []RuntimeSelection `json:"enabled_runtime_selections,omitempty"`
+	GuestImage               *GuestImageIdentity `json:"guest_image,omitempty"`
+	GuestImageError          string             `json:"guest_image_error,omitempty"`
+}
+
+type GuestImageIdentity struct {
+	Path                     string             `json:"path,omitempty"`
+	SidecarPath              string             `json:"sidecar_path,omitempty"`
+	ContractVersion          string             `json:"contract_version,omitempty"`
+	BuildVersion             string             `json:"build_version,omitempty"`
+	GitSHA                   string             `json:"git_sha,omitempty"`
+	ImageSHA256              string             `json:"image_sha256,omitempty"`
+	Profile                  GuestProfile       `json:"profile,omitempty"`
+	Capabilities             []string           `json:"capabilities,omitempty"`
+	AllowedFeatures          []string           `json:"allowed_features,omitempty"`
+	ControlMode              GuestControlMode   `json:"control_mode,omitempty"`
+	ControlProtocolVersion   string             `json:"control_protocol_version,omitempty"`
+	WorkspaceContractVersion string             `json:"workspace_contract_version,omitempty"`
 }
 
 // RuntimeSandboxHealth is one sandbox entry inside RuntimeHealth.

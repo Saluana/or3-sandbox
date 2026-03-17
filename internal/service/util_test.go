@@ -54,3 +54,23 @@ func TestResolveWorkspacePathRejectsSymlinkEscape(t *testing.T) {
 		t.Fatalf("expected symlink escape to be rejected")
 	}
 }
+
+func TestCleanWorkspaceRelativePathAllowsNormalRelativePath(t *testing.T) {
+	got, err := cleanWorkspaceRelativePath("src/project.txt")
+	if err != nil {
+		t.Fatalf("clean path: %v", err)
+	}
+	if got != filepath.Join("src", "project.txt") {
+		t.Fatalf("unexpected cleaned path %q", got)
+	}
+}
+
+func TestCleanWorkspaceRelativePathAllowsTopLevelWorkspaceDirectory(t *testing.T) {
+	got, err := cleanWorkspaceRelativePath("workspace/project.txt")
+	if err != nil {
+		t.Fatalf("clean path: %v", err)
+	}
+	if got != filepath.Join("workspace", "project.txt") {
+		t.Fatalf("unexpected cleaned path %q", got)
+	}
+}

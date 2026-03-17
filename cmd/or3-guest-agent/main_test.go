@@ -129,6 +129,51 @@ func TestGuestAgentServeSessionReturnsNilOnEOF(t *testing.T) {
 	}
 }
 
+func TestHandleFileCloseMissingSessionReturnsSuccess(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	session := &guestSession{
+		conn:  serverConn,
+		files: map[string]*guestFileSession{},
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		defer serverConn.Close()
+		errCh <- session.handleFileClose("msg-1", agentproto.FileCloseRequest{SessionID: "missing-session"})
+	}()
+	message, err := agentproto.ReadMessage(clientConn)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("handle file close: %v", err)
+	}
+	if !message.OK || message.Op != agentproto.OpFileClose || message.ID != "msg-1" {
+		t.Fatalf("unexpected file close response %+v", message)
+	}
+}
+
+func TestWorkspacePathAcceptsRelativePaths(t *testing.T) {
+	t.Parallel()
+
+	got, err := workspacePath("src/export.txt")
+	if err != nil {
+		t.Fatalf("workspacePath returned error: %v", err)
+	}
+	if got != "/workspace/src/export.txt" {
+		t.Fatalf("unexpected normalized workspace path %q", got)
+	}
+}
+
+func TestWorkspacePathRejectsEscapes(t *testing.T) {
+	t.Parallel()
+
+	_, err := workspacePath("../escape")
+	if err == nil || !strings.Contains(err.Error(), "path escapes workspace") {
+		t.Fatalf("expected workspace escape rejection, got %v", err)
+	}
+}
+
 func TestRunExecOverridesIdentityEnvironment(t *testing.T) {
 	t.Parallel()
 

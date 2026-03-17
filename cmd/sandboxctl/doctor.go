@@ -46,10 +46,16 @@ type doctorCheck struct {
 type doctorSummary struct {
 	Mode      string        `json:"mode"`
 	CheckedAt time.Time     `json:"checked_at"`
-	Checks    []doctorCheck `json:"checks"`
+	Checks    []doctorCheck `json:"checks,omitempty"`
+	OutputDir string        `json:"output_dir,omitempty"`
+	Artifacts []string      `json:"artifacts,omitempty"`
+	Errors    []doctorCheck `json:"errors,omitempty"`
 }
 
 func runDoctor(args []string) error {
+	if len(args) > 0 && strings.EqualFold(strings.TrimSpace(args[0]), "qemu") {
+		return runQEMUDoctor(args[1:])
+	}
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	productionQEMU := fs.Bool("production-qemu", false, "validate the production QEMU host and image profile posture")
 	jsonOutput := fs.Bool("json", false, "print doctor results as JSON")
@@ -57,7 +63,7 @@ func runDoctor(args []string) error {
 		return err
 	}
 	if !*productionQEMU {
-		return errors.New("usage: sandboxctl doctor --production-qemu [--json]")
+		return errors.New("usage: sandboxctl doctor --production-qemu [--json]\n   or: sandboxctl doctor qemu --sandbox <id> [--output dir] [--daemon-log path]")
 	}
 	summary := runProductionQEMUDoctor()
 	if *jsonOutput {
@@ -81,6 +87,83 @@ func runDoctor(args []string) error {
 		return fmt.Errorf("production qemu doctor found blocking failures")
 	}
 	return nil
+}
+
+func runQEMUDoctor(args []string) error {
+	fs := flag.NewFlagSet("doctor qemu", flag.ContinueOnError)
+	sandboxID := fs.String("sandbox", "", "sandbox id to inspect")
+	outputDir := fs.String("output", "", "bundle output directory")
+	daemonLog := fs.String("daemon-log", "", "optional daemon log file to copy into the bundle")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*sandboxID) == "" {
+		return errors.New("usage: sandboxctl doctor qemu --sandbox <id> [--output dir] [--daemon-log path]")
+	}
+	dir := strings.TrimSpace(*outputDir)
+	if dir == "" {
+		dir = filepath.Join(os.TempDir(), fmt.Sprintf("sandboxctl-doctor-qemu-%s-%d", *sandboxID, time.Now().UTC().Unix()))
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	client := clientConfig{
+		baseURL: env("SANDBOX_API", "http://127.0.0.1:8080"),
+		token:   env("SANDBOX_TOKEN", "dev-token"),
+	}
+	summary := doctorSummary{Mode: "qemu", CheckedAt: time.Now().UTC(), OutputDir: dir}
+	writeArtifact := func(name string, value any) {
+		path := filepath.Join(dir, name)
+		data, err := json.MarshalIndent(value, "", "  ")
+		if err != nil {
+			summary.Errors = append(summary.Errors, doctorCheck{Level: "error", Name: name, Detail: err.Error()})
+			return
+		}
+		if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+			summary.Errors = append(summary.Errors, doctorCheck{Level: "error", Name: name, Detail: err.Error()})
+			return
+		}
+		summary.Artifacts = append(summary.Artifacts, path)
+	}
+	collectJSON := func(name, endpoint string, out any) {
+		if err := doJSON(client, "GET", endpoint, nil, out); err != nil {
+			summary.Errors = append(summary.Errors, doctorCheck{Level: "error", Name: endpoint, Detail: err.Error()})
+			return
+		}
+		writeArtifact(name, out)
+	}
+
+	var info model.RuntimeInfo
+	collectJSON("runtime-info.json", "/v1/runtime/info", &info)
+	var health model.RuntimeHealth
+	collectJSON("runtime-health.json", "/v1/runtime/health", &health)
+	var sandbox model.Sandbox
+	collectJSON("sandbox.json", "/v1/sandboxes/"+*sandboxID, &sandbox)
+	var snapshots []model.Snapshot
+	collectJSON("snapshots.json", "/v1/sandboxes/"+*sandboxID+"/snapshots", &snapshots)
+
+	if info.GuestImage != nil && strings.TrimSpace(info.GuestImage.SidecarPath) != "" {
+		data, err := os.ReadFile(info.GuestImage.SidecarPath)
+		if err != nil {
+			summary.Errors = append(summary.Errors, doctorCheck{Level: "error", Name: "guest-image-contract", Detail: err.Error()})
+		} else if err := os.WriteFile(filepath.Join(dir, "guest-image-contract.json"), data, 0o644); err != nil {
+			summary.Errors = append(summary.Errors, doctorCheck{Level: "error", Name: "guest-image-contract", Detail: err.Error()})
+		} else {
+			summary.Artifacts = append(summary.Artifacts, filepath.Join(dir, "guest-image-contract.json"))
+		}
+	}
+	if strings.TrimSpace(*daemonLog) != "" {
+		data, err := os.ReadFile(*daemonLog)
+		if err != nil {
+			summary.Errors = append(summary.Errors, doctorCheck{Level: "error", Name: "daemon-log", Detail: err.Error()})
+		} else if err := os.WriteFile(filepath.Join(dir, "daemon.log"), data, 0o644); err != nil {
+			summary.Errors = append(summary.Errors, doctorCheck{Level: "error", Name: "daemon-log", Detail: err.Error()})
+		} else {
+			summary.Artifacts = append(summary.Artifacts, filepath.Join(dir, "daemon.log"))
+		}
+	}
+	writeArtifact("summary.json", summary)
+	return printJSON(summary)
 }
 
 func runProductionQEMUDoctor() doctorSummary {

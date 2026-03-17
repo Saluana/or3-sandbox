@@ -253,6 +253,43 @@ func (s *Service) RuntimeBackend() string {
 	return s.cfg.DefaultRuntimeSelection.Backend()
 }
 
+// RuntimeInfo returns the summary exposed by the runtime info endpoint.
+func (s *Service) RuntimeInfo() model.RuntimeInfo {
+	info := model.RuntimeInfo{
+		Backend:                  s.RuntimeBackend(),
+		Class:                    string(s.RuntimeClass()),
+		DefaultRuntimeSelection:  s.DefaultRuntimeSelection(),
+		EnabledRuntimeSelections: s.EnabledRuntimeSelections(),
+	}
+	if s.cfg.DefaultRuntimeSelection != model.RuntimeSelectionQEMUProfessional {
+		return info
+	}
+	imagePath := strings.TrimSpace(s.cfg.QEMUBaseImagePath)
+	if imagePath == "" {
+		return info
+	}
+	contract, err := guestimage.Load(imagePath)
+	if err != nil {
+		info.GuestImageError = err.Error()
+		return info
+	}
+	info.GuestImage = &model.GuestImageIdentity{
+		Path:                     imagePath,
+		SidecarPath:              guestimage.SidecarPath(imagePath),
+		ContractVersion:          contract.ContractVersion,
+		BuildVersion:             contract.BuildVersion,
+		GitSHA:                   contract.GitSHA,
+		ImageSHA256:              contract.ImageSHA256,
+		Profile:                  contract.Profile,
+		Capabilities:             append([]string(nil), contract.Capabilities...),
+		AllowedFeatures:          append([]string(nil), contract.AllowedFeatures...),
+		ControlMode:              contract.Control.Mode,
+		ControlProtocolVersion:   contract.Control.ProtocolVersion,
+		WorkspaceContractVersion: contract.WorkspaceContractVersion,
+	}
+	return info
+}
+
 // RuntimeClass returns the isolation class of the configured default runtime.
 func (s *Service) RuntimeClass() model.RuntimeClass {
 	return s.cfg.RuntimeClass()
@@ -310,6 +347,26 @@ func (s *Service) RuntimeHealth(ctx context.Context, tenantID string) (model.Run
 	}
 	if err != nil {
 		return health, err
+	}
+	type scopedAgentSessionHealthProvider interface {
+		AgentSessionMetricsForSandboxes(sandboxes []model.Sandbox) (model.RuntimeAgentSessionsHealth, bool)
+	}
+	if provider, ok := s.runtime.(scopedAgentSessionHealthProvider); ok {
+		if metrics, supported := provider.AgentSessionMetricsForSandboxes(sandboxes); supported {
+			health.AgentSessions = &metrics
+		}
+	} else {
+		type agentSessionHealthProvider interface {
+			AgentSessionMetrics() model.RuntimeAgentSessionsHealth
+		}
+		if tenantID == "" {
+			if provider, ok := s.runtime.(agentSessionHealthProvider); ok {
+				metrics := provider.AgentSessionMetrics()
+				if metrics != (model.RuntimeAgentSessionsHealth{}) {
+					health.AgentSessions = &metrics
+				}
+			}
+		}
 	}
 	for _, sandbox := range sandboxes {
 		selection := resolvedSandboxRuntimeSelection(sandbox)
@@ -881,17 +938,17 @@ func (s *Service) ExportWorkspaceArchive(ctx context.Context, tenantID, sandboxI
 	}
 	if archiveRuntime, ok := s.runtime.(model.WorkspaceArchiveExporter); ok {
 		archivePath, err := archiveRuntime.ExportWorkspaceArchive(ctx, sandbox, exportPaths, s.workspaceFileTransferMaxBytes)
-		if err != nil {
+		var unsupported model.UnsupportedRuntimeOperationError
+		if err != nil && !errors.As(err, &unsupported) {
 			return "", err
 		}
-		s.recordAudit(ctx, tenantID, sandboxID, "workspace.export", sandboxID, "ok", "workspace archive exported")
-		_ = s.touchSandboxActivity(ctx, sandbox)
-		return archivePath, nil
+		if err == nil {
+			s.recordAudit(ctx, tenantID, sandboxID, "workspace.export", sandboxID, "ok", "workspace archive exported")
+			_ = s.touchSandboxActivity(ctx, sandbox)
+			return archivePath, nil
+		}
 	}
-	if _, fileRuntime := s.runtime.(workspaceFileRuntime); fileRuntime {
-		return "", errors.New("runtime-backed workspace export is unsupported for the active runtime")
-	}
-	if _, binaryRuntime := s.runtime.(workspaceBinaryFileRuntime); binaryRuntime {
+	if resolvedSandboxRuntimeSelection(sandbox).Backend() == "qemu" {
 		return "", errors.New("runtime-backed workspace export is unsupported for the active runtime")
 	}
 	workspaceRoot, err := resolveWorkspacePath(sandbox.WorkspaceRoot, "")
@@ -1208,6 +1265,7 @@ func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, 
 		tunnel.AccessToken = accessToken
 		tunnel.AuthSecretHash = config.HashToken(accessToken)
 	}
+	tunnel = s.decorateTunnelAccess(tunnel)
 	if err := s.reserveTunnelCreate(ctx, tenantID, sandbox, &tunnel, &req); err != nil {
 		return model.Tunnel{}, err
 	}
@@ -1222,7 +1280,37 @@ func (s *Service) CreateTunnel(ctx context.Context, tenantID, sandboxID string, 
 
 // ListTunnels returns the tunnels attached to sandboxID.
 func (s *Service) ListTunnels(ctx context.Context, tenantID, sandboxID string) ([]model.Tunnel, error) {
-	return s.store.ListTunnels(ctx, tenantID, sandboxID)
+	tunnels, err := s.store.ListTunnels(ctx, tenantID, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	for index := range tunnels {
+		tunnels[index] = s.decorateTunnelAccess(tunnels[index])
+	}
+	return tunnels, nil
+}
+
+func (s *Service) decorateTunnelAccess(tunnel model.Tunnel) model.Tunnel {
+	access := model.TunnelAccess{
+		RequiresTenantToken: tunnel.Visibility != "public",
+	}
+	if tunnel.AuthMode == "token" {
+		access.TunnelTokenHeader = "X-Tunnel-Token"
+		access.TunnelTokenQuery = "token"
+	}
+	if strings.TrimSpace(tunnel.Endpoint) != "" {
+		parts := []string{"curl"}
+		if access.RequiresTenantToken {
+			parts = append(parts, "-H", "'Authorization: Bearer <tenant-token>'")
+		}
+		if tunnel.AuthMode == "token" && strings.TrimSpace(tunnel.AccessToken) != "" {
+			parts = append(parts, "-H", fmt.Sprintf("'X-Tunnel-Token: %s'", tunnel.AccessToken))
+		}
+		parts = append(parts, fmt.Sprintf("'%s'", tunnel.Endpoint))
+		access.ExampleCurl = strings.Join(parts, " ")
+	}
+	tunnel.Access = access
+	return tunnel
 }
 
 // RevokeTunnel revokes a previously created tunnel.
